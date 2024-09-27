@@ -8,13 +8,8 @@ import time
 # os.environ['GLOO_SOCKET_IFNAME'] = 'eth2'
 # os.environ['GLOO_SOCKET_IFACE_NAME'] = 'eth2'  # 将 'eth0' 替换为你的网络接口名称
 
-# init_method = f'tcp://{server_ip}:{port}'
-
 
 def main():
-    # server_ip = '192.168.1.112'
-    # server_ip = 'localhost'
-    # server_ip = 'fe80::c597:1cbc:1f91:9817'
     # 初始化分布式环境：通过rank来区分设备
     print('init_method:', init_method)
     dist.init_process_group(backend='gloo', init_method=init_method, world_size=2, rank=1)
@@ -39,10 +34,6 @@ def main():
 
     consumption = end - start
     print(f'{consumption}s for transmission')
-
-
-
-
 
 
 if __name__ == "__main__":

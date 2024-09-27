@@ -6,6 +6,20 @@ import os
 from network_config import *
 import argparse
 
+parser = argparse.ArgumentParser()
+parser.add_argument('-s', '--server', required=False, default=None)
+
+arguments = parser.parse_args()
+provided_ip = arguments.server
+if provided_ip is not None:
+    ipv = ipv4_or_ipv6(provided_ip)
+    if ipv != 4 or ipv != 6:
+        raise Exception('Invalid provided ip')
+    server_ip = provided_ip
+    if ipv == 6:
+        provided_ip = f'[{provided_ip}]'
+    init_method = f'tcp://{provided_ip}:{port}'
+
 
 def get_ip_address():
     # windows!!!
@@ -21,21 +35,21 @@ def get_ip_address():
         return None
 
 
-# server_ip = get_ip_address()
-# server_ip = '127.0.0.1'
-# server_ip = '::1'
+# os.environ['MASTER_ADDR'] = server_ip
+# os.environ['MASTER_PORT'] = str(port)
 # os.environ['GLOO_SOCKET_IFNAME'] = 'eth2'
-# os.environ['GLOO_SOCKET_IFACE_NAME'] = 'eth2'  # 将 'eth0' 替换为你的网络接口名称
+# os.environ['GLOO_SOCKET_IFACE_NAME'] = '以太网 2'  # 将 'eth0' 替换为你的网络接口名称
 
-parser = argparse.ArgumentParser()
-parser.add_argument('-i', '--ip', required=False)
-
-# init_method = f'tcp://{server_ip}:{port}'
-
+# parser = argparse.ArgumentParser()
+# parser.add_argument('-i', '--ip', required=False)
 tensor_shape = (1, 64, 224, 224)
 
 
 def main():
+    # sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    # sock.bind((server_ip, port))
+    # sock.listen()
+
     # 初始化分布式环境
     print('init_method:', init_method)
     dist.init_process_group(backend='gloo', init_method=init_method, world_size=2, rank=server_rank)

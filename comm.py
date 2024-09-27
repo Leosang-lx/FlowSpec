@@ -24,6 +24,7 @@ def list_network_interfaces():
             print(f"  - Address: {addr.address}")
             print(f"  - Netmask: {addr.netmask}")
             print(f"  - Broadcast: {addr.broadcast}")
+# list_network_interfaces()
 
 
 def ping(dest: str, ping_cnt: int, timeout: int):  # '1' means connected, else 0
