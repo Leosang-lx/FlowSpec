@@ -35,10 +35,12 @@ def get_ip_address():
         return None
 
 
+# os.environ['USE_LIBUV'] = 'False'
+# os.environ['USE_IPv6'] = 'False'
 # os.environ['MASTER_ADDR'] = server_ip
 # os.environ['MASTER_PORT'] = str(port)
-# os.environ['GLOO_SOCKET_IFNAME'] = 'eth2'
-# os.environ['GLOO_SOCKET_IFACE_NAME'] = '以太网 2'  # 将 'eth0' 替换为你的网络接口名称
+# Enable when using RaspberryPi
+# os.environ['GLOO_SOCKET_IFNAME'] = 'eth0'
 
 # parser = argparse.ArgumentParser()
 # parser.add_argument('-i', '--ip', required=False)
@@ -52,6 +54,7 @@ def main():
 
     # 初始化分布式环境
     print('init_method:', init_method)
+    store = dist.TCPStore(server_ip, port, )
     dist.init_process_group(backend='gloo', init_method=init_method, world_size=2, rank=server_rank)
     print(dist.is_initialized())
     print(dist.get_rank())

@@ -18,7 +18,7 @@ def top_k_masking(logits, top_k=100):
     return logits_top_k_masked
 
 
-def top_p_sampling(logits, top_p=0.9):
+def top_p_sampling(logits: torch.Tensor, top_p=0.9):
     """
     Use TOP_P sampling to generate token based on input logits
     :param logits: input logits

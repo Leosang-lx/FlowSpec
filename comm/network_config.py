@@ -1,9 +1,9 @@
 import ipaddress
 
-server_ip = '192.168.1.101'
+server_ip = '192.168.1.1'
 # server_ip = 'fe80::1d6b:9eb3:d29b:c7e0'
 # server_ip = 'fe80::c597:1cbc:1f91:9817'
-port = 8848
+port = 23456
 server_rank = 0
 
 

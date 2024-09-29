@@ -1,5 +1,5 @@
 from matplotlib import pyplot as plt
-from functions import estimated_model_params, model, estimated_KV_cache
+from scaling.functions import estimated_model_params, model, estimated_KV_cache
 import seaborn as sns
 import numpy as np
 from GPT2_autoregressive_inference import model_config

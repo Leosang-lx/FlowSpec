@@ -5,6 +5,7 @@ import os
 # from comm import send_data, recv_data
 import time
 
+os.environ['USE_LIBUV'] = 'False'
 # os.environ['GLOO_SOCKET_IFNAME'] = 'eth2'
 # os.environ['GLOO_SOCKET_IFACE_NAME'] = 'eth2'  # 将 'eth0' 替换为你的网络接口名称
 
