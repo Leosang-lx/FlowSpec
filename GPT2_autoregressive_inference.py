@@ -1,8 +1,9 @@
 import time
-
+import torch.nn as nn
 import torch
 from tqdm import tqdm
 from transformers import GPT2LMHeadModel, BertTokenizer, GPT2Config
+from transformers import AutoModel, AutoTokenizer, AutoConfig
 from sampling import apply_sampling
 import os
 
@@ -26,6 +27,14 @@ def check_files_exist(model_directory):
     return all(required_files.values())
 
 
+def load_pretrained_local(model_dir):
+    config = AutoConfig.from_pretrained(model_dir)
+    tokenizer = AutoTokenizer.from_pretrained(model_dir)
+    model = AutoModel.from_pretrained(model_dir)
+
+    return config, tokenizer, model
+
+
 # load pre-trained model, tokenizer and configuration of GPT-2
 model_tag = "uer/gpt2-chinese-cluecorpussmall"
 developer_name, model_name = tuple(model_tag.split('/'))
@@ -38,9 +47,10 @@ if check_files_exist(model_path):
 else:
     print("Some required files are missing.")
 
-
-config = GPT2Config.from_pretrained(model_path)
-model_config = (config.vocab_size, config.n_positions, config.n_layer, config.n_embd, config.n_head, config.n_embd // config.n_head, 4)
+# config = GPT2Config.from_pretrained(model_path)
+config = AutoConfig.from_pretrained(model_path)
+model_config = (
+config.vocab_size, config.n_positions, config.n_layer, config.n_embd, config.n_head, config.n_embd // config.n_head, 4)
 print(config)
 
 # tokenizer = BertTokenizer.from_pretrained(model_tag, cache_dir=cache_path)
@@ -49,9 +59,11 @@ print(config)
 device = 'cpu'
 print(f'Device={device}')
 model = GPT2LMHeadModel.from_pretrained(model_path).to(device)
+# model = AutoModel.from_pretrained(model_path).to(device)
 model.eval()
 
-tokenizer = BertTokenizer.from_pretrained(model_path)
+# tokenizer = BertTokenizer.from_pretrained(model_path)
+tokenizer = AutoTokenizer.from_pretrained(model_path)
 
 
 if __name__ == '__main__':

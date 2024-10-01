@@ -54,7 +54,7 @@ def main():
 
     # 初始化分布式环境
     print('init_method:', init_method)
-    store = dist.TCPStore(server_ip, port, )
+    # store = dist.TCPStore(server_ip, port, )
     dist.init_process_group(backend='gloo', init_method=init_method, world_size=2, rank=server_rank)
     print(dist.is_initialized())
     print(dist.get_rank())

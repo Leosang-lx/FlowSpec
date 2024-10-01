@@ -24,6 +24,8 @@ def list_network_interfaces():
             print(f"  - Address: {addr.address}")
             print(f"  - Netmask: {addr.netmask}")
             print(f"  - Broadcast: {addr.broadcast}")
+
+
 # list_network_interfaces()
 
 
@@ -55,6 +57,20 @@ def accept_connection(server_socket: socket, recv_list: list, stop, timeout=None
             continue
         except Exception as e:
             print(e)
+
+
+def accept_n_connections(server_socket: socket, n: int, timeout=None):
+    recv_conns = []
+    for _ in range(n):
+        try:
+            conn, addr = server_socket.accept()
+            conn.settimeout(timeout)
+            recv_conns.append((conn, addr[0]))  # only ip
+            print(f'Recv connection from {addr}')
+        except socket.timeout:
+            raise Exception(f'Fail to recv {n} connections')
+    assert len(recv_conns) == n
+    return recv_conns
 
 
 def put_recv_data(conn: socket, recv_queue: SimpleQueue):
@@ -174,7 +190,7 @@ def send_tensor(send_socket: socket, data: Tensor, layer_num: int, data_range: t
 async def async_send_tensor(send_socket: socket, data: Tensor, layer_num: int, data_range: tuple[int, int]):
     serialized = pickle.dumps(data)
     data_size = len(serialized)
-    print(f'send output from layer {layer_num} of size {data_size/1024}KB')
+    print(f'send output from layer {layer_num} of size {data_size / 1024}KB')
     header = struct.pack(__format__, data_size, layer_num, *data_range)
     res = send_socket.sendall(header + serialized)
     return res
