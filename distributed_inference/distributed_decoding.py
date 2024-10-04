@@ -7,7 +7,8 @@ import sys
 import torch
 import torch.distributed as dist
 
-from autoregressive_inference import load_local_pretrained_model, model_path
+# from autoregressive_inference import load_local_pretrained_model, model_path
+from autoregressive_inference import *
 from cmd_util import *
 from comm import *
 from dist_comm.network_config import *
@@ -138,11 +139,16 @@ class DecodingWorker:
     def prepare_tp_decoding_recv(self):
         self.split_KV_cache = recv_data(self.client_socket)
 
+    def distributed_MHA_tp(self, new_token):
+        if self.rank == 0:
+            assert isinstance(self.model, GPT2LMHeadModel)
+
+
+
     def TP_decoding(self):
         assert dist.is_initialized()
         if self.rank == SERVER_RANK:
             pass
         else:
             pass
-
 
