@@ -6,6 +6,7 @@ import sys
 
 import torch
 import torch.distributed as dist
+from transformers.models.gpt2.modeling_gpt2 import GPT2Attention
 
 # from autoregressive_inference import load_local_pretrained_model, model_path
 from autoregressive_inference import *
@@ -83,6 +84,17 @@ class DecodingWorker:
         self.config, self.tokenizer, self.model = load_local_pretrained_model(model_path)
         self.model_config = (V, P, N, d_model, h, d_h, r) = (self.config.vocab_size, self.config.n_positions, self.config.n_layer,
                                                           self.config.n_embd, self.config.n_head, self.config.n_embd // self.config.n_head, 4)
+        self.transformer = None
+        self.split_weights = None
+        """
+        weights (split):
+            token embedding, position embedding
+        weights layers (split): *12
+                QKV projection, LayerNorm, MLP layer, LayerNorm
+        lm_head:
+            token embedding or independent weight (d_model, vocab_size)
+        """
+
         # init input and output configuration
         self.batch_size = 1
         self.text = "在一个风和日丽的下午，小镇的街道上人来人往，孩子们在巷口追逐嬉戏。李阿姨拿着刚从市场买回来的菜篮子，步履轻盈地走回家。街边的老槐树下，几位老人正围坐在一起下象棋，不时传来欢声笑语。今天是不是一个好日子？"
@@ -101,7 +113,7 @@ class DecodingWorker:
         self.KV_cache = None
         self.split_KV_cache = None
 
-    def prepare_tp_decoding_send(self):
+    def prepare_cache_tp_send(self):
         """
         The rank_0 worker execute the prefill phase and transmit necessary data across the group
         :param past_key_values: tuple(N) * tuple(2) * tensor(b, seq, d_model)
@@ -136,12 +148,38 @@ class DecodingWorker:
 
     # else:  # accept data from rank_0 device
 
-    def prepare_tp_decoding_recv(self):
+    def prepare_cache_tp_recv(self):
         self.split_KV_cache = recv_data(self.client_socket)
 
+    def prepare_weight_tp(self):
+        self.split_weights
+
+    def broadcast_send(self, data: torch.Tensor):
+        assert self.rank == 0  # 暂时只考虑rank 0设备作为中心处理设备
+        dist.broadcast(data, src=0)
+
+    def broadcast_recv(self, shape):
+        assert self.rank > 0
+        data = torch.zeros(shape)
+        dist.broadcast(data, src=0)
+        return data
+
     def distributed_MHA_tp(self, new_token):
+        """
+        new_token: tensor of input token (batch, 1)
+        """
         if self.rank == 0:
+
             assert isinstance(self.model, GPT2LMHeadModel)
+            # todo: obtain the transformer model from the GPT2LMHeadModel for embedding and hidden states
+            self.transformer = self.model.transformer
+            hidden_states = self.transformer.wte(new_token) + self.transformer.wpe(new_token)
+            for layer in self.transformer.h:
+                assert isinstance(layer, GPT2Attention)
+                w_qkv_proj = layer.c_attn.weight
+                b_qkv_proj = layer.c_attn.bias
+
+
 
 
 
