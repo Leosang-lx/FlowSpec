@@ -51,6 +51,7 @@ for transformer_layer in transformer_layers:
 # no bias
 lm_head_weight = model.lm_head
 
+# extracted model weights
 model_weight = {
     'embedding_weights': (token_embedding_weight, position_embedding_weight),
     'layers_weights': layers_weight,
