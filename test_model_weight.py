@@ -234,4 +234,5 @@ def forward_use_weights(input_ids, model_weights, KV_cache=None, use_cache=True,
 hidden_states = forward_use_weights(test_input, model_weight)
 logits = model.lm_head(hidden_states)
 
+assert logits.shape == output_logits.shape
 print(torch.allclose(logits, output_logits))
