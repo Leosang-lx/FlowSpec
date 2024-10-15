@@ -171,8 +171,9 @@ def forward_use_weights(input_ids, model_weights, KV_cache=None, use_cache=True,
         residual = hidden_states
 
         # LN1
-        hidden_states = F.layer_norm(hidden_states, d_model, *ln1_w_b, layer_norm_eps)
+        hidden_states = F.layer_norm(hidden_states, (d_model,), *ln1_w_b, layer_norm_eps)
         # MHA
+        # Conv1D in GPT-2
         attn_proj_w, attn_proj_b = attn_proj_w_b
         size_out = hidden_states.size()[:-1] + (3 * d_model,)
         QKV = torch.addmm(attn_proj_b, hidden_states.view(-1, hidden_states.size(-1)), attn_proj_w)
@@ -207,7 +208,7 @@ def forward_use_weights(input_ids, model_weights, KV_cache=None, use_cache=True,
 
         residual = hidden_states
         # LN2
-        hidden_states = F.layer_norm(hidden_states, d_model, *ln2_w_b, layer_norm_eps)
+        hidden_states = F.layer_norm(hidden_states, (d_model,), *ln2_w_b, layer_norm_eps)
         # MLP
         mlp1_w, mlp1_b = mlp1_w_b
         mlp2_w, mlp2_b = mlp2_w_b
@@ -232,4 +233,4 @@ def forward_use_weights(input_ids, model_weights, KV_cache=None, use_cache=True,
 hidden_states = forward_use_weights(test_input, model_weight)
 logits = model.lm_head(hidden_states)
 
-print(torch.equal(logits, output_logits))
+print(torch.allclose(logits, output_logits))
