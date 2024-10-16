@@ -15,7 +15,6 @@ def get_transformer_model_weight(transformer_model):
     layers_weight = []
     # KV_cache = []
 
-    # todo: 确保直接通过以下权重inference的结果能够等于直接调用model.forward(*)的结果
     # Temporary for GPT-2
     for transformer_layer in transformer_model.h:
         # Multi-head Attention block
@@ -156,7 +155,7 @@ def MLP_forward_use_weights(hidden_states, MLP_weights):
     # hidden_states = torch.addmm(mlp1_b, hidden_states.view(-1, hidden_states.size(-1)), mlp1_w)
     # hidden_states = hidden_states.view(size_out)
     # activation
-    # todo: activation
+    # 暂时只考虑了GPT-2用的new gelu
     hidden_states = transformers.activations.NewGELUActivation().forward(hidden_states)
     # hidden_states = act(hidden_states)
     # mlp2
