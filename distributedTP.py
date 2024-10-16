@@ -85,9 +85,13 @@ def split_weight_TP(model_weights, heads, split_nums: int | list[int]):
             }
             split_layers_weights[idx_split].append(split_layer_weights)
 
+    return split_layers_weights
+
 
         # LN_weights = layer_weights['LN']
 
 
-split_weights = split_weight_TP(model_weight, h, 2)
+split_weights = split_weight_TP(model_weight, h, 3)
+
+# def tensor_parallelism(split_nums):
 

@@ -1,6 +1,8 @@
 # extract all model weight and test local inference, compare the result to that of model(*)
-
+import torch
 import torch.nn.functional as F
+import transformers.activations
+
 from autoregressive_inference import *
 
 
@@ -68,12 +70,28 @@ def merge_heads(x, h, d_h):
     return x.view(new_shape)
 
 
+# Conv1D in GPT-2, can be replaced by nn.Linear
+def forward_Conv1D_use_weights(x, weights, output_features):
+    size_out = x.size()[:-1] + (output_features,)
+    weight, bias = weights
+    x = torch.addmm(bias, x.view(-1, x.size(-1)), weight)
+    x = x.view(size_out)
+    return x
+
+
 # only self attention
 def attn(Q, K, V, attention_mask=None, head_mask=None):
     attn_weights = torch.matmul(Q, K.transpose(-1, -2))
     # scale
     attn_weights = attn_weights / torch.full([], V.size(-1) ** 0.5, dtype=attn_weights.dtype,
                                              device=attn_weights.device)
+
+    # causal mask: transformers -> models -> gpt2 -> modeling_gpt2.py -> GPT2Attention -> self._attn
+    query_length, key_length = Q.size(-2), K.size(-2)
+    causal_mask = causal_mask_cache[:, :, key_length - query_length: key_length, :key_length]
+    mask_value = torch.finfo(attn_weights.dtype).min
+    mask_value = torch.full([], mask_value, dtype=attn_weights.dtype, device=attn_weights.device)
+    attn_weights = torch.where(causal_mask, attn_weights.to(attn_weights.dtype), mask_value)
 
     if attention_mask is not None:
         attn_weights = attn_weights + attention_mask
@@ -96,9 +114,10 @@ def MHA_forward_use_weights(hidden_states, MHA_weights, layer_cache=None):
     attn_proj_w_b, attn_Wo_w_b = MHA_weights
     # QKV projection
     attn_proj_w, attn_proj_b = attn_proj_w_b
-    size_out = hidden_states.size()[:-1] + (3 * hidden_states.size(-1),)  # d_model = hidden_states.size(-1)
-    QKV = torch.addmm(attn_proj_b, hidden_states.view(-1, hidden_states.size(-1)), attn_proj_w)
-    QKV = QKV.view(size_out)
+    QKV = forward_Conv1D_use_weights(hidden_states, attn_proj_w_b, 3 * hidden_states.size(-1))
+    # size_out = hidden_states.size()[:-1] + (3 * hidden_states.size(-1),)  # d_model = hidden_states.size(-1)
+    # QKV = torch.addmm(attn_proj_b, hidden_states.view(-1, hidden_states.size(-1)), attn_proj_w)
+    # QKV = QKV.view(size_out)
 
     Q, K, V = QKV.split(d_model, dim=2)
     Q = split_heads(Q, h, d_h)
@@ -118,9 +137,10 @@ def MHA_forward_use_weights(hidden_states, MHA_weights, layer_cache=None):
     attn_output = merge_heads(attn_output, h, d_h)
     # Wo
     attn_Wo_w, attn_Wo_b = attn_Wo_w_b
-    size_out = hidden_states.size()[:-1] + (d_model,)
-    attn_output = torch.addmm(attn_Wo_b, attn_output.view(-1, attn_output.size(-1)), attn_Wo_w)
-    attn_output = attn_output.view(size_out)
+    attn_output = forward_Conv1D_use_weights(attn_output, attn_Wo_w_b, d_model)
+    # size_out = hidden_states.size()[:-1] + (d_model,)
+    # attn_output = torch.addmm(attn_Wo_b, attn_output.view(-1, attn_output.size(-1)), attn_Wo_w)
+    # attn_output = attn_output.view(size_out)
     attn_output = F.dropout(attn_output, dropout_prob, False, False)
 
     return attn_output, layer_cache_present
@@ -131,17 +151,45 @@ def MLP_forward_use_weights(hidden_states, MLP_weights):
     mlp1_w, mlp1_b = mlp1_w_b
     mlp2_w, mlp2_b = mlp2_w_b
     # mlp1
-    size_out = hidden_states.size()[:-1] + (rate * d_model,)
-    hidden_states = torch.addmm(mlp1_b, hidden_states.view(-1, hidden_states.size(-1)), mlp1_w)
-    hidden_states = hidden_states.view(size_out)
+    hidden_states = forward_Conv1D_use_weights(hidden_states, mlp1_w_b, rate * d_model)
+    # size_out = hidden_states.size()[:-1] + (rate * d_model,)
+    # hidden_states = torch.addmm(mlp1_b, hidden_states.view(-1, hidden_states.size(-1)), mlp1_w)
+    # hidden_states = hidden_states.view(size_out)
     # activation
+    # todo: activation
+    hidden_states = transformers.activations.NewGELUActivation().forward(hidden_states)
     # hidden_states = act(hidden_states)
     # mlp2
-    size_out = hidden_states.size()[:-1] + (d_model,)
-    hidden_states = torch.addmm(mlp2_b, hidden_states.view(-1, hidden_states.size(-1)), mlp2_w)
-    hidden_states = hidden_states.view(size_out)
+    hidden_states = forward_Conv1D_use_weights(hidden_states, mlp2_w_b, d_model)
+    # size_out = hidden_states.size()[:-1] + (d_model,)
+    # hidden_states = torch.addmm(mlp2_b, hidden_states.view(-1, hidden_states.size(-1)), mlp2_w)
+    # hidden_states = hidden_states.view(size_out)
     # dropout
     hidden_states = F.dropout(hidden_states, dropout_prob, False, False)
+
+    return hidden_states
+
+
+def forward_layer_use_weights(hidden_states, layer_weights, layer_cache=None):
+    attn_proj_w_b, attn_Wo_w_b = layer_weights['MHA']
+    mlp1_w_b, mlp2_w_b = layer_weights['MLP']
+    ln1_w_b, ln2_w_b = layer_weights['LN']
+
+    residual = hidden_states
+    # LN1
+    hidden_states = F.layer_norm(hidden_states, (d_model,), *ln1_w_b, layer_norm_eps)
+    # MHA
+    attn_output, layer_cache_present = MHA_forward_use_weights(hidden_states, (attn_proj_w_b, attn_Wo_w_b),
+                                                               layer_cache)
+    # residual connection
+    hidden_states = residual + attn_output
+
+    residual = hidden_states
+    # LN2
+    hidden_states = F.layer_norm(hidden_states, (d_model,), *ln2_w_b, layer_norm_eps)
+    # MLP
+    hidden_states = MLP_forward_use_weights(hidden_states, (mlp1_w_b, mlp2_w_b))
+    hidden_states = residual + hidden_states
 
     return hidden_states
 
@@ -164,76 +212,39 @@ def forward_use_weights(input_ids, model_weights, KV_cache=None, device='cpu'):
     hidden_states = token_embedding + position_embedding
 
     for layer_weight, layer_cache in zip(layers_weight, KV_cache):
-        attn_proj_w_b, attn_Wo_w_b = layer_weight['MHA']
-        mlp1_w_b, mlp2_w_b = layer_weight['MLP']
-        ln1_w_b, ln2_w_b = layer_weight['LN']
-
-        residual = hidden_states
-        # LN1
-        hidden_states = F.layer_norm(hidden_states, (d_model,), *ln1_w_b, layer_norm_eps)
-        # MHA
-        attn_output, layer_cache_present = MHA_forward_use_weights(hidden_states, (attn_proj_w_b, attn_Wo_w_b),
-                                                                   layer_cache)
-        # # Conv1D in GPT-2
-        # attn_proj_w, attn_proj_b = attn_proj_w_b
-        # size_out = hidden_states.size()[:-1] + (3 * d_model,)
-        # QKV = torch.addmm(attn_proj_b, hidden_states.view(-1, hidden_states.size(-1)), attn_proj_w)
-        # QKV = QKV.view(size_out)
+        hidden_states = forward_layer_use_weights(hidden_states, layer_weight, layer_cache)
+        # attn_proj_w_b, attn_Wo_w_b = layer_weight['MHA']
+        # mlp1_w_b, mlp2_w_b = layer_weight['MLP']
+        # ln1_w_b, ln2_w_b = layer_weight['LN']
         #
-        # Q, K, V = QKV.split(d_model, dim=2)
-        # Q = split_heads(Q, h, d_h)
-        # K = split_heads(K, h, d_h)
-        # V = split_heads(V, h, d_h)
+        # residual = hidden_states
+        # # LN1
+        # hidden_states = F.layer_norm(hidden_states, (d_model,), *ln1_w_b, layer_norm_eps)
+        # # MHA
+        # attn_output, layer_cache_present = MHA_forward_use_weights(hidden_states, (attn_proj_w_b, attn_Wo_w_b),
+        #                                                            layer_cache)
         #
-        # if layer_cache is not None:
-        #     K_cache, V_cache = layer_cache
-        #     K = torch.cat((K_cache, K), dim=2)
-        #     V = torch.cat((V, V_cache), dim=2)
+        # # residual connection
+        # hidden_states = residual + attn_output
         #
-        # KV_cache_present = (K, V) if use_cache else None
+        # residual = hidden_states
+        # # LN2
+        # hidden_states = F.layer_norm(hidden_states, (d_model,), *ln2_w_b, layer_norm_eps)
+        # # MLP
+        # hidden_states = MLP_forward_use_weights(hidden_states, (mlp1_w_b, mlp2_w_b))
         #
-        # attn_output, attn_weights = attn(Q, K, V)
-        #
-        # attn_output = merge_heads(attn_output, h, d_h)
-        #
-        # # Wo
-        # attn_Wo_w, attn_Wo_b = attn_Wo_w_b
-        # size_out = hidden_states.size()[:-1] + (d_model,)
-        # attn_output = torch.addmm(attn_Wo_b, attn_output.view(-1, attn_output.size(-1)), attn_Wo_w)
-        # attn_output = attn_output.view(size_out)
-        # attn_output = F.dropout(attn_output, dropout_prob, False, False)
-
-        # residual connection
-        hidden_states = residual + attn_output
-
-        residual = hidden_states
-        # LN2
-        hidden_states = F.layer_norm(hidden_states, (d_model,), *ln2_w_b, layer_norm_eps)
-        # MLP
-        hidden_states = MLP_forward_use_weights(hidden_states, (mlp1_w_b, mlp2_w_b))
-        # mlp1_w, mlp1_b = mlp1_w_b
-        # mlp2_w, mlp2_b = mlp2_w_b
-        # # mlp1
-        # size_out = hidden_states.size()[:-1] + (rate * d_model,)
-        # hidden_states = torch.addmm(mlp1_b, hidden_states.view(-1, hidden_states.size(-1)), mlp1_w)
-        # hidden_states = hidden_states.view(size_out)
-        # # activation
-        # # hidden_states = act(hidden_states)
-        # # mlp2
-        # size_out = hidden_states.size()[:-1] + (d_model,)
-        # hidden_states = torch.addmm(mlp2_b, hidden_states.view(-1, hidden_states.size(-1)), mlp2_w)
-        # hidden_states = hidden_states.view(size_out)
-        # # dropout
-        # hidden_states = F.dropout(hidden_states, dropout_prob, False, False)
-        # residual connection
-        hidden_states = residual + hidden_states
+        # # residual connection
+        # hidden_states = residual + hidden_states
+    hidden_states = transformer_model.ln_f(hidden_states)
 
     return hidden_states
+
 
 if __name__ == '__main__':
     config, tokenizer, model = load_local_pretrained_model(model_path)
     model.eval()
     print(f'model.training={model.training}')
+    torch.manual_seed(100)
 
     transformer_model = model.transformer
 
@@ -250,11 +261,35 @@ if __name__ == '__main__':
     # dropout_prob = config.resid_pdrop
     dropout_prob = 0
 
+    # causal mask for attn
+    causal_mask_cache = torch.tril(torch.ones((max_p, max_p), dtype=torch.bool)).view(1, 1, max_p, max_p)
+
+    casual_input = torch.randn(1, 100, d_model)
+
+    # # test LN: pass
+    # ln1_1 = transformer_model.h[0].ln_1
+    # output = ln1_1(casual_input)
+    # ln1_1_weights = model_weight['layers_weights'][0]['LN'][0]
+    # output2 = F.layer_norm(casual_input, (d_model,), *ln1_1_weights, eps=layer_norm_eps)
+    # print(torch.equal(output, output2))
+
+    # test attn: pass
+    # attn1 = transformer_model.h[0].attn
+    # output = attn1(casual_input)[0]
+    # attn1_weights = model_weight['layers_weights'][0]['MHA']
+    # output2 = MHA_forward_use_weights(casual_input, attn1_weights)[0]
+    # print(torch.allclose(output, output2))
+
+    # test layer input: pass
+    first_layer = transformer_model.h[0]
+    first_layer_output = first_layer(casual_input)[0]
+    first_layer_weight = model_weight['layers_weights'][0]
+    my_first_layer_output = forward_layer_use_weights(casual_input, first_layer_weight)
+    print(torch.equal(first_layer_output, my_first_layer_output))
+
     text = "在一个风和日丽的下午，小镇的街道上人来人往，孩子们在巷口追逐嬉戏。李阿姨拿着刚从市场买回来的菜篮子，步履轻盈地走回家。街边的老槐树下，几位老人正围坐在一起下象棋，不时传来欢声笑语。今天是不是一个好日子？"
     # try inference with weights only
     test_input = torch.LongTensor([tokenizer.convert_tokens_to_ids(list(text))])  # .to(device)
-
-    torch.random.manual_seed(100)
 
     # target_output
     with torch.no_grad():
