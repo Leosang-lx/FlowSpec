@@ -147,9 +147,8 @@ def MHA_forward_use_weights(hidden_states, MHA_weights, transformer_config, laye
         # update layer_cache
         K_cache, V_cache = layer_cache
         K = torch.cat((K_cache, K), dim=2)
-        V = torch.cat((V, V_cache), dim=2)
-
-    layer_cache_present = (K, V) if layer_cache else None
+        V = torch.cat((V_cache, V), dim=2)
+    layer_cache_present = (K, V)
 
     attn_output, attn_weights = attn(Q, K, V)
 
@@ -202,7 +201,7 @@ def layer_forward_use_weights(hidden_states, layer_weights, transformer_config, 
     hidden_states = MLP_forward_use_weights(hidden_states, (mlp1_w_b, mlp2_w_b), transformer_config)
     hidden_states = residual + hidden_states
 
-    return hidden_states
+    return hidden_states, layer_cache_present
 
 
 # output use model weights
@@ -215,7 +214,7 @@ def model_forward_use_weights(input_ids, model_weights, transformer_config, KV_c
     token_embedding = transformer_model.wte(input_ids)
     if KV_cache is None:
         past_length = 0
-        KV_cache = tuple([None] * n_layer)
+        KV_cache = [None] * n_layer
     else:
         past_length = KV_cache[0][0].size(-2)
     position_ids = torch.arange(past_length, input_ids.shape[-1] + past_length, dtype=torch.long, device=device)
@@ -223,12 +222,14 @@ def model_forward_use_weights(input_ids, model_weights, transformer_config, KV_c
     position_embedding = transformer_model.wpe(position_ids)
     hidden_states = token_embedding + position_embedding
 
-    for layer_weight, layer_cache in zip(layers_weight, KV_cache):
-        hidden_states = layer_forward_use_weights(hidden_states, layer_weight, transformer_config, layer_cache)
+    for layer_idx, layer_weight_cache in enumerate(zip(layers_weight, KV_cache)):
+        layer_weight, layer_cache = layer_weight_cache
+        hidden_states, layer_cache_present = layer_forward_use_weights(hidden_states, layer_weight, transformer_config, layer_cache)
+        KV_cache[layer_idx] = layer_cache_present
 
     hidden_states = transformer_model.ln_f(hidden_states)  # model finally has a LayerNorm
 
-    return hidden_states
+    return hidden_states, KV_cache
 
 
 if __name__ == '__main__':
@@ -296,7 +297,7 @@ if __name__ == '__main__':
     with torch.no_grad():
         output_logits = model(test_input).logits
 
-    hidden_states = model_forward_use_weights(test_input, model_weight, model_config)
+    hidden_states, _ = model_forward_use_weights(test_input, model_weight, model_config)
     logits = model.lm_head(hidden_states)
 
     assert logits.shape == output_logits.shape

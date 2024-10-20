@@ -121,7 +121,7 @@ def decode(model: nn.Module, input_ids: torch.Tensor, max_length, use_cache=True
     return generated_text
 
 
-def autoregressive_inference(model: nn.Module, input_text: str, use_cache=True, do_sample=False, **kwargs):
+def autoregressive_inference(model: nn.Module, input_text: str, max_length, use_cache=True, do_sample=False, **kwargs):
     print(input_text)
     input_ids = torch.LongTensor([tokenizer.convert_tokens_to_ids(list(input_text))]).to(device)
 
@@ -131,7 +131,7 @@ def autoregressive_inference(model: nn.Module, input_text: str, use_cache=True, 
     # else:
     input_ids = torch.concat((input_ids, first_token), dim=-1)
 
-    generated_text = decode(model, input_ids, use_cache=use_cache, past_key_values=past_key_values, do_sample=do_sample)
+    generated_text = decode(model, input_ids, max_length, use_cache=use_cache, past_key_values=past_key_values, do_sample=do_sample)
     print(generated_text)
 
 
@@ -192,10 +192,10 @@ if __name__ == '__main__':
     # KV-cache for the inference request
     past_key_values = None
     use_cache = True
-    do_sample = False
+    do_sample = True
     top_k = 20
     top_p = 0.6
     print(f'use_kv_cache={use_cache}')
     print(f'do_sample={do_sample}')
 
-    autoregressive_inference(model, text, use_cache, do_sample)
+    autoregressive_inference(model, text, max_length, use_cache, do_sample)

@@ -81,7 +81,7 @@ if __name__ == '__main__':
     # KV-cache for the inference request
     past_key_values = None
     use_cache = True
-    do_sample = False
+    do_sample = True
     top_k = 20
     top_p = 0.6
     print(f'use_kv_cache={use_cache}')

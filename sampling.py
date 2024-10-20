@@ -66,7 +66,7 @@ def apply_sampling(logits: torch.Tensor, top_k=None, top_p=None, temperature=1.0
         sampled_tokens = top_p_sampling(logits, top_p)
     else:
         probs = F.softmax(logits, dim=-1)
-        sampled_tokens = torch.multinomial(probs, num_samples=1).unsqueeze(-1)
+        sampled_tokens = torch.multinomial(probs, num_samples=1)
 
     return sampled_tokens
 

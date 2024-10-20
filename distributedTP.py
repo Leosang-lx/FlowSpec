@@ -1,3 +1,5 @@
+import torch
+
 from autoregressive_inference import *
 from test_model_weight import *
 
@@ -59,7 +61,8 @@ def split_weight_TP(model_weights, heads, split_nums: int | list[int]):
 
         # split mlp1 weights
         mlp1_w, mlp1_b = mlp1_wb
-        split_lens = [sen * rate for sen in split_embedding_num]  # todo: may need another split setting, share the attn split setting first
+        split_lens = [sen * rate for sen in
+                      split_embedding_num]  # todo: may need another split setting, share the attn split setting first
         split_mlp1_ws = mlp1_w.split(split_lens, dim=-1)
         split_mlp1_bs = mlp1_b.split(split_lens, dim=-1)
         split_mlp1_wb = tuple(zip(split_mlp1_ws, split_mlp1_bs))
@@ -82,12 +85,12 @@ def split_weight_TP(model_weights, heads, split_nums: int | list[int]):
 
 
 # test TP local
-def tp_local(input_ids, split_nums: int | list[int], split_weights_tp, config, KV_cache=None):
+def tp_local(input_ids, split_nums: int | list[int], split_weights_tp, config, distributed_cache=None, use_cache=True):
     """
     :param input_ids:
     :param split_nums: int -> number of partitions; list[int] -> number of heads in each partition
     :param split_weights_tp:
-    :param KV_cache:
+    :param KV_cache: split KVCache on heads
     :return:
     """
     if isinstance(split_nums, int):
@@ -100,40 +103,52 @@ def tp_local(input_ids, split_nums: int | list[int], split_weights_tp, config, K
 
     # centralize{
     token_embedding = transformer_model.wte(input_ids)
-    if KV_cache is None:
+    if distributed_cache is None:
         past_length = 0
-        KV_cache = tuple([[None] * n_layer] * split_num)  # distributed KVCache for TP: KV_cache[device_num][layer_idx]
+        distributed_cache = [[None] * n_layer] * split_num  # distributed KVCache for TP: KV_cache[device_num][layer_idx]
     else:
-        past_length = KV_cache[0][0].size(-2)
-    position_ids = torch.arange(past_length, input_ids.shape[-1] + past_length, dtype=torch.long, device=input_ids.device)
+        past_length = distributed_cache[0][0][0].size(-2)
+    if use_cache:
+        cache_present = [()] * split_cnt
+
+    position_ids = torch.arange(past_length, input_ids.shape[-1] + past_length, dtype=torch.long,
+                                device=input_ids.device)
     position_ids = position_ids.unsqueeze(0)
     position_embedding = transformer_model.wpe(position_ids)
     hidden_states = token_embedding + position_embedding
     # }
     # prepare split weights
-    # 先写没cache的
+
     layers_weights = model_weight['layers_weights']
     for layer_idx in range(n_layer):
-        original_layer = transformer_model.h[layer_idx]
-        correct_layer_output = original_layer(hidden_states)[0]
+        # check correctness of output by layer
+        # original_layer = transformer_model.h[layer_idx]
+        # correct_layer_output = original_layer(hidden_states)[0]
 
         layer_weights = layers_weights[layer_idx]
-        split_weights_layer = [split_weights_device[layer_idx]  for split_weights_device in split_weights_tp] # 获得这层layer_idx所有的split_weights
         ln1_w_b, ln2_w_b = layer_weights['LN']
+
+        split_weights_layer = [split_weights_device[layer_idx] for split_weights_device in
+                               split_weights_tp]  # 获得这层layer_idx所有的split_weights
+        split_layer_cache = [split_cache_device[layer_idx] for split_cache_device in distributed_cache]
 
         residual = hidden_states
         # LN1
         hidden_states = F.layer_norm(hidden_states, (d_model,), *ln1_w_b, config.ln_eps)
-        MHA_tp_results = []
+        MHA_tp_outputs = []
+        if use_cache:
+            layer_cache_present = ()
         # MHA
-        for split_weight_layer in split_weights_layer:
+        for device_idx, (split_weight_layer, split_cache) in enumerate(zip(split_weights_layer, split_layer_cache)):
             split_MHA_weight = split_weight_layer['MHA']
             # split_QKV_proj, split_Wo_proj = split_MHA_weight
-            split_MHA_result, layer_cache = MHA_forward_use_weights(hidden_states, split_MHA_weight, config)
-            MHA_tp_results.append(split_MHA_result)
+            split_MHA_output, layer_cache = MHA_forward_use_weights(hidden_states, split_MHA_weight, config, split_cache)
+            MHA_tp_outputs.append(split_MHA_output)
+            if use_cache:
+                cache_present[device_idx] = cache_present[device_idx] + (layer_cache,)
 
         # AllReduce
-        MHA_output = sum(MHA_tp_results)
+        MHA_output = sum(MHA_tp_outputs)
         # residual connection
         hidden_states = residual + MHA_output
 
@@ -153,11 +168,12 @@ def tp_local(input_ids, split_nums: int | list[int], split_weights_tp, config, K
         hidden_states = residual + MLP_output
 
         # when atol=1e-7, allclose() is False
-        print(f'layer {layer_idx}', torch.allclose(hidden_states, correct_layer_output, atol=1e-6))
+        # print(f'layer {layer_idx}', torch.allclose(hidden_states, correct_layer_output, atol=1e-6))
 
     hidden_states = transformer_model.ln_f(hidden_states)
 
-    return hidden_states
+    return hidden_states, cache_present
+
 
 if __name__ == '__main__':
     # split model weight for tensor parallelism
@@ -191,21 +207,43 @@ if __name__ == '__main__':
     text = "在一个风和日丽的下午，小镇的街道上人来人往，孩子们在巷口追逐嬉戏。李阿姨拿着刚从市场买回来的菜篮子，步履轻盈地走回家。街边的老槐树下，几位老人正围坐在一起下象棋，不时传来欢声笑语。今天是不是一个好日子？"
     input_ids = torch.LongTensor([tokenizer.convert_tokens_to_ids(list(text))])  # .to(device)
 
+    # prefill{
     split_num = 3
     split_weights = split_weight_TP(model_weight, h, split_num)
-    output_tp = tp_local(input_ids, split_num, split_weights, model_config)
+    output_tp, KV_cache_tp = tp_local(input_ids, split_num, split_weights, model_config, None)
     # hidden_states = transformer_model.ln_f(output_tp)
     logits_tp = model.lm_head(output_tp)
+
     from sampling import apply_sampling
-    next_token = apply_sampling(logits_tp[:, -1, :])
-    next_word = tokenizer.convert_ids_to_tokens(next_token)
+    next_tokens = apply_sampling(logits_tp[:, -1, :])
+    next_word = tokenizer.convert_ids_to_tokens(next_tokens)
     print(next_word)
+    # }
 
-    output = transformer_model(input_ids).last_hidden_state
+    # decoding{
+    input_ids = torch.concat([input_ids, next_tokens], dim=-1)
+    output_tp, KV_cache_tp = tp_local(input_ids, split_num, split_weights, model_config, KV_cache_tp)
+    logits_tp = model.lm_head(output_tp)
 
-    print(torch.allclose(output, output_tp, ))
+    from sampling import apply_sampling
+    next_tokens = apply_sampling(logits_tp[:, -1, :])
+    next_word = tokenizer.convert_ids_to_tokens(next_tokens)
+    print(next_word)
+    # }
 
-
-
+    # output = transformer_model(input_ids)
+    # KV_cache = output.past_key_values
+    #
+    # print(torch.allclose(output.last_hidden_state, output_tp, atol=1e-5))
+    #
+    # KV_cache_tp = list(zip(*KV_cache_tp))
+    # for i, layer_cache_tp in enumerate(KV_cache_tp):
+    #     K_cache_layer = torch.concat([split_layer_cache[0] for split_layer_cache in layer_cache_tp], dim=1)
+    #     V_cache_layer = torch.concat([split_layer_cache[1] for split_layer_cache in layer_cache_tp], dim=1)
+    #     KV_cache_tp[i] = (K_cache_layer, V_cache_layer)
+    #
+    #     K_cache_correct, V_cache_correct = KV_cache[i]
+    #
+    #     print(f'Cache of layer {i}:', torch.allclose(K_cache_layer, K_cache_correct, atol=1e-5), torch.allclose(K_cache_layer, K_cache_correct, atol=1e-5))
 
 
