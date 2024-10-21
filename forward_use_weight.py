@@ -44,6 +44,8 @@ def get_transformer_model_weight(transformer_model):
         }
         layers_weight.append(layer_weight)
 
+    ln_f_weight = transformer_model.ln_f.weight, transformer_model.ln_f.bias
+
     # no bias
     # lm_head_weight = model.lm_head
 
@@ -51,6 +53,7 @@ def get_transformer_model_weight(transformer_model):
     model_weight = {
         'embedding_weights': (token_embedding_weight, position_embedding_weight),
         'layers_weights': layers_weight,
+        'ln_f_weights': ln_f_weight
         # 'lm_head_weights': lm_head_weight
     }
 
@@ -271,14 +274,14 @@ if __name__ == '__main__':
     # ln1_1 = transformer_model.h[0].ln_1
     # output = ln1_1(casual_input)
     # ln1_1_weights = model_weight['layers_weights'][0]['LN'][0]
-    # output2 = F.layer_norm(casual_input, (d_model,), *ln1_1_weights, eps=model_config.ln_eps)
+    # output2 = F.layer_norm(casual_input, (d_model,), *ln1_1_weights, eps=config.ln_eps)
     # print('Test LayerNorm:', torch.equal(output, output2))
 
     # test attn: pass
     # attn1 = transformer_model.h[0].attn
     # output = attn1(casual_input)[0]
     # attn1_weights = model_weight['layers_weights'][0]['MHA']
-    # output2 = MHA_forward_use_weights(casual_input, attn1_weights, model_config)[0]
+    # output2 = MHA_forward_use_weights(casual_input, attn1_weights, config)[0]
     # print('Test MHA:', torch.allclose(output, output2))
 
     # test layer input: pass

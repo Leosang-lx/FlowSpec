@@ -44,6 +44,13 @@ data_header_format = 'I'
 data_header_size = struct.calcsize(data_header_format)
 
 
+def gen_bytes(obj):
+    data = pickle.dumps(obj)
+    data_size = len(data)
+    header = struct.pack(data_header_format, data_size)
+    return header + data
+
+
 def accept_connection(server_socket: socket, recv_list: list, stop, timeout=None):
     while True:
         if stop():

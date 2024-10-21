@@ -1,13 +1,18 @@
 import ipaddress
 
-SERVER_IP = '192.168.1.1'
+MAIN_WORKER_IP = '192.168.1.101'
+# MAIN_WORKER_IP = '::1'
+MASTER_IP = '192.168.1.150'
 INTERFACE = 'eth0'
 SUBNET = '192.168.1.1'
 # server_ip = 'fe80::1d6b:9eb3:d29b:c7e0'
 # server_ip = 'fe80::c597:1cbc:1f91:9817'
+master_port = 9999
 port_tcp = 8848
 port_torch = 23456
 SERVER_RANK = 0
+
+DEFAULT_SIZE = 2
 
 
 def ipv4_or_ipv6(ip):

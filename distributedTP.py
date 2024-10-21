@@ -1,10 +1,10 @@
 import torch
 
 from autoregressive_inference import *
-from test_model_weight import *
+from forward_use_weight import *
 
 
-def split_weight_TP(model_weights, heads, split_nums: int | list[int]):
+def split_weight_TP(model_weights, heads, split_nums: int | list[int], config):
     """
     split weights for TP, only has the weights in **layers**
     :param model_weights:
@@ -34,23 +34,27 @@ def split_weight_TP(model_weights, heads, split_nums: int | list[int]):
         attn_proj_w_b, attn_Wo_w_b = MHA_weights
         attn_proj_w, attn_proj_b = attn_proj_w_b
 
-        split_embedding_num = [sn * d_h for sn in split_nums]
+        split_embedding_num = [sn * config.d_h for sn in split_nums]
 
         # split QKV projection weights todo: detach() and clone() for torch.tensor
         split_QKV_proj = [[] for _ in range(split_cnt)]
         # split into projection of Q, K, V
-        attn_proj_w_QKV = attn_proj_w.split(d_model, dim=-1)
-        attn_proj_b_QKV = attn_proj_b.split(d_model, dim=-1)
+        attn_proj_w_QKV = attn_proj_w.split(config.d_model, dim=-1)
+        attn_proj_b_QKV = attn_proj_b.split(config.d_model, dim=-1)
 
         for attn_proj_w_, attn_proj_b_ in zip(attn_proj_w_QKV, attn_proj_b_QKV):  # Q_proj, K_proj, V_proj
             split_attn_proj_ws_ = attn_proj_w_.split(split_embedding_num, dim=-1)
+            split_attn_proj_ws_ = [partition.clone() for partition in split_attn_proj_ws_]  # clone()
             split_attn_proj_bs_ = attn_proj_b_.split(split_embedding_num, dim=-1)
+            split_attn_proj_bs_ = [partition.clone() for partition in split_attn_proj_bs_]  # clone()
+
             for i, split_attn_proj_wb_ in enumerate(zip(split_attn_proj_ws_, split_attn_proj_bs_)):  # split_cnt
                 split_QKV_proj[i].append(split_attn_proj_wb_)
 
         # split multi-head projection weights Wo
         attn_Wo_w, attn_Wo_b = attn_Wo_w_b
         split_attn_Wo_ws = attn_Wo_w.split(split_embedding_num, dim=0)
+        split_attn_Wo_ws = [partition for partition in split_attn_Wo_ws]  # clone()
         # split_attn_Wo_bs = attn_Wo_b.split(split_embedding_num, dim=-2)
 
         split_Wo_proj = tuple(zip(split_attn_Wo_ws, (attn_Wo_b,) + (None,) * (split_cnt - 1)))
@@ -61,15 +65,18 @@ def split_weight_TP(model_weights, heads, split_nums: int | list[int]):
 
         # split mlp1 weights
         mlp1_w, mlp1_b = mlp1_wb
-        split_lens = [sen * rate for sen in
+        split_lens = [sen * config.rate for sen in
                       split_embedding_num]  # todo: may need another split setting, share the attn split setting first
         split_mlp1_ws = mlp1_w.split(split_lens, dim=-1)
+        split_mlp1_ws = [partition.clone() for partition in split_mlp1_ws]  # clone()
         split_mlp1_bs = mlp1_b.split(split_lens, dim=-1)
+        split_mlp1_bs = [partition.clone() for partition in split_mlp1_bs]  # clone()
         split_mlp1_wb = tuple(zip(split_mlp1_ws, split_mlp1_bs))
 
         # split_mlp2 weights
         mlp2_w, mlp2_b = mlp2_wb
         split_mlp2_ws = mlp2_w.split(split_lens, dim=0)
+        split_mlp2_ws = [partition.clone() for partition in split_mlp2_ws]  # clone()
         # mlp2_b is applied for once after the results of ReduceSum, which is applied by only one partition
         split_mlp2_bs = (mlp2_b,) + (None,) * (split_cnt - 1)
         split_mlp2_wb = tuple(zip(split_mlp2_ws, split_mlp2_bs))
@@ -220,30 +227,30 @@ if __name__ == '__main__':
     print(next_word)
     # }
 
-    # decoding{
-    input_ids = torch.concat([input_ids, next_tokens], dim=-1)
-    output_tp, KV_cache_tp = tp_local(input_ids, split_num, split_weights, model_config, KV_cache_tp)
-    logits_tp = model.lm_head(output_tp)
+    # # decoding{
+    # input_ids = torch.concat([input_ids, next_tokens], dim=-1)
+    # output_tp, KV_cache_tp = tp_local(input_ids, split_num, split_weights, config, KV_cache_tp)
+    # logits_tp = model.lm_head(output_tp)
+    #
+    # from sampling import apply_sampling
+    # next_tokens = apply_sampling(logits_tp[:, -1, :])
+    # next_word = tokenizer.convert_ids_to_tokens(next_tokens)
+    # print(next_word)
+    # # }
 
-    from sampling import apply_sampling
-    next_tokens = apply_sampling(logits_tp[:, -1, :])
-    next_word = tokenizer.convert_ids_to_tokens(next_tokens)
-    print(next_word)
-    # }
+    output = transformer_model(input_ids)
+    KV_cache = output.past_key_values
 
-    # output = transformer_model(input_ids)
-    # KV_cache = output.past_key_values
-    #
-    # print(torch.allclose(output.last_hidden_state, output_tp, atol=1e-5))
-    #
-    # KV_cache_tp = list(zip(*KV_cache_tp))
-    # for i, layer_cache_tp in enumerate(KV_cache_tp):
-    #     K_cache_layer = torch.concat([split_layer_cache[0] for split_layer_cache in layer_cache_tp], dim=1)
-    #     V_cache_layer = torch.concat([split_layer_cache[1] for split_layer_cache in layer_cache_tp], dim=1)
-    #     KV_cache_tp[i] = (K_cache_layer, V_cache_layer)
-    #
-    #     K_cache_correct, V_cache_correct = KV_cache[i]
-    #
-    #     print(f'Cache of layer {i}:', torch.allclose(K_cache_layer, K_cache_correct, atol=1e-5), torch.allclose(K_cache_layer, K_cache_correct, atol=1e-5))
+    print(torch.allclose(output.last_hidden_state, output_tp, atol=1e-5))
+
+    KV_cache_tp = list(zip(*KV_cache_tp))
+    for i, layer_cache_tp in enumerate(KV_cache_tp):
+        K_cache_layer = torch.concat([split_layer_cache[0] for split_layer_cache in layer_cache_tp], dim=1)
+        V_cache_layer = torch.concat([split_layer_cache[1] for split_layer_cache in layer_cache_tp], dim=1)
+        KV_cache_tp[i] = (K_cache_layer, V_cache_layer)
+
+        K_cache_correct, V_cache_correct = KV_cache[i]
+
+        print(f'Cache of layer {i}:', torch.allclose(K_cache_layer, K_cache_correct, atol=1e-5), torch.allclose(K_cache_layer, K_cache_correct, atol=1e-5))
 
 

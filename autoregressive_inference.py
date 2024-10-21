@@ -1,3 +1,4 @@
+import pathlib
 import time
 import torch.nn as nn
 import torch
@@ -27,12 +28,21 @@ def check_files_exist(model_directory):
     return all(required_files.values())
 
 
-def load_local_pretrained_model(model_dir):
-    config = AutoConfig.from_pretrained(model_dir)
-    tokenizer = AutoTokenizer.from_pretrained(model_dir)
-    model = GPT2LMHeadModel.from_pretrained(model_dir)  # automodel only output the last_hidden_state
+def load_local_pretrained_model(model_dir, what=None):
+    pretrained = ()
+    if what is None:
+        what = ['config', 'tokenizer', 'model']
+    if 'config' == what or 'config' in what:
+        config = AutoConfig.from_pretrained(model_dir)
+        pretrained = pretrained + (config,)
+    if 'tokenizer' == what or 'tokenizer' in what:
+        tokenizer = AutoTokenizer.from_pretrained(model_dir)
+        pretrained = pretrained + (tokenizer,)
+    if 'model' == what or 'model' in what:
+        model = GPT2LMHeadModel.from_pretrained(model_dir)  # automodel only output the last_hidden_state
+        pretrained = pretrained + (model,)
 
-    return config, tokenizer, model
+    return pretrained
 
 
 def prefill(model: nn.Module, input_ids: torch.Tensor, use_cache=True, do_sample=False, **kwargs):
@@ -136,10 +146,14 @@ def autoregressive_inference(model: nn.Module, input_text: str, max_length, use_
 
 
 # load pre-trained model, tokenizer and configuration of GPT-2
+project_dir = pathlib.Path('C:/Users/SUST/Desktop/Transformers/LLM Inference/')
+print(project_dir)
 model_tag = "uer/gpt2-chinese-cluecorpussmall"
 developer_name, model_name = tuple(model_tag.split('/'))
 cache_path = "model_file"
-model_path = f'{cache_path}/models--{developer_name}--{model_name}/snapshots/c2c0249d8a2731f269414cc3b22dff021f8e07a3'
+model_path = pathlib.Path(f'{cache_path}/models--{developer_name}--{model_name}/snapshots/c2c0249d8a2731f269414cc3b22dff021f8e07a3')
+model_path = project_dir.joinpath(model_path)
+
 
 # check necessary files
 if check_files_exist(model_path):
@@ -164,6 +178,7 @@ else:
 # tokenizer = AutoTokenizer.from_pretrained(model_path)
 
 if __name__ == '__main__':
+    a = load_local_pretrained_model(model_path, 'tokenizer')
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     # device = 'cpu'
     print(f'Device={device}')
