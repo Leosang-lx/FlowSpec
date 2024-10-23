@@ -216,13 +216,12 @@ if __name__ == '__main__':
 
     # prefill{
     split_num = 3
-    split_weights = split_weight_TP(model_weight, h, split_num)
+    split_weights = split_weight_TP(model_weight, h, split_num, model_config)
     output_tp, KV_cache_tp = tp_local(input_ids, split_num, split_weights, model_config, None)
     # hidden_states = transformer_model.ln_f(output_tp)
     logits_tp = model.lm_head(output_tp)
 
-    from sampling import apply_sampling
-    next_tokens = apply_sampling(logits_tp[:, -1, :])
+    next_tokens = logits2token(logits_tp[:, -1, :], False)
     next_word = tokenizer.convert_ids_to_tokens(next_tokens)
     print(next_word)
     # }

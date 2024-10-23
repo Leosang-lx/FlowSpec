@@ -89,12 +89,16 @@ class DecodingWorker:
         else:
             raise Exception('Fail to initialize the process group')
 
-        # init model
-        # self.config, self.tokenizer, self.model = load_local_pretrained_model(model_path)
-        # self.config = (V, P, N, d_model, h, d_h, r) = (self.config.vocab_size, self.config.n_positions, self.config.n_layer,
-        #                                                   self.config.n_embd, self.config.n_head, self.config.n_embd // self.config.n_head, 4)
-        # self.transformer = None
+        """
+        weights (split):
+            token embedding, position embedding
+        weights layers (split): *12
+                QKV projection, LayerNorm, MLP layer, LayerNorm
+        lm_head:
+            token embedding or independent weight (d_model, vocab_size)
+        """
         self.split_weights = None
+        self.layers_MLP_weights = None
         self.tokenizer = None
         self.config = None
 
@@ -106,14 +110,7 @@ class DecodingWorker:
 
         self.split_KV_cache = None
 
-        """
-        weights (split):
-            token embedding, position embedding
-        weights layers (split): *12
-                QKV projection, LayerNorm, MLP layer, LayerNorm
-        lm_head:
-            token embedding or independent weight (d_model, vocab_size)
-        """
+
 
         # init input and output configuration
         # self.tokenizer = load_local_pretrained_model(model_path, 'tokenizer')[0]
@@ -130,9 +127,6 @@ class DecodingWorker:
         self.do_sample = False
         self.top_k = 20
         self.top_p = 0.6
-
-        # self.KV_cache = None
-
 
     def prepare_cache_tp_send(self):
         """
@@ -170,7 +164,7 @@ class DecodingWorker:
 
     # else:  # accept data from rank_0 device
 
-    def init_tp(self):
+    def init_tp(self, split_MLP=True):
         """
         Receive split_weight and config from master
         """
@@ -186,9 +180,12 @@ class DecodingWorker:
                                range(1, self.n_device)]
                 self.loop.run_until_complete(asyncio.gather(*reply_tasks))
 
-                request = f'TP {self.rank}\n'
+                request = f'TP_WEIGHT {self.rank} SPLIT_MLP {int(split_MLP)}\n'
                 conn.sendall(request.encode())
-                self.config, self.tokenizer, self.split_weights, ln_weights, embedding_weights = recv_data(conn)
+                if split_MLP:
+                    self.config, self.tokenizer, self.split_weights, ln_weights, embedding_weights = recv_data(conn)
+                else:
+                    self.config, self.tokenizer, self.split_weights, ln_weights, embedding_weights, self.layers_MLP_weights = recv_data(conn)
                 token_embedding_weight, position_embedding_weight = embedding_weights
                 self.token_embedding = nn.Embedding.from_pretrained(token_embedding_weight)
                 self.position_embedding = nn.Embedding.from_pretrained(position_embedding_weight)
@@ -199,13 +196,13 @@ class DecodingWorker:
                 reply = recv_data(self.client_socket)
                 if reply != 'OK':
                     raise Exception('Unknown reply from main worker')
-                request = f'TP {self.rank}\n'
+                request = f'TP_WEIGHT {self.rank} SPLIT_MLP {int(split_MLP)}\n'
                 conn.sendall(request.encode())
                 self.config, self.tokenizer, self.split_weights, ln_weights = recv_data(conn)
             self.layers_ln_weight, self.ln_f_weight = ln_weights
-            print('Done!')
+            print('TP Init Done!')
 
-    def tp_forward(self, input_ids=None, use_cache=True):
+    def tp_forward(self, input_ids=None, use_cache=True, split_MLP=True):
         """
         :param input_ids: only the rank-0 device needs input
         :param use_cache:
@@ -233,7 +230,7 @@ class DecodingWorker:
             # input_shape = torch.tensor(hidden_states.shape)
             # dist.broadcast(input_shape, src=0)
             send_shapes = [async_send_data(conn, tuple(hidden_states.shape)) for conn, _ in self.connections]
-            self.loop.run_until_complete(asyncio.gather(*send_shapes))
+            self.loop.run_until_complete(asyncio.gather(*send_shapes))  # send shape
 
         else:
             # send shape first
@@ -260,25 +257,39 @@ class DecodingWorker:
             if use_cache:
                 cache_present = cache_present + (layer_cache,)
 
-            # AllReduce
-            dist.all_reduce(split_MHA_output, op=dist.ReduceOp.SUM)
-            # Residual connection
-            hidden_states = split_MHA_output + residual
+            if split_MLP:  # split MLP inference on workers
+                # AllReduce
+                dist.all_reduce(split_MHA_output, op=dist.ReduceOp.SUM)
+                # Residual connection
+                hidden_states = split_MHA_output + residual
 
-            if self.rank == 0:  # central
-                residual = hidden_states
-            # LN2
-            hidden_states = F.layer_norm(hidden_states, (d_model,), *ln2_w_b, self.config.ln_eps)
-            # split MLP
-            split_MLP_weight = split_weight_layer['MLP']
-            split_MLP_output = MLP_forward_use_weights(hidden_states, split_MLP_weight, self.config)
-            # AllReduce or SingleReduce (for the last layer)
-            # if layer_idx == self.config.n_layer - 1:
-            #     dist.reduce(split_MLP_output, dst=0, op=dist.ReduceOp.SUM)
-            # else:
-            dist.all_reduce(split_MLP_output, op=dist.ReduceOp.SUM)
-            # Residual connection
-            hidden_states = split_MLP_output + residual
+                if self.rank == 0:  # central
+                    residual = hidden_states
+                # LN2
+                hidden_states = F.layer_norm(hidden_states, (d_model,), *ln2_w_b, self.config.ln_eps)
+                # split MLP
+                split_MLP_weight = split_weight_layer['MLP']
+                split_MLP_output = MLP_forward_use_weights(hidden_states, split_MLP_weight, self.config)
+                # AllReduce or SingleReduce (for the last layer)
+                if layer_idx == self.config.n_layer - 1:
+                    dist.reduce(split_MLP_output, dst=0, op=dist.ReduceOp.SUM)
+                else:
+                    dist.all_reduce(split_MLP_output, op=dist.ReduceOp.SUM)
+                # Residual connection
+                hidden_states = split_MLP_output + residual
+
+            else:  # inference MLP only on device 0
+                dist.reduce(split_MHA_output, dst=0, op=dist.ReduceOp.SUM)
+                if self.rank == 0:
+                    hidden_states = split_MHA_output + residual
+                    residual = hidden_states
+                    # LN2
+                    hidden_states = F.layer_norm(hidden_states, (d_model,), *ln2_w_b, self.config.ln_eps)
+                    # MLP
+                    MLP_weight_layer = self.layers_MLP_weights[layer_idx]
+                    hidden_states = MLP_forward_use_weights(hidden_states, MLP_weight_layer, self.config)
+                    # Residual connection
+                    hidden_states = hidden_states + residual
 
         if use_cache:  # udpate cache
             self.split_KV_cache = cache_present
@@ -286,13 +297,13 @@ class DecodingWorker:
         if self.rank == 0:
             hidden_states = F.layer_norm(hidden_states, (d_model,), *self.ln_f_weight, self.config.ln_eps)
             return hidden_states
-        # else:  # other worker: 返回当前长度
-        #     if use_cache:
-        #         return self.split_KV_cache[0][0].size(-2) + 1
-        #     else:
-        #         return hidden_states.size(-2)
+            # else:  # other worker: 返回当前长度
+            #     if use_cache:
+            #         return self.split_KV_cache[0][0].size(-2) + 1
+            #     else:
+            #         return hidden_states.size(-2)
 
-    def tp_generate(self, max_length):
+    def tp_generate(self, max_length, split_MLP=True):
         input_ids = torch.LongTensor([self.tokenizer.convert_tokens_to_ids(list(self.text))])
         assert input_ids.size(-1) < max_length
         self.split_KV_cache = None  # clear cache
@@ -301,9 +312,9 @@ class DecodingWorker:
 
         # prefill
         print('Start Prefill')
-        hidden_states = self.tp_forward(input_ids)
+        start_prefill = time.perf_counter()
+        hidden_states = self.tp_forward(input_ids, split_MLP=True)
         if self.rank == 0:
-            start_prefill = time.perf_counter()
             logits = self.lm_head(hidden_states)
             next_token_ids = logits2token(logits[:, -1, :])
             # print(next_token_ids)
@@ -317,7 +328,7 @@ class DecodingWorker:
         print('Start decoding')
         start_decoding = time.perf_counter()
         for seq_len in tqdm(range(cur_len, max_length + 1)):
-            hidden_states = self.tp_forward(input_ids)
+            hidden_states = self.tp_forward(input_ids, split_MLP)
             if self.rank == 0:
                 logits = self.lm_head(hidden_states)
                 next_token_ids = logits2token(logits[:, -1, :])
@@ -338,9 +349,10 @@ class DecodingWorker:
 
 if __name__ == '__main__':
     worker = DecodingWorker((MAIN_WORKER_IP, port_tcp))
-    worker.init_tp()
+    split_MLP = False
+    worker.init_tp(split_MLP)
     print(worker.text)
-    generated_text = worker.tp_generate(200)
+    generated_text = worker.tp_generate(200, split_MLP)
     if worker.rank == 0:
         print(generated_text)
     # text = worker.text
