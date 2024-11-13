@@ -55,8 +55,8 @@ print(config)
 
 # tokenizer = BertTokenizer.from_pretrained(model_tag, cache_dir=cache_path)
 # model = GPT2LMHeadModel.from_pretrained(model_tag, cache_dir=cache_path).to("cuda")
-# device = 'cuda' if torch.cuda.is_available() else 'cpu'
-device = 'cpu'
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+# device = 'cpu'
 print(f'Device={device}')
 model = GPT2LMHeadModel.from_pretrained(model_path).to(device)
 # model = AutoModel.from_pretrained(model_path).to(device)

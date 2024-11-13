@@ -76,7 +76,7 @@ def merge_heads(x, d_h):
     return x.view(new_shape)
 
 
-# Conv1D in GPT-2, can be replaced by nn.Linear
+# Conv1D in GPT-2, can be replaced by nn.Linear or other matmul functions
 def Conv1D_forward_use_weights(x, weights):
     weight, bias = weights
     if bias is None:

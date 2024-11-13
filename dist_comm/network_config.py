@@ -1,7 +1,12 @@
 import ipaddress
+import datetime
 
-MAIN_WORKER_IP = '192.168.1.101'
-# MAIN_WORKER_IP = '::1'
+distributed = False
+
+if distributed:
+    MAIN_WORKER_IP = '192.168.1.101'
+else:
+    MAIN_WORKER_IP = '::1'
 MASTER_IP = '192.168.1.150'
 INTERFACE = 'eth0'
 SUBNET = '192.168.1.1'
@@ -13,6 +18,8 @@ port_torch = 23456
 SERVER_RANK = 0
 
 DEFAULT_SIZE = 2
+
+timeout_max = datetime.timedelta(seconds=10)
 
 
 def ipv4_or_ipv6(ip):

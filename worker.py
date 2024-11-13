@@ -3,6 +3,8 @@ Only for testing the distributed decoding performance
 """
 import argparse
 import sys
+
+import torch
 import torch.distributed as dist
 
 from cmd_util import get_ip_addr
@@ -21,7 +23,9 @@ server_ip = arguments.ip
 rank = arguments.rank
 world_size = arguments.size
 # Enable when using RaspberryPi
-os.environ['GLOO_SOCKET_IFNAME'] = 'eth0'
+if distributed:
+    os.environ['GLOO_SOCKET_IFNAME'] = 'eth0'
+
 
 class DecodingWorker:
     """
@@ -34,9 +38,11 @@ class DecodingWorker:
         self.loop = asyncio.get_event_loop()
 
         # system initialization: share the n_device and allocate ranks to all devices
-        self.ip = get_ip_addr(INTERFACE)
+        if distributed:
+            self.ip = get_ip_addr(INTERFACE)
+        else:
+            self.ip = '127.0.0.1'
         print(f'Local ip: {self.ip}')
-        # self.ip = '127.0.0.1'
         # 0 means server, -1 means helping worker and uninitialized
         self.rank = -1
         self.n_device = world_size
@@ -50,10 +56,16 @@ class DecodingWorker:
 
         print('Initialize connection and process group...')
         try:
-            if self.ip == server_ip:  # the device is the server/master
-            # if rank == 0:
+            if distributed:
+                rank0 = self.ip == server_ip
+                af = socket.AF_INET  # ipv4
+            else:
+                rank0 = rank == 0
+                af = socket.AF_INET6
+
+            if rank0:
                 self.rank = SERVER_RANK  # SERVER_RANK=0
-                self.server_socket = socket.create_server((self.ip, port_tcp), family=socket.AF_INET)
+                self.server_socket = socket.create_server((server_ip, port_tcp), family=af)
                 self.connections = accept_n_connections(self.server_socket,
                                                         self.n_device - 1)  # ensure n accepted connections
                 # allocate rank by the connections' order
@@ -346,15 +358,189 @@ class DecodingWorker:
             print(f'Decoding: {decoding_t}s')
             return ''.join(generated_text)
 
+    def get_ring_index(self, index: int, offset: int):  # ring index starts from 0
+        ring_index = index + offset
+        if ring_index < 0:
+            ring_index += self.n_device
+        elif ring_index >= self.n_device:
+            ring_index %= self.n_device
+        return ring_index
+
+    def ring_reduce_scatter_comp_overlap(self, xi: torch.Tensor, Wi: torch.Tensor, b=None):
+        """
+        overlap the ring reduce-scatter comm operation with the **previous** matrix-vector multiplication
+        :return: split reduced results
+        """
+        W_in, W_out = Wi.shape
+        # the whole weight matrix is split along row dimension(dim=0) across devices
+        assert xi.size(-1) == W_in and W_out % self.n_device == 0
+
+        # further split partial weight along column dimension(dim=1)
+        W_split_size = W_out // self.n_device
+        Wi_split = Wi.split(W_split_size, dim=-1)
+
+        comm_from_index = self.get_ring_index(self.rank, -1)
+        from_tensor = torch.zeros(*xi.shape[:-1], W_split_size)
+        comm_to_index = self.get_ring_index(self.rank, 1)
+
+        # split_results = [None] * self.n_device
+
+        for i in range(self.n_device - 1, -1, -1):  # reverse order from n-1 to 0
+
+            comp_index = self.get_ring_index(self.rank, i)  # [rank-1, rank-2, ..., rank]
+            # start receiving
+            if i != self.n_device - 1:
+                send_task = dist.isend(yi, dst=comm_to_index)
+                print(f'd_{self.rank} send to d_{comm_to_index}')
+                print(f'{self.rank} recv from d_{comm_from_index}...', end='')
+                recv_task = dist.irecv(from_tensor, src=comm_from_index)
+
+            else:
+                recv_task = None
+
+            # partial computation
+            yi = xi @ Wi_split[comp_index]
+
+            # recv result from others
+            if recv_task:
+                send_task.wait()
+                recv_task.wait()
+                print(f'done')
+                yi = yi + from_tensor  # reduce
+
+        return yi
+
+    def ring_all_gather_comp_overlap(self, xi: torch.Tensor, Wi: torch.Tensor, b=None):
+        # 好像用不着，先留着吧，考虑作为benchmark的时候用
+        """
+        overlap the ring all-gather comm operation with the **following** matrix-vector multiplication
+        :return: gathered results after the matrix-vector multiplication
+        """
+        W_in, W_out = Wi.shape
+        assert xi.size(-1) == W_in and W_out % self.n_device == 0
+
+        comm_from_index = self.get_ring_index(self.rank, -1)
+        from_tensor = torch.zeros_like(xi)  # from_tensor for saving the received tensor
+        to_tensor = xi  # to_tensor for comp and comm at each turn
+        comm_to_index = self.get_ring_index(self.rank, 1)
+
+        split_results = [None] * self.n_device
+
+        for i in range(self.n_device - 1, -1, -1):  # reverse order from n-1 to 0
+            comp_index = self.get_ring_index(self.rank, i)  # shift order according to rank and i
+            if i > 0:
+                # start sending
+                send_task = dist.isend(to_tensor, dst=comm_to_index)
+                recv_task = dist.irecv(from_tensor, src=comm_from_index)
+
+            # partial computation
+            split_results[comp_index] = to_tensor @ Wi
+
+            if i > 0:
+                # send_task.wait()
+                recv_task.wait(timeout=timeout_max)
+                # exchange reference after send_task and recv_task are both finished
+                from_tensor, to_tensor = to_tensor, from_tensor
+            else:
+                assert None not in split_results
+                return split_results
+
+    def ring_gather_reduce_comp_overlap(self, xi: torch.Tensor, Wi: torch.Tensor, b=None):
+        """
+        overlap the ring all-gather comm operation with the **following** matrix-vector multiplication
+        introduce additional reduce for splitting the embedding dimension
+        :return:
+        """
+        W_in, W_out = Wi.shape
+        # the whole weight matrix is split along column dimension(dim=1) across devices
+        assert W_in % self.n_device == 0 and xi.size(-1) == (W_in // self.n_device)
+        # further split partial weight along row dimension(dim=0)
+        W_split_size = W_in // self.n_device
+        Wi_split = Wi.split(W_split_size, dim=0)
+
+        # the last index and next index of ring structure
+        comm_from_index = self.get_ring_index(self.rank, -1)
+        comm_to_index = self.get_ring_index(self.rank, 1)
+        from_tensor = torch.zeros_like(xi)
+        # to_tensor = xi
+        y_reduce = None
+
+        for i in range(self.n_device-1, -1, -1):  # reverse order from n-1 to 0
+            if i > 0:
+                send_task = dist.isend(xi, dst=comm_to_index)  # send_task should be kept, but don't wait
+                recv_task = dist.irecv(from_tensor, src=comm_from_index)
+
+            comp_index = self.get_ring_index(self.rank, i+1)  # [rank, rank-1, ..., rank+1]
+
+            yi = xi @ Wi_split[comp_index]  # mm
+            if y_reduce is not None:
+                y_reduce = y_reduce + yi
+            else:
+                y_reduce = yi
+
+            if i > 0:
+                send_task.wait()
+                recv_task.wait()  # recv next xi from other device
+                # send_task.wait(timeout=timeout_max)
+                xi, from_tensor = from_tensor, xi  # exchange reference
+            else:
+                return y_reduce
+
 
 if __name__ == '__main__':
     worker = DecodingWorker((MAIN_WORKER_IP, port_tcp))
-    split_MLP = False
-    worker.init_tp(split_MLP)
-    print(worker.text)
-    generated_text = worker.tp_generate(200, split_MLP)
-    if worker.rank == 0:
-        print(generated_text)
-    # text = worker.text
-    # input_ids = torch.LongTensor()
-    # worker.tp_generate()
+
+    # test TP
+    # split_MLP = False
+    # worker.init_tp(split_MLP)
+    # print(worker.text)
+    # generated_text = worker.tp_generate(200, split_MLP)
+    # if worker.rank == 0:
+    #     print(generated_text)
+
+    # test overlap
+    b = 1
+    d_model = 4096
+    intermediate_dimension = 11008
+    dtype = torch.float32
+    split_size = d_model // world_size
+    xi = torch.randn(split_size, dtype=dtype)
+    print(xi)
+
+    # test ring_reduce_scatter_overlap()
+    Wi = torch.randn(split_size, d_model, dtype=dtype)
+    print(Wi)
+    yi = worker.ring_reduce_scatter_comp_overlap(xi, Wi)
+    print(yi)
+    # verify result
+    xis = [torch.empty_like(xi, dtype=dtype)] * world_size
+    dist.all_gather(xis, xi)
+    for x in xis:
+        print(torch.equal(x, xi))
+    x = torch.concat(xis, dim=0)
+    Wis = [torch.empty_like(Wi, dtype=dtype)] * world_size
+    dist.all_gather(Wis, Wi)  # bug
+    Wis[rank] = Wi
+    Wis = torch.concat(Wis, dim=0)
+    print(Wis)
+    Wi = torch.split(Wis, split_size, dim=-1)[rank]
+    yi_correct = x @ Wi
+    print(torch.allclose(yi_correct, yi, atol=1e-3))  # >> True
+    print(torch.equal(yi_correct, yi))  # >> False
+    print(yi_correct)
+
+
+    # test ring_reduce_scatter_overlap()
+    Wi = torch.randn(d_model, intermediate_dimension // world_size, dtype=dtype)
+    print(Wi)
+    yi = worker.ring_gather_reduce_comp_overlap(xi, Wi)
+    print(yi)
+    # verify result
+    xis = [torch.empty_like(xi, dtype=dtype)] * world_size
+    dist.all_gather(xis, xi)  # bug
+    xis[rank] = xi
+    x = torch.concat(xis, dim=0)
+    yi_correct = x @ Wi
+    print(torch.allclose(yi_correct, yi, atol=1e-3))  # >> True
+    print(torch.equal(yi_correct, yi))  # >> False
+    print(yi_correct)
