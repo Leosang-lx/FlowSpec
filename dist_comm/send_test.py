@@ -5,18 +5,19 @@ import os
 # from comm import send_data, recv_data
 import time
 
-os.environ['USE_LIBUV'] = 'False'
+# os.environ['USE_LIBUV'] = 'False'
 # os.environ['GLOO_SOCKET_IFNAME'] = 'eth2'
 # os.environ['GLOO_SOCKET_IFACE_NAME'] = 'eth2'  # 将 'eth0' 替换为你的网络接口名称
 
+init_method = gen_init_method(MAIN_WORKER_IP, port_torch)
+# 初始化分布式环境：通过rank来区分设备
+print('init_method:', init_method)
+dist.init_process_group(backend='gloo', init_method=init_method, world_size=2, rank=1)
 
-def main():
-    # 初始化分布式环境：通过rank来区分设备
-    print('init_method:', init_method)
-    dist.init_process_group(backend='gloo', init_method=init_method, world_size=2, rank=1)
+print(dist.is_initialized())
 
-    print(dist.is_initialized())
 
+def send_and_recv():
     # 创建一个张量
     tensor = torch.randn(1, 64, 224, 224)
     print(f"Client sending tensor of {tensor.shape}")
@@ -36,6 +37,14 @@ def main():
     consumption = end - start
     print(f'{consumption}s for transmission')
 
+def test_broadcast():
+    shape = torch.zeros(3, dtype=torch.int32)
+    print(shape.dtype)
+    dist.broadcast(shape, src=0)
+    data = torch.zeros(*shape)
+    dist.broadcast(data, src=0)
+    print(data)
+
 
 if __name__ == "__main__":
-    main()
+    test_broadcast()

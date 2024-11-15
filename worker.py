@@ -122,8 +122,6 @@ class DecodingWorker:
 
         self.split_KV_cache = None
 
-
-
         # init input and output configuration
         # self.tokenizer = load_local_pretrained_model(model_path, 'tokenizer')[0]
         self.batch_size = 1
@@ -197,7 +195,8 @@ class DecodingWorker:
                 if split_MLP:
                     self.config, self.tokenizer, self.split_weights, ln_weights, embedding_weights = recv_data(conn)
                 else:
-                    self.config, self.tokenizer, self.split_weights, ln_weights, embedding_weights, self.layers_MLP_weights = recv_data(conn)
+                    self.config, self.tokenizer, self.split_weights, ln_weights, embedding_weights, self.layers_MLP_weights = recv_data(
+                        conn)
                 token_embedding_weight, position_embedding_weight = embedding_weights
                 self.token_embedding = nn.Embedding.from_pretrained(token_embedding_weight)
                 self.position_embedding = nn.Embedding.from_pretrained(position_embedding_weight)
@@ -217,7 +216,7 @@ class DecodingWorker:
     def tp_forward(self, input_ids=None, use_cache=True, split_MLP=True):
         """
         :param input_ids: only the rank-0 device needs input
-        :param use_cache:
+        :param use_cache: use KV-cache to reduce duplicated computation
         :return:
         """
         # split_heads = self.config.split_heads
@@ -232,24 +231,24 @@ class DecodingWorker:
         if use_cache:
             cache_present = ()  # store updated KV-Cache by layer
 
-        if self.rank == 0:  # central
+        if self.rank == 0:  # main worker
             token_embedding = self.token_embedding(input_ids)
             position_ids = torch.arange(past_length, input_ids.shape[-1] + past_length, dtype=torch.long,
                                         device=input_ids.device)
             position_ids = position_ids.unsqueeze(0)
             position_embedding = self.position_embedding(position_ids)
             hidden_states = token_embedding + position_embedding
-            # input_shape = torch.tensor(hidden_states.shape)
-            # dist.broadcast(input_shape, src=0)
-            send_shapes = [async_send_data(conn, tuple(hidden_states.shape)) for conn, _ in self.connections]
-            self.loop.run_until_complete(asyncio.gather(*send_shapes))  # send shape
+            input_shape = torch.tensor(hidden_states.shape, dtype=torch.int32)
+            dist.broadcast(input_shape, src=0)
+            # send_shapes = [async_send_data(conn, tuple(hidden_states.shape)) for conn, _ in self.connections]
+            # self.loop.run_until_complete(asyncio.gather(*send_shapes))  # send shape
 
         else:
             # send shape first
-            # input_shape = torch.zeros(3)
-            # dist.broadcast(input_shape, src=0)
-            input_shape = recv_data(self.client_socket)
-            hidden_states = torch.zeros(input_shape)
+            input_shape = torch.zeros(3, dtype=torch.int32)
+            dist.broadcast(input_shape, src=0)
+            # input_shape = recv_data(self.client_socket)
+            hidden_states = torch.zeros(*input_shape)
 
         dist.broadcast(hidden_states, src=0)  # init input
 
@@ -314,6 +313,43 @@ class DecodingWorker:
             #         return self.split_KV_cache[0][0].size(-2) + 1
             #     else:
             #         return hidden_states.size(-2)
+
+    def tp_forward_overlap(self, input_ids=None, use_cache=True):
+        """
+        :param input_ids: only the rank-0 device needs input
+        :param use_cache: use KV-cache to reduce duplicated computation
+        :return:
+        """
+        # split_heads = self.config.split_heads
+        d_model = self.config.d_model
+
+        if self.split_KV_cache is None:
+            past_length = 0
+            self.split_KV_cache = (None,) * self.config.n_layer
+        else:
+            past_length = self.split_KV_cache[0][0].size(-2)
+
+        if use_cache:
+            cache_present = ()  # store updated KV-Cache by layer
+
+        if self.rank == 0:  # main worker todo: choose to send tokens or hidden_states
+            token_embedding = self.token_embedding(input_ids)
+            position_ids = torch.arange(past_length, input_ids.shape[-1] + past_length, dtype=torch.long,
+                                        device=input_ids.device)
+            position_ids = position_ids.unsqueeze(0)
+            position_embedding = self.position_embedding(position_ids)
+            hidden_states = token_embedding + position_embedding
+            input_shape = torch.tensor(hidden_states.shape, dtype=torch.int32)
+            dist.broadcast(input_shape, src=0)
+
+        else:
+            # send shape first
+            input_shape = torch.zeros(3, dtype=torch.int32)
+            dist.broadcast(input_shape, src=0)
+            hidden_states = torch.zeros(*input_shape)
+
+        dist.broadcast(hidden_states, src=0)  # init input
+        # todo: layer execution
 
     def tp_generate(self, max_length, split_MLP=True):
         input_ids = torch.LongTensor([self.tokenizer.convert_tokens_to_ids(list(self.text))])
@@ -465,12 +501,12 @@ class DecodingWorker:
         # to_tensor = xi
         y_reduce = None
 
-        for i in range(self.n_device-1, -1, -1):  # reverse order from n-1 to 0
+        for i in range(self.n_device - 1, -1, -1):  # reverse order from n-1 to 0
             if i > 0:
                 send_task = dist.isend(xi, dst=comm_to_index)  # send_task should be kept, but don't wait
                 recv_task = dist.irecv(from_tensor, src=comm_from_index)
 
-            comp_index = self.get_ring_index(self.rank, i+1)  # [rank, rank-1, ..., rank+1]
+            comp_index = self.get_ring_index(self.rank, i + 1)  # [rank, rank-1, ..., rank+1]
 
             yi = xi @ Wi_split[comp_index]  # mm
             if y_reduce is not None:
@@ -487,17 +523,7 @@ class DecodingWorker:
                 return y_reduce
 
 
-if __name__ == '__main__':
-    worker = DecodingWorker((MAIN_WORKER_IP, port_tcp))
-
-    # test TP
-    # split_MLP = False
-    # worker.init_tp(split_MLP)
-    # print(worker.text)
-    # generated_text = worker.tp_generate(200, split_MLP)
-    # if worker.rank == 0:
-    #     print(generated_text)
-
+def test_overlap(w: DecodingWorker):
     # test overlap
     b = 1
     d_model = 4096
@@ -510,7 +536,7 @@ if __name__ == '__main__':
     # test ring_reduce_scatter_overlap()
     Wi = torch.randn(split_size, d_model, dtype=dtype)
     print(Wi)
-    yi = worker.ring_reduce_scatter_comp_overlap(xi, Wi)
+    yi = w.ring_reduce_scatter_comp_overlap(xi, Wi)
     print(yi)
     # verify result
     xis = [torch.empty_like(xi, dtype=dtype)] * world_size
@@ -529,11 +555,10 @@ if __name__ == '__main__':
     print(torch.equal(yi_correct, yi))  # >> False
     print(yi_correct)
 
-
     # test ring_reduce_scatter_overlap()
     Wi = torch.randn(d_model, intermediate_dimension // world_size, dtype=dtype)
     print(Wi)
-    yi = worker.ring_gather_reduce_comp_overlap(xi, Wi)
+    yi = w.ring_gather_reduce_comp_overlap(xi, Wi)
     print(yi)
     # verify result
     xis = [torch.empty_like(xi, dtype=dtype)] * world_size
@@ -544,3 +569,18 @@ if __name__ == '__main__':
     print(torch.allclose(yi_correct, yi, atol=1e-3))  # >> True
     print(torch.equal(yi_correct, yi))  # >> False
     print(yi_correct)
+
+
+if __name__ == '__main__':
+    worker = DecodingWorker((MAIN_WORKER_IP, port_tcp))
+
+    # test TP
+    split_MLP = True
+    worker.init_tp(split_MLP)
+    print(worker.text)
+    generated_text = worker.tp_generate(200, split_MLP)
+    if worker.rank == 0:
+        print(generated_text)
+
+    # test overlap
+    # test_overlap(worker)

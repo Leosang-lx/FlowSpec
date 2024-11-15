@@ -7,6 +7,10 @@ from autoregressive_inference import *
 
 
 def get_transformer_model_weight(transformer_model):
+    """
+    :param transformer_model: only for GPT-2 model for temporarily
+    :return: all needed weight for inference as dict()
+    """
     # generate embeddings by lookup table
     token_embedding_weight = transformer_model.wte.weight
     position_embedding_weight = transformer_model.wpe.weight
@@ -90,7 +94,7 @@ def Conv1D_forward_use_weights(x, weights):
 
 
 # only self attention
-# causal mask for attn
+# causal mask for attn with maximum position
 causal_mask_cache = torch.tril(torch.ones((1024, 1024), dtype=torch.bool)).view(1, 1, 1024, 1024)
 
 
@@ -136,15 +140,45 @@ def MHA_forward_use_weights(hidden_states, MHA_weights, transformer_config, laye
     # QKV projection
     if len(attn_proj_w_b) == 3:  # Q_proj_w_b, K_proj_w_b, V_proj_w_b
         attn_proj_w_b = tuple([torch.concat(ws_or_bs, dim=-1) for ws_or_bs in zip(*attn_proj_w_b)])
+    # attn_proj_w, attn_proj_b = attn_proj_w_b
+
+    attn_output, layer_cache_present = QKV_proj_and_attn_using_weights(hidden_states, attn_proj_w_b, transformer_config,
+                                                            layer_cache)
+
+    # attn_output, attn_weights = attn(Q, K, V)
+    # attn_output = merge_heads(attn_output, transformer_config.d_h)
+
+    # Wo projection
+    # attn_Wo_w, attn_Wo_b = attn_Wo_w_b
+    attn_output = Conv1D_forward_use_weights(attn_output, attn_Wo_w_b)
+    # attn_output = F.dropout(attn_output, transformer_config.dropout_prob, False, False)
+
+    return attn_output, layer_cache_present
+
+
+def split_QKV(QKV_matrix, d_h):
+    assert len(QKV_matrix.shape) > 1
+    assert QKV_matrix.size(-1) % 3 == 0 and QKV_matrix.size(-1) % d_h == 0
+
+    # split Q, K, V
+    Q, K, V = QKV_matrix.split(QKV_matrix.size(-1) // 3, dim=-1)
+    # split heads
+    Q = split_heads(Q, d_h)
+    K = split_heads(K, d_h)
+    V = split_heads(V, d_h)
+    return Q, K, V
+
+
+def QKV_proj_and_attn_using_weights(hidden_states, attn_proj_w_b, transformer_config, layer_cache=None):
+    # QKV projection
+    if len(attn_proj_w_b) == 3:  # Q_proj_w_b, K_proj_w_b, V_proj_w_b
+        attn_proj_w_b = tuple([torch.concat(ws_or_bs, dim=-1) for ws_or_bs in zip(*attn_proj_w_b)])
     attn_proj_w, attn_proj_b = attn_proj_w_b
 
     # forward QKV projection with merged weights: x * (W_Q|W_K|W_V) = Q|K|V
     QKV = Conv1D_forward_use_weights(hidden_states, attn_proj_w_b)
 
-    Q, K, V = QKV.split(QKV.size(-1) // 3, dim=2)
-    Q = split_heads(Q, transformer_config.d_h)
-    K = split_heads(K, transformer_config.d_h)
-    V = split_heads(V, transformer_config.d_h)
+    Q, K, V = split_QKV(QKV, transformer_config.d_h)
 
     if layer_cache is not None:
         # update layer_cache
@@ -154,12 +188,8 @@ def MHA_forward_use_weights(hidden_states, MHA_weights, transformer_config, laye
     layer_cache_present = (K, V)
 
     attn_output, attn_weights = attn(Q, K, V)
-
+    # merge heads
     attn_output = merge_heads(attn_output, transformer_config.d_h)
-    # Wo
-    # attn_Wo_w, attn_Wo_b = attn_Wo_w_b
-    attn_output = Conv1D_forward_use_weights(attn_output, attn_Wo_w_b)
-    attn_output = F.dropout(attn_output, transformer_config.dropout_prob, False, False)
 
     return attn_output, layer_cache_present
 
@@ -193,7 +223,8 @@ def layer_forward_use_weights(hidden_states, layer_weights, transformer_config, 
     # LN1
     hidden_states = F.layer_norm(hidden_states, (d_model,), *ln1_w_b, layer_norm_eps)
     # MHA
-    attn_output, layer_cache_present = MHA_forward_use_weights(hidden_states, (attn_proj_w_b, attn_Wo_w_b), transformer_config, layer_cache)
+    attn_output, layer_cache_present = MHA_forward_use_weights(hidden_states, (attn_proj_w_b, attn_Wo_w_b),
+                                                               transformer_config, layer_cache)
     # residual connection
     hidden_states = residual + attn_output
 
@@ -227,7 +258,8 @@ def model_forward_use_weights(input_ids, model_weights, transformer_config, KV_c
 
     for layer_idx, layer_weight_cache in enumerate(zip(layers_weight, KV_cache)):
         layer_weight, layer_cache = layer_weight_cache
-        hidden_states, layer_cache_present = layer_forward_use_weights(hidden_states, layer_weight, transformer_config, layer_cache)
+        hidden_states, layer_cache_present = layer_forward_use_weights(hidden_states, layer_weight, transformer_config,
+                                                                       layer_cache)
         KV_cache[layer_idx] = layer_cache_present
 
     hidden_states = transformer_model.ln_f(hidden_states)  # model finally has a LayerNorm

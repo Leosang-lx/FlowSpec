@@ -11,15 +11,12 @@ parser.add_argument('-s', '--server', required=False, default=None)
 
 arguments = parser.parse_args()
 provided_ip = arguments.server
-if provided_ip is not None:
-    ipv = ipv4_or_ipv6(provided_ip)
-    if ipv != 4 or ipv != 6:
-        raise Exception('Invalid provided ip')
-    server_ip = provided_ip
-    if ipv == 6:
-        provided_ip = f'[{provided_ip}]'
-    init_method = f'tcp://{provided_ip}:{port}'
 
+init_method = gen_init_method(MAIN_WORKER_IP, port_torch)
+print('init_method:', init_method)
+# store = dist.TCPStore(server_ip, port, )
+dist.init_process_group(backend='gloo', init_method=init_method, world_size=2, rank=0)
+print(dist.is_initialized())
 
 def get_ip_address():
     # windows!!!
@@ -47,16 +44,13 @@ def get_ip_address():
 tensor_shape = (1, 64, 224, 224)
 
 
-def main():
+def recv_and_send():
     # sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     # sock.bind((server_ip, port))
     # sock.listen()
 
     # 初始化分布式环境
-    print('init_method:', init_method)
-    # store = dist.TCPStore(server_ip, port, )
-    dist.init_process_group(backend='gloo', init_method=init_method, world_size=2, rank=server_rank)
-    print(dist.is_initialized())
+
     print(dist.get_rank())
 
     # 创建一个空的张量来接收客户端发送的数据
@@ -69,6 +63,14 @@ def main():
     # 立即发送接收到的张量回客户端
     dist.send(received_tensor, dst=1)
 
+def test_broadcast():
+    data = torch.randn(1, 100, 768)
+    shape = torch.tensor(data.shape, dtype=torch.int32)
+    print(shape.dtype)
+    dist.broadcast(shape, src=0)
+    dist.broadcast(data, src=0)
+    print(data)
+
 
 if __name__ == "__main__":
-    main()
+    test_broadcast()
