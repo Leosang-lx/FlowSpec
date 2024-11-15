@@ -492,7 +492,7 @@ if __name__ == '__main__':
     text = "在一个风和日丽的下午，小镇的街道上人来人往，孩子们在巷口追逐嬉戏。李阿姨拿着刚从市场买回来的菜篮子，步履轻盈地走回家。街边的老槐树下，几位老人正围坐在一起下象棋，不时传来欢声笑语。今天是不是一个好日子？"
     input_ids = torch.LongTensor([tokenizer.convert_tokens_to_ids(list(text))])  # .to(device)
 
-    split_embedding = True
+    split_embedding = False
     # prefill{
     split_num = 2
     split_weights = split_weight_TP(model_weight, split_num, model_config, split_embedding=split_embedding)

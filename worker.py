@@ -213,7 +213,7 @@ class DecodingWorker:
             self.layers_ln_weight, self.ln_f_weight = ln_weights
             print('TP Init Done!')
 
-    def tp_forward(self, input_ids=None, use_cache=True, split_MLP=True):
+    def co_forward_tp(self, input_ids=None, use_cache=True, split_MLP=True):
         """
         :param input_ids: only the rank-0 device needs input
         :param use_cache: use KV-cache to reduce duplicated computation
@@ -252,6 +252,7 @@ class DecodingWorker:
 
         dist.broadcast(hidden_states, src=0)  # init input
 
+        # forward_layers
         for layer_idx in range(self.config.n_layer):
             split_weight_layer = self.split_weights[layer_idx]
             ln1_w_b, ln2_w_b = self.layers_ln_weight[layer_idx]
@@ -314,7 +315,7 @@ class DecodingWorker:
             #     else:
             #         return hidden_states.size(-2)
 
-    def tp_forward_overlap(self, input_ids=None, use_cache=True):
+    def co_forward_se(self, input_ids=None, use_cache=True):
         """
         :param input_ids: only the rank-0 device needs input
         :param use_cache: use KV-cache to reduce duplicated computation
@@ -348,8 +349,96 @@ class DecodingWorker:
             dist.broadcast(input_shape, src=0)
             hidden_states = torch.zeros(*input_shape)
 
-        dist.broadcast(hidden_states, src=0)  # init input
-        # todo: layer execution
+        dist.broadcast(hidden_states, src=0)  # init hidden_states
+
+        # forward layers
+        for layer_idx, (layer_weights, layer_cache) in enumerate(zip(self.split_weights, self.split_KV_cache)):
+            ln1_w_b, ln2_w_b = layer_weights['LN']
+
+            # MHA{
+            QKV_proj_w_b, Wo_proj_w_b = layer_weights['MHA']
+            # merge QKV_proj_w_b
+            if len(QKV_proj_w_b) == 3:
+                QKV_proj_w_b = tuple([torch.concat(ws_or_bs, dim=-1) for ws_or_bs in zip(*QKV_proj_w_b)])
+
+            if layer_idx == 0:  # 1st layer
+                # residual 1
+                residual = hidden_states[split_embedding_range]
+                # LN1: complete weight
+                hidden_states = F.layer_norm(hidden_states, (d_model,), *ln1_w_b, config.ln_eps)
+
+                # QKV projection
+                QKV, layer_cache = QKV_proj(hidden_states, QKV_proj_w_b, config.d_h, layer_cache)
+
+            else:  # 2-n_l layers
+                # residual 1
+                residual = split_embeddings
+
+                # LN1: split_embedding
+                split_embeddings = distributed_layer_norm(split_embeddings, ln1_w_b, d_model, config.ln_eps)
+
+                # QKV projection: split_embedding
+                QKV = self.ring_gather_reduce_comp_overlap(split_embeddings, *QKV_proj_w_b)
+
+                Q, K, V = split_QKV(QKV, config.d_h)
+                if layer_cache is not None:  # update layer_cache
+                    K_cache, V_cache = layer_cache
+                    K = torch.cat((K_cache, K), dim=2)
+                    V = torch.cat((V_cache, V), dim=2)
+                layer_cache = (K, V)
+
+            if use_cache:  # update cache
+                cache_present = cache_present + (layer_cache,)
+
+            # attn
+            split_embeddings = attn(*QKV)
+
+            # Wo projection
+            split_embeddings = self.ring_reduce_scatter_comp_overlap(split_embeddings, *Wo_proj_w_b)
+
+            # residual connection 1
+            split_embeddings += residual
+            # }MHA
+
+            # residual 2
+            residual = split_embeddings
+
+            # MLP
+            mlp1_w_b, mlp2_w_b = layer_weights['MLP']
+
+            # LN2: split_embedding
+            split_embeddings = distributed_layer_norm(split_embeddings, ln2_w_b, d_model, config.ln_eps)
+
+            # MLP1
+            split_embeddings = self.ring_gather_reduce_comp_overlap(split_embeddings, *mlp1_w_b)
+
+            # activation
+            split_embeddings = activation(split_embeddings)
+
+            if layer_idx != config.n_layer - 1:
+                # MLP2
+                split_embeddings = self.ring_reduce_scatter_comp_overlap(split_embeddings, *mlp2_w_b)
+
+                # residual connection 2
+                split_embeddings = residual + split_embeddings
+
+            else:  # final layer
+                # start all-gather the residual of split_embeddings
+                residual_container = sth if self.rank == 0 else None
+                residual_gather_task = dist.gather(residual, residual_container, dst=0, async_op=True)
+                # MLP2
+                hidden_states = Conv1D_forward_use_weights(split_embeddings, mlp2_w_b)
+
+                # reduce to rank0 device
+                dist.reduce(hidden_states, dst=0)
+
+                residual_gather_task.wait()
+
+                if self.rank == 0:
+                    residual = torch.concat(residual_container, dim=-1)
+                    # final residual connection 2
+                    hidden_states += residual
+                    return split_embeddings
 
     def tp_generate(self, max_length, split_MLP=True):
         input_ids = torch.LongTensor([self.tokenizer.convert_tokens_to_ids(list(self.text))])
@@ -523,6 +612,24 @@ class DecodingWorker:
                 return y_reduce
 
 
+def distributed_layer_norm(split_embedding, split_LN_weights, d_model, eps):
+    x_sum = split_embedding.sum(dim=-1, keepdim=True)
+    # obtain x.SUM
+    dist.all_reduce(x_sum, op=dist.ReduceOp.SUM)
+    x_mean = x_sum.div(d_model)
+    x_ssd = (split_embedding - x_mean).square().sum(dim=-1, keepdim=True)
+    # obtain x.SSD (Sum of Squared Deviations)
+    dist.all_reduce(x_ssd, op=dist.ReduceOp.SUM)
+    x_var = x_ssd.div(d_model)
+
+    # perform partial LayerNorm on split_embedding
+    split_embedding = (split_embedding - x_mean) / torch.sqrt(x_var + eps)
+    if split_LN_weights is not None:
+        split_w, split_b = split_LN_weights
+        return split_embedding * split_w + split_b
+    return split_embedding
+
+
 def test_overlap(w: DecodingWorker):
     # test overlap
     b = 1
@@ -575,7 +682,8 @@ if __name__ == '__main__':
     worker = DecodingWorker((MAIN_WORKER_IP, port_tcp))
 
     # test TP
-    split_MLP = True
+    # split_MLP = True
+    split_embedding = True
     worker.init_tp(split_MLP)
     print(worker.text)
     generated_text = worker.tp_generate(200, split_MLP)
@@ -584,3 +692,5 @@ if __name__ == '__main__':
 
     # test overlap
     # test_overlap(worker)
+
+    # test split_embedding

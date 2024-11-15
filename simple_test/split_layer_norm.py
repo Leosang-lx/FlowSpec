@@ -7,7 +7,7 @@ import torch.nn.init as init
 def split_LN(split_embedding, x_mean, x_var, split_w, split_b, eps):
     # split_embedding.sub_(x_mean).div_(torch.sqrt(x_var + eps))
     y = (split_embedding - x_mean) / torch.sqrt(x_var + eps)
-    if split_b is not None and split_b is not None:
+    if split_w is not None and split_b is not None:
         return y * split_w + split_b
     return y
 

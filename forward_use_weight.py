@@ -169,16 +169,11 @@ def split_QKV(QKV_matrix, d_h):
     return Q, K, V
 
 
-def QKV_proj_and_attn_using_weights(hidden_states, attn_proj_w_b, transformer_config, layer_cache=None):
-    # QKV projection
-    if len(attn_proj_w_b) == 3:  # Q_proj_w_b, K_proj_w_b, V_proj_w_b
-        attn_proj_w_b = tuple([torch.concat(ws_or_bs, dim=-1) for ws_or_bs in zip(*attn_proj_w_b)])
-    attn_proj_w, attn_proj_b = attn_proj_w_b
-
+def QKV_proj(hidden_states, attn_proj_w_b, d_h, layer_cache=None):
     # forward QKV projection with merged weights: x * (W_Q|W_K|W_V) = Q|K|V
     QKV = Conv1D_forward_use_weights(hidden_states, attn_proj_w_b)
 
-    Q, K, V = split_QKV(QKV, transformer_config.d_h)
+    Q, K, V = split_QKV(QKV, d_h)
 
     if layer_cache is not None:
         # update layer_cache
@@ -187,7 +182,29 @@ def QKV_proj_and_attn_using_weights(hidden_states, attn_proj_w_b, transformer_co
         V = torch.cat((V_cache, V), dim=2)
     layer_cache_present = (K, V)
 
-    attn_output, attn_weights = attn(Q, K, V)
+    return (Q, K, V), layer_cache_present
+
+
+def QKV_proj_and_attn_using_weights(hidden_states, attn_proj_w_b, transformer_config, layer_cache=None):
+    # QKV projection
+    if len(attn_proj_w_b) == 3:  # Q_proj_w_b, K_proj_w_b, V_proj_w_b
+        attn_proj_w_b = tuple([torch.concat(ws_or_bs, dim=-1) for ws_or_bs in zip(*attn_proj_w_b)])
+    attn_proj_w, attn_proj_b = attn_proj_w_b
+
+    # # forward QKV projection with merged weights: x * (W_Q|W_K|W_V) = Q|K|V
+    # QKV = Conv1D_forward_use_weights(hidden_states, attn_proj_w_b)
+    #
+    # Q, K, V = split_QKV(QKV, transformer_config.d_h)
+    #
+    # if layer_cache is not None:
+    #     # update layer_cache
+    #     K_cache, V_cache = layer_cache
+    #     K = torch.cat((K_cache, K), dim=2)
+    #     V = torch.cat((V_cache, V), dim=2)
+    # layer_cache_present = (K, V)
+    QKV, layer_cache_present = QKV_proj(hidden_states, attn_proj_w_b, transformer_config.d_h, layer_cache)
+
+    attn_output, attn_weights = attn(*QKV)
     # merge heads
     attn_output = merge_heads(attn_output, transformer_config.d_h)
 
