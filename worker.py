@@ -3,7 +3,9 @@ Only for testing the distributed decoding performance
 """
 import argparse
 import sys
+import time
 
+import numpy as np
 import torch
 import torch.distributed as dist
 
@@ -111,12 +113,19 @@ class DecodingWorker:
         """
         self.split_weights = None
         self.layers_MLP_weights = None
+        self.MLP_activation = transformers.activations.NewGELUActivation()
+
         self.tokenizer = None
         self.config = None
 
+        # self.embedding_weights = None
         self.token_embedding = None
         self.position_embedding = None
         self.layers_ln_weight = None
+        self.all_split_embeddings = None
+        self.split_heads = None  # split heads range (indexes set from 0 to h-1)
+        self.split_embedding_range = None  # = split_heads * d_h
+
         self.ln_f_weight = None
         self.lm_head = None
 
@@ -174,13 +183,59 @@ class DecodingWorker:
 
     # else:  # accept data from rank_0 device
 
-    def init_tp(self, split_MLP=True):
+    def tp_init(self, conn_to_master: socket.socket, split_MLP=True):
+        """
+        init necessary weights for tensor parallelism
+        :param conn_to_master:
+        :param split_MLP:
+        :return:
+        """
+        request = f'TP_WEIGHT {self.rank} SPLIT_MLP {int(split_MLP)}\n'
+        conn_to_master.sendall(request.encode())
+        data = recv_data(conn_to_master)
+        if self.rank == 0:
+            if not split_MLP:
+                self.config, self.split_weights, self.tokenizer, embedding_weights, self.ln_f_weight, \
+                    self.layers_MLP_weights = data
+            else:
+                self.config, self.split_weights, self.tokenizer, embedding_weights, self.ln_f_weight = data
+
+            token_embedding_weight, position_embedding_weight = embedding_weights
+            self.token_embedding = nn.Embedding.from_pretrained(token_embedding_weight)
+            self.position_embedding = nn.Embedding.from_pretrained(position_embedding_weight)
+            self.lm_head = nn.Linear(self.config.d_model, self.config.vocab_size, bias=False)
+            self.lm_head.weight = nn.Parameter(token_embedding_weight)
+
+        else:  # other workers
+            self.config, self.split_weights = data
+
+    def se_init(self, conn_to_master: socket.socket):
+        request = f'SE_WEIGHT {self.rank}\n'
+        conn_to_master.sendall(request.encode())
+        data = recv_data(conn_to_master)
+        if self.rank == 0:
+            self.config, self.split_weights, self.tokenizer, embedding_weights, self.all_split_embeddings = data
+
+            token_embedding_weight, position_embedding_weight = embedding_weights
+            self.token_embedding = nn.Embedding.from_pretrained(token_embedding_weight)
+            self.position_embedding = nn.Embedding.from_pretrained(position_embedding_weight)
+            self.lm_head = nn.Linear(self.config.d_model, self.config.vocab_size, bias=False)
+            self.lm_head.weight = nn.Parameter(token_embedding_weight)
+        else:
+            self.config, self.split_weights = data
+
+        h_d = self.config.h // self.n_device
+        self.split_heads = self.rank * h_d, (self.rank + 1) * h_d  # default: equal split
+        h_l, h_r = self.split_heads
+        self.split_embedding_range = h_l * self.config.d_h, h_r * self.config.d_h  # default: equal split
+
+    def init(self, split_MLP=True, split_embedding=False):
         """
         Receive split_weight and config from master
         """
         with socket.create_connection((MASTER_IP, master_port)) as conn:
-            print('Get necessary data from master')
             if self.rank == 0:  # main worker
+                print('Send WORKER_NUM to master')
                 request = f'WORKER_NUM {self.n_device}\n'
                 conn.sendall(request.encode())
                 reply = recv_data(conn)
@@ -189,29 +244,19 @@ class DecodingWorker:
                 reply_tasks = [async_send_data(self.connections[rank - 1][0], 'OK') for rank in
                                range(1, self.n_device)]
                 self.loop.run_until_complete(asyncio.gather(*reply_tasks))
-
-                request = f'TP_WEIGHT {self.rank} SPLIT_MLP {int(split_MLP)}\n'
-                conn.sendall(request.encode())
-                if split_MLP:
-                    self.config, self.tokenizer, self.split_weights, ln_weights, embedding_weights = recv_data(conn)
-                else:
-                    self.config, self.tokenizer, self.split_weights, ln_weights, embedding_weights, self.layers_MLP_weights = recv_data(
-                        conn)
-                token_embedding_weight, position_embedding_weight = embedding_weights
-                self.token_embedding = nn.Embedding.from_pretrained(token_embedding_weight)
-                self.position_embedding = nn.Embedding.from_pretrained(position_embedding_weight)
-                self.lm_head = nn.Linear(self.config.d_model, self.config.vocab_size, bias=False)
-                self.lm_head.weight = nn.Parameter(token_embedding_weight)
-
-            else:  # other workers
+            else:
                 reply = recv_data(self.client_socket)
                 if reply != 'OK':
                     raise Exception('Unknown reply from main worker')
-                request = f'TP_WEIGHT {self.rank} SPLIT_MLP {int(split_MLP)}\n'
-                conn.sendall(request.encode())
-                self.config, self.tokenizer, self.split_weights, ln_weights = recv_data(conn)
-            self.layers_ln_weight, self.ln_f_weight = ln_weights
-            print('TP Init Done!')
+
+            # ask necessary weights from master
+            print('Get necessary weights from master')
+            if split_embedding:
+                self.se_init(conn)
+            else:
+                self.tp_init(conn, split_MLP)
+
+        print('TP Init Done!')
 
     def co_forward_tp(self, input_ids=None, use_cache=True, split_MLP=True):
         """
@@ -221,6 +266,9 @@ class DecodingWorker:
         """
         # split_heads = self.config.split_heads
         d_model = self.config.d_model
+
+        # latency_measure
+        all_reduce_latency = []
 
         if self.split_KV_cache is None:
             past_length = 0
@@ -255,7 +303,7 @@ class DecodingWorker:
         # forward_layers
         for layer_idx in range(self.config.n_layer):
             split_weight_layer = self.split_weights[layer_idx]
-            ln1_w_b, ln2_w_b = self.layers_ln_weight[layer_idx]
+            ln1_w_b, ln2_w_b = split_weight_layer['LN']
             split_cache_layer = self.split_KV_cache[layer_idx]
 
             residual = hidden_states
@@ -271,7 +319,10 @@ class DecodingWorker:
 
             if split_MLP:  # split MLP inference on workers
                 # AllReduce
+                start_a_r = time.perf_counter()
                 dist.all_reduce(split_MHA_output, op=dist.ReduceOp.SUM)
+                all_reduce_latency.append(time.perf_counter() - start_a_r)
+
                 # Residual connection
                 hidden_states = split_MHA_output + residual
 
@@ -282,11 +333,15 @@ class DecodingWorker:
                 # split MLP
                 split_MLP_weight = split_weight_layer['MLP']
                 split_MLP_output = MLP_forward_use_weights(hidden_states, split_MLP_weight, self.config)
+
                 # AllReduce or SingleReduce (for the last layer)
+                start_a_r = time.perf_counter()
                 if layer_idx == self.config.n_layer - 1:
                     dist.reduce(split_MLP_output, dst=0, op=dist.ReduceOp.SUM)
                 else:
                     dist.all_reduce(split_MLP_output, op=dist.ReduceOp.SUM)
+                all_reduce_latency.append(time.perf_counter() - start_a_r)
+
                 # Residual connection
                 hidden_states = split_MLP_output + residual
 
@@ -306,6 +361,8 @@ class DecodingWorker:
         if use_cache:  # udpate cache
             self.split_KV_cache = cache_present
 
+        print(f'All-Reduce: total {np.sum(all_reduce_latency)}s, avg {np.mean(all_reduce_latency)}s')
+
         if self.rank == 0:
             hidden_states = F.layer_norm(hidden_states, (d_model,), *self.ln_f_weight, self.config.ln_eps)
             return hidden_states
@@ -323,7 +380,9 @@ class DecodingWorker:
         """
         # split_heads = self.config.split_heads
         d_model = self.config.d_model
+        d_h = self.config.d_h
 
+        # init cache
         if self.split_KV_cache is None:
             past_length = 0
             self.split_KV_cache = (None,) * self.config.n_layer
@@ -333,6 +392,8 @@ class DecodingWorker:
         if use_cache:
             cache_present = ()  # store updated KV-Cache by layer
 
+        # init inference
+        start_init = time.perf_counter()
         if self.rank == 0:  # main worker todo: choose to send tokens or hidden_states
             token_embedding = self.token_embedding(input_ids)
             position_ids = torch.arange(past_length, input_ids.shape[-1] + past_length, dtype=torch.long,
@@ -350,6 +411,8 @@ class DecodingWorker:
             hidden_states = torch.zeros(*input_shape)
 
         dist.broadcast(hidden_states, src=0)  # init hidden_states
+        end_init = time.perf_counter()
+        print(f'{end_init - start_init}s for inference init')
 
         # forward layers
         for layer_idx, (layer_weights, layer_cache) in enumerate(zip(self.split_weights, self.split_KV_cache)):
@@ -363,24 +426,27 @@ class DecodingWorker:
 
             if layer_idx == 0:  # 1st layer
                 # residual 1
-                residual = hidden_states[split_embedding_range]
+                se_l, se_r = self.split_embedding_range
+                residual = hidden_states[..., se_l:se_r]
                 # LN1: complete weight
-                hidden_states = F.layer_norm(hidden_states, (d_model,), *ln1_w_b, config.ln_eps)
+                hidden_states = F.layer_norm(hidden_states, (d_model,), *ln1_w_b, self.config.ln_eps)
 
                 # QKV projection
-                QKV, layer_cache = QKV_proj(hidden_states, QKV_proj_w_b, config.d_h, layer_cache)
+                (Q, K, V), layer_cache = QKV_proj(hidden_states, QKV_proj_w_b, self.config.d_h, layer_cache)
 
             else:  # 2-n_l layers
                 # residual 1
                 residual = split_embeddings
 
                 # LN1: split_embedding
-                split_embeddings = distributed_layer_norm(split_embeddings, ln1_w_b, d_model, config.ln_eps)
+                start_ln = time.perf_counter()
+                split_embeddings = distributed_layer_norm(split_embeddings, ln1_w_b, d_model, self.config.ln_eps)
+                print(f'{time.perf_counter() - start_ln}s for LN1')
 
                 # QKV projection: split_embedding
                 QKV = self.ring_gather_reduce_comp_overlap(split_embeddings, *QKV_proj_w_b)
 
-                Q, K, V = split_QKV(QKV, config.d_h)
+                Q, K, V = split_QKV(QKV, self.config.d_h)
                 if layer_cache is not None:  # update layer_cache
                     K_cache, V_cache = layer_cache
                     K = torch.cat((K_cache, K), dim=2)
@@ -391,7 +457,8 @@ class DecodingWorker:
                 cache_present = cache_present + (layer_cache,)
 
             # attn
-            split_embeddings = attn(*QKV)
+            attn_output, _ = attn(Q, K, V)
+            split_embeddings = merge_heads(attn_output, d_h)
 
             # Wo projection
             split_embeddings = self.ring_reduce_scatter_comp_overlap(split_embeddings, *Wo_proj_w_b)
@@ -407,15 +474,17 @@ class DecodingWorker:
             mlp1_w_b, mlp2_w_b = layer_weights['MLP']
 
             # LN2: split_embedding
-            split_embeddings = distributed_layer_norm(split_embeddings, ln2_w_b, d_model, config.ln_eps)
+            start_ln = time.perf_counter()
+            split_embeddings = distributed_layer_norm(split_embeddings, ln2_w_b, d_model, self.config.ln_eps)
+            print(f'{time.perf_counter() - start_ln}s for LN2')
 
             # MLP1
             split_embeddings = self.ring_gather_reduce_comp_overlap(split_embeddings, *mlp1_w_b)
 
             # activation
-            split_embeddings = activation(split_embeddings)
+            split_embeddings = self.MLP_activation(split_embeddings)
 
-            if layer_idx != config.n_layer - 1:
+            if layer_idx != self.config.n_layer - 1:
                 # MLP2
                 split_embeddings = self.ring_reduce_scatter_comp_overlap(split_embeddings, *mlp2_w_b)
 
@@ -424,7 +493,10 @@ class DecodingWorker:
 
             else:  # final layer
                 # start all-gather the residual of split_embeddings
-                residual_container = sth if self.rank == 0 else None
+                # init tensor container according to embedding size of all devices
+                residual_container = [torch.empty(*split_embeddings.shape[:-1], split_embeddings_size)
+                                      for split_embeddings_size in
+                                      self.all_split_embeddings] if self.rank == 0 else None
                 residual_gather_task = dist.gather(residual, residual_container, dst=0, async_op=True)
                 # MLP2
                 hidden_states = Conv1D_forward_use_weights(split_embeddings, mlp2_w_b)
@@ -434,46 +506,68 @@ class DecodingWorker:
 
                 residual_gather_task.wait()
 
-                if self.rank == 0:
-                    residual = torch.concat(residual_container, dim=-1)
-                    # final residual connection 2
-                    hidden_states += residual
-                    return split_embeddings
+        if use_cache:  # udpate cache
+            self.split_KV_cache = cache_present
 
-    def tp_generate(self, max_length, split_MLP=True):
-        input_ids = torch.LongTensor([self.tokenizer.convert_tokens_to_ids(list(self.text))])
-        assert input_ids.size(-1) < max_length
-        self.split_KV_cache = None  # clear cache
-        cur_len = input_ids.size(-1)
-        generated_text = []
+        if self.rank == 0:
+            residual = torch.concat(residual_container, dim=-1)
+            # final residual connection 2
+            hidden_states += residual
+            return hidden_states
+
+    def tp_generate(self, max_length, split_MLP=True, split_embedding=False):
+        if split_embedding:
+            tp_forward = self.co_forward_se
+        else:
+            tp_forward = self.co_forward_tp
 
         # prefill
-        print('Start Prefill')
-        start_prefill = time.perf_counter()
-        hidden_states = self.tp_forward(input_ids, split_MLP=True)
         if self.rank == 0:
-            logits = self.lm_head(hidden_states)
-            next_token_ids = logits2token(logits[:, -1, :])
-            # print(next_token_ids)
-            # input_ids = torch.concat((input_ids, next_token_ids), dim=-1)
+            input_ids = torch.LongTensor([self.tokenizer.convert_tokens_to_ids(list(self.text))])
+            cur_len = input_ids.size(-1)
+            assert cur_len < max_length
+            # share the cur_len
+            input_size = torch.tensor(input_ids.shape, dtype=torch.int32)
+            dist.broadcast(input_size, src=0)
+
+            self.split_KV_cache = None  # clear cache
+            generated_text = []
+
+            print('Start Prefill')
+            start_prefill = time.perf_counter()
+            hidden_states = tp_forward(input_ids)
+
+            start_lmhead = time.perf_counter()
+            logits = self.lm_head(hidden_states[:, -1, :])
+            next_token_ids = logits2token(logits)
             input_ids = next_token_ids
-            # next_tokens = self.tokenizer.convert_ids_to_tokens
             end_prefill = time.perf_counter()
+            print(f'{end_prefill - start_lmhead}s for lm_head and token generation')
+
+        else:  # other workers
+            input_size = torch.empty(2, dtype=torch.int32)
+            dist.broadcast(input_size, src=0)
+            cur_len = input_size[-1]
+            print('Start Prefill')
+            tp_forward()
+
         cur_len += 1
 
         # decoding
         print('Start decoding')
         start_decoding = time.perf_counter()
         for seq_len in tqdm(range(cur_len, max_length + 1)):
-            hidden_states = self.tp_forward(input_ids, split_MLP)
             if self.rank == 0:
-                logits = self.lm_head(hidden_states)
-                next_token_ids = logits2token(logits[:, -1, :])
+                hidden_states = tp_forward(input_ids)
+                logits = self.lm_head(hidden_states[:, -1, :])
+                next_token_ids = logits2token(logits)
                 generated_token = self.tokenizer.convert_ids_to_tokens(next_token_ids)
                 generated_text.append(generated_token[0])
                 # input_ids = torch.concat((input_ids, next_token_ids), dim=-1)
                 input_ids = next_token_ids
                 # next_tokens = self.tokenizer.convert_ids_to_tokens
+            else:
+                tp_forward()
         end_decoding = time.perf_counter()
 
         if self.rank == 0:
@@ -491,7 +585,7 @@ class DecodingWorker:
             ring_index %= self.n_device
         return ring_index
 
-    def ring_reduce_scatter_comp_overlap(self, xi: torch.Tensor, Wi: torch.Tensor, b=None):
+    def ring_reduce_scatter_comp_overlap(self, xi: torch.Tensor, Wi: torch.Tensor, bi=None):
         """
         overlap the ring reduce-scatter comm operation with the **previous** matrix-vector multiplication
         :return: split reduced results
@@ -516,23 +610,24 @@ class DecodingWorker:
             # start receiving
             if i != self.n_device - 1:
                 send_task = dist.isend(yi, dst=comm_to_index)
-                print(f'd_{self.rank} send to d_{comm_to_index}')
-                print(f'{self.rank} recv from d_{comm_from_index}...', end='')
+                # print(f'd_{self.rank} send to d_{comm_to_index}')
+                # print(f'{self.rank} recv from d_{comm_from_index}...', end='')
                 recv_task = dist.irecv(from_tensor, src=comm_from_index)
 
             else:
                 recv_task = None
 
             # partial computation
-            yi = xi @ Wi_split[comp_index]
+            yi = torch.matmul(xi, Wi_split[comp_index])
 
             # recv result from others
             if recv_task:
                 send_task.wait()
                 recv_task.wait()
-                print(f'done')
-                yi = yi + from_tensor  # reduce
-
+                # print(f'done')
+                yi.add_(from_tensor)  # reduce
+        if bi is not None:
+            yi.add_(bi)
         return yi
 
     def ring_all_gather_comp_overlap(self, xi: torch.Tensor, Wi: torch.Tensor, b=None):
@@ -570,7 +665,7 @@ class DecodingWorker:
                 assert None not in split_results
                 return split_results
 
-    def ring_gather_reduce_comp_overlap(self, xi: torch.Tensor, Wi: torch.Tensor, b=None):
+    def ring_gather_reduce_comp_overlap(self, xi: torch.Tensor, Wi: torch.Tensor, bi=None):
         """
         overlap the ring all-gather comm operation with the **following** matrix-vector multiplication
         introduce additional reduce for splitting the embedding dimension
@@ -597,9 +692,9 @@ class DecodingWorker:
 
             comp_index = self.get_ring_index(self.rank, i + 1)  # [rank, rank-1, ..., rank+1]
 
-            yi = xi @ Wi_split[comp_index]  # mm
+            yi = torch.matmul(xi, Wi_split[comp_index])  # mm
             if y_reduce is not None:
-                y_reduce = y_reduce + yi
+                y_reduce.add_(yi)
             else:
                 y_reduce = yi
 
@@ -609,6 +704,8 @@ class DecodingWorker:
                 # send_task.wait(timeout=timeout_max)
                 xi, from_tensor = from_tensor, xi  # exchange reference
             else:
+                if bi is not None:
+                    y_reduce.add_(bi)
                 return y_reduce
 
 
@@ -682,11 +779,11 @@ if __name__ == '__main__':
     worker = DecodingWorker((MAIN_WORKER_IP, port_tcp))
 
     # test TP
-    # split_MLP = True
-    split_embedding = True
-    worker.init_tp(split_MLP)
+    params = {'split_embedding': False}
+
+    worker.init(**params)
     print(worker.text)
-    generated_text = worker.tp_generate(200, split_MLP)
+    generated_text = worker.tp_generate(105, **params)
     if worker.rank == 0:
         print(generated_text)
 

@@ -9,19 +9,19 @@ def split_weight_TP(model_weights, split_nums: int | list[int], config, split_em
     """
     split weights for TP, only has the weights in **layers**
     :param config: hyper params of the transformer model: configuration
-    :param split_embedding: further split embedding including **bias** and weights of **LayerNorm**
+    :param split_embedding: False: normal TP; True: split embeddings
     :param model_weights: complete weight of a transformer model for inference
     :param heads:
     :param split_nums: int or list(int), the heads number in each partition
     :return:
     """
     h = config.h
-    if isinstance(split_nums, int):  # equal split
-        assert h % split_nums == 0
-    else:  # unbalanced split
-        assert sum(split_nums) == h
-    # keep complete embedding weight
-    embedding_weights = model_weights['embedding_weights']
+    # if isinstance(split_nums, int):  # equal split
+    #     assert h % split_nums == 0
+    # else:  # unbalanced split
+    #     assert sum(split_nums) == h
+    # # keep complete embedding weight
+    # embedding_weights = model_weights['embedding_weights']
 
     layers_weights = model_weights['layers_weights']
     if isinstance(split_nums, int):  # equal split
@@ -94,14 +94,20 @@ def split_weight_TP(model_weights, split_nums: int | list[int], config, split_em
             split_mlp2_bs = (mlp2_b,) + (None,) * (split_cnt - 1)
         split_mlp2_wb = tuple(zip(split_mlp2_ws, split_mlp2_bs))
 
+        layer_ln_weights = layer_weights['LN']
+
         if split_embedding:  # split LayerNorm
-            ln1_w_b, ln2_w_b = layer_weights['LN']
+            ln1_w_b, ln2_w_b = layer_ln_weights
             # split LN1
             ln1_w, ln1_b = ln1_w_b
-            split_ln1_ws = ln1_w.split(split_embedding_num, dim=-1)
-            split_ln1_ws = [partition.clone() for partition in split_ln1_ws]
-            split_ln1_bs = ln1_b.split(split_embedding_num, dim=-1)
-            split_ln1_bs = [partition.clone() for partition in split_ln1_bs]
+            if layer_idx == 0:
+                split_ln1_ws = [ln1_w] * split_cnt
+                split_ln1_bs = [ln1_b] * split_cnt
+            else:
+                split_ln1_ws = ln1_w.split(split_embedding_num, dim=-1)
+                split_ln1_ws = [partition.clone() for partition in split_ln1_ws]
+                split_ln1_bs = ln1_b.split(split_embedding_num, dim=-1)
+                split_ln1_bs = [partition.clone() for partition in split_ln1_bs]
 
             # split LN2
             ln2_w, ln2_b = ln2_w_b
@@ -118,6 +124,8 @@ def split_weight_TP(model_weights, split_nums: int | list[int], config, split_em
             if split_embedding:
                 split_layer_weights['LN'] = (split_ln1_ws[idx_split], split_ln1_bs[idx_split]), \
                     (split_ln2_ws[idx_split], split_ln2_bs[idx_split])
+            else:
+                split_layer_weights['LN'] = layer_ln_weights
             split_layers_weights[idx_split].append(split_layer_weights)
 
     return split_layers_weights

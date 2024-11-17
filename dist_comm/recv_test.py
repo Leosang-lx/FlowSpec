@@ -1,9 +1,9 @@
 import torch
 import torch.distributed as dist
 import socket
-# from comm import list_network_interfaces
+from comm import send_data, recv_data
 import os
-from network_config import *
+from dist_comm.network_config import *
 import argparse
 
 parser = argparse.ArgumentParser()
@@ -12,11 +12,6 @@ parser.add_argument('-s', '--server', required=False, default=None)
 arguments = parser.parse_args()
 provided_ip = arguments.server
 
-init_method = gen_init_method(MAIN_WORKER_IP, port_torch)
-print('init_method:', init_method)
-# store = dist.TCPStore(server_ip, port, )
-dist.init_process_group(backend='gloo', init_method=init_method, world_size=2, rank=0)
-print(dist.is_initialized())
 
 def get_ip_address():
     # windows!!!
@@ -31,20 +26,31 @@ def get_ip_address():
     else:
         return None
 
-
-# os.environ['USE_LIBUV'] = 'False'
-# os.environ['USE_IPv6'] = 'False'
-# os.environ['MASTER_ADDR'] = server_ip
-# os.environ['MASTER_PORT'] = str(port)
-# Enable when using RaspberryPi
-# os.environ['GLOO_SOCKET_IFNAME'] = 'eth0'
-
 # parser = argparse.ArgumentParser()
 # parser.add_argument('-i', '--ip', required=False)
-tensor_shape = (1, 64, 224, 224)
+tensor_shape = (1, 64, 224, 112)
+
+
+def socket_recv_and_send():
+    end_conn = socket.create_connection((MAIN_WORKER_IP, port_tcp))
+
+    data = recv_data(end_conn)
+
+    send_data(end_conn, data)
+
+    end_conn.close()
+
+
+
 
 
 def recv_and_send():
+    init_method = gen_init_method(MAIN_WORKER_IP, port_torch)
+    print('init_method:', init_method)
+    # store = dist.TCPStore(server_ip, port, )
+    dist.init_process_group(backend='gloo', init_method=init_method, world_size=2, rank=1)
+    print(dist.is_initialized())
+
     # sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     # sock.bind((server_ip, port))
     # sock.listen()
@@ -57,20 +63,23 @@ def recv_and_send():
     received_tensor = torch.zeros(tensor_shape)  # 假设我们知道张量的形状
 
     # 从客户端 (rank 0) 接收张量
-    dist.recv(received_tensor, src=1)
+    dist.recv(received_tensor, src=0)
     print(f"Server received tensor: {received_tensor.shape}")
 
     # 立即发送接收到的张量回客户端
-    dist.send(received_tensor, dst=1)
+    dist.send(received_tensor, dst=0)
+
+    dist.destroy_process_group()
 
 def test_broadcast():
     data = torch.randn(1, 100, 768)
     shape = torch.tensor(data.shape, dtype=torch.int32)
     print(shape.dtype)
-    dist.broadcast(shape, src=0)
-    dist.broadcast(data, src=0)
+    dist.broadcast(shape, src=1)
+    dist.broadcast(data, src=1)
     print(data)
 
 
 if __name__ == "__main__":
-    test_broadcast()
+    socket_recv_and_send()
+    recv_and_send()

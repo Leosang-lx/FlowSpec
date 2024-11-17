@@ -1,12 +1,19 @@
 import ipaddress
 import datetime
+import socket
+import os
 
-distributed = False
+distributed = True
 
 if distributed:
     MAIN_WORKER_IP = '192.168.1.101'
+    ipvx = socket.AF_INET
+    # Enable when using RaspberryPi
+    os.environ['GLOO_SOCKET_IFNAME'] = 'eth0'
 else:
     MAIN_WORKER_IP = '::1'
+    ipvx = socket.AF_INET6
+
 MASTER_IP = '192.168.1.150'
 INTERFACE = 'eth0'
 SUBNET = '192.168.1.1'
