@@ -60,7 +60,7 @@ def split_weight_TP(model_weights, split_nums: int | list[int], config, split_em
         # split multi-head projection weights Wo
         attn_Wo_w, attn_Wo_b = attn_Wo_w_b
         split_attn_Wo_ws = attn_Wo_w.split(split_embedding_num, dim=0)
-        split_attn_Wo_ws = [partition for partition in split_attn_Wo_ws]  # clone()
+        split_attn_Wo_ws = [partition.clone() for partition in split_attn_Wo_ws]  # clone()
         if split_embedding:  # split_embedding: split bias as well
             split_attn_Wo_bs = attn_Wo_b.split(split_embedding_num, dim=-1)
             split_attn_Wo_bs = [partition.clone() for partition in split_attn_Wo_bs]  # clone()

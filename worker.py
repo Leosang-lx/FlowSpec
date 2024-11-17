@@ -382,6 +382,8 @@ class DecodingWorker:
         d_model = self.config.d_model
         d_h = self.config.d_h
 
+        distr_ln_latency = []
+
         # init cache
         if self.split_KV_cache is None:
             past_length = 0
@@ -393,7 +395,7 @@ class DecodingWorker:
             cache_present = ()  # store updated KV-Cache by layer
 
         # init inference
-        start_init = time.perf_counter()
+        # start_init = time.perf_counter()
         if self.rank == 0:  # main worker todo: choose to send tokens or hidden_states
             token_embedding = self.token_embedding(input_ids)
             position_ids = torch.arange(past_length, input_ids.shape[-1] + past_length, dtype=torch.long,
@@ -411,8 +413,8 @@ class DecodingWorker:
             hidden_states = torch.zeros(*input_shape)
 
         dist.broadcast(hidden_states, src=0)  # init hidden_states
-        end_init = time.perf_counter()
-        print(f'{end_init - start_init}s for inference init')
+        # end_init = time.perf_counter()
+        # print(f'{end_init - start_init}s for inference init')
 
         # forward layers
         for layer_idx, (layer_weights, layer_cache) in enumerate(zip(self.split_weights, self.split_KV_cache)):
@@ -441,7 +443,7 @@ class DecodingWorker:
                 # LN1: split_embedding
                 start_ln = time.perf_counter()
                 split_embeddings = distributed_layer_norm(split_embeddings, ln1_w_b, d_model, self.config.ln_eps)
-                print(f'{time.perf_counter() - start_ln}s for LN1')
+                distr_ln_latency.append(time.perf_counter() - start_ln)
 
                 # QKV projection: split_embedding
                 QKV = self.ring_gather_reduce_comp_overlap(split_embeddings, *QKV_proj_w_b)
@@ -476,7 +478,7 @@ class DecodingWorker:
             # LN2: split_embedding
             start_ln = time.perf_counter()
             split_embeddings = distributed_layer_norm(split_embeddings, ln2_w_b, d_model, self.config.ln_eps)
-            print(f'{time.perf_counter() - start_ln}s for LN2')
+            distr_ln_latency.append(time.perf_counter() - start_ln)
 
             # MLP1
             split_embeddings = self.ring_gather_reduce_comp_overlap(split_embeddings, *mlp1_w_b)
@@ -508,6 +510,8 @@ class DecodingWorker:
 
         if use_cache:  # udpate cache
             self.split_KV_cache = cache_present
+
+        print(f'Distributed LayerNorm: total {np.sum(distr_ln_latency)}s, avg {np.mean(distr_ln_latency)}s')
 
         if self.rank == 0:
             residual = torch.concat(residual_container, dim=-1)
@@ -779,7 +783,7 @@ if __name__ == '__main__':
     worker = DecodingWorker((MAIN_WORKER_IP, port_tcp))
 
     # test TP
-    params = {'split_embedding': False}
+    params = {'split_embedding': True}
 
     worker.init(**params)
     print(worker.text)
