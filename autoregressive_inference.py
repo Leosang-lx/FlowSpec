@@ -1,4 +1,4 @@
-import pathlib
+# import pathlib
 import time
 import torch.nn as nn
 import torch
@@ -13,8 +13,8 @@ def check_files_exist(model_directory):
     required_files = {
         'config.json': False,
         'pytorch_model.bin': False,  # 或者是 model.bin 或其他模型权重文件名
-        'special_tokens_map.json': False,
-        'tokenizer_config.json': False,
+        # 'special_tokens_map.json': False,
+        # 'tokenizer_config.json': False,
         'vocab.txt': False,  # 或者其他词汇表文件名
     }
     # 检查所有必要的文件是否都存在
@@ -145,21 +145,38 @@ def autoregressive_inference(model: nn.Module, input_text: str, max_length, use_
     print(generated_text)
 
 
+def get_model_path(cache_path, model_tag):
+    developer, model_name = tuple(model_tag.split('/'))
+    model_dir = f'models--{developer}--{model_name}'
+    snapshots_dir = os.path.join(cache_path, model_dir, 'snapshots')
+    if os.path.exists(snapshots_dir):
+        snapshots = os.listdir(snapshots_dir)
+        if len(snapshots) > 0:
+            return os.path.join(snapshots_dir, snapshots[0])
+        else:
+            raise Exception('No cache found in directory "snapshots"')
+    else:
+        return None
+
+
 # load pre-trained model, tokenizer and configuration of GPT-2
-project_dir = pathlib.Path('C:/Users/SUST/Desktop/Transformers/LLM Inference/')
-print(project_dir)
-model_tag = "uer/gpt2-chinese-cluecorpussmall"
+# project_dir = os.getcwd()
+# print(project_dir)
+
+model_tag = "uer/gpt2-chinese-cluecorpussmall"  # GPT2-small
+# model_tag = 'uer/gpt2-large-chinese-cluecorpussmall'  # GPT2-large
+# model_tag = 'uer/gpt2-xlarge-chinese-cluecorpussmall'  # GPT2-xlarge
+
 developer_name, model_name = tuple(model_tag.split('/'))
 cache_path = "model_file"
-model_path = pathlib.Path(f'{cache_path}/models--{developer_name}--{model_name}/snapshots/c2c0249d8a2731f269414cc3b22dff021f8e07a3')
-model_path = project_dir.joinpath(model_path)
+
+model_path = get_model_path(cache_path, model_tag)
+
+# model_path = pathlib.Path(f'{cache_path}/models--{developer_name}--{model_name}/snapshots/c2c0249d8a2731f269414cc3b22dff021f8e07a3')
+# model_path = project_dir.joinpath(model_path)
 
 
-# check necessary files
-if check_files_exist(model_path):
-    print("All required files are present.")
-else:
-    print("Some required files are missing.")
+
 
 # # config = GPT2Config.from_pretrained(model_path)
 # config = AutoConfig.from_pretrained(model_path)
@@ -178,7 +195,13 @@ else:
 # tokenizer = AutoTokenizer.from_pretrained(model_path)
 
 if __name__ == '__main__':
-    a = load_local_pretrained_model(model_path, 'tokenizer')
+
+    # check necessary files
+    if check_files_exist(model_path):
+        print("All required files are present.")
+    else:
+        print("Some required files are missing.")
+
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     # device = 'cpu'
     print(f'Device={device}')

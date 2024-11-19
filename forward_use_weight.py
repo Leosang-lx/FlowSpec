@@ -1,5 +1,4 @@
 # extract all model weight and test local inference, compare the result to that of model(*)
-import torch
 import torch.nn.functional as F
 import transformers.activations
 from types import SimpleNamespace
@@ -235,6 +234,9 @@ def layer_forward_use_weights(hidden_states, layer_weights, transformer_config, 
     attn_proj_w_b, attn_Wo_w_b = layer_weights['MHA']
     mlp1_w_b, mlp2_w_b = layer_weights['MLP']
     ln1_w_b, ln2_w_b = layer_weights['LN']
+
+    d_model = transformer_config.d_model
+    layer_norm_eps = transformer_config.ln_eps
 
     residual = hidden_states
     # LN1

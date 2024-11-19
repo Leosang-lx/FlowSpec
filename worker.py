@@ -677,7 +677,7 @@ class DecodingWorker:
                 return y_reduce
 
     def tp_generate(self, max_length, split_MLP=True, return_latency=False):
-        if self.split_embedding:
+        if split_embedding:
             tp_forward = self.co_forward_se
         else:
             tp_forward = self.co_forward_tp
@@ -706,7 +706,10 @@ class DecodingWorker:
             next_token_ids = logits2token(logits)
             input_ids = next_token_ids
             end_prefill = time.perf_counter()
-            print(f'{end_prefill - start_lmhead}s for lm_head and token generation')
+            prefill_t = end_prefill - start_prefill
+            print(f'Prefill : {prefill_t}s')
+            if show_latency_se:
+                print(f'{end_prefill - start_lmhead}s for lm_head and token generation')
 
         else:  # other workers
             input_size = torch.empty(2, dtype=torch.int32)
@@ -735,9 +738,7 @@ class DecodingWorker:
         end_decoding = time.perf_counter()
 
         if self.rank == 0:
-            prefill_t = end_prefill - start_prefill
             decoding_t = end_decoding - start_decoding
-            print(f'Prefill : {prefill_t}s')
             print(f'Decoding: {decoding_t}s')
             output = (''.join(generated_text),)
             if return_latency:
@@ -823,6 +824,7 @@ if __name__ == '__main__':
     }
     print(f'split_embedding={split_embedding}')
     worker.batch_size = batch
+    print(f'batch={batch}')
     worker.init(**params)
     print(worker.text)
     repeat_latency = []

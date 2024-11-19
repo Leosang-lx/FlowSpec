@@ -12,8 +12,8 @@ def check_files_exist(model_directory):
     required_files = {
         'config.json': False,
         'pytorch_model.bin': False,  # 或者是 model.bin 或其他模型权重文件名
-        'special_tokens_map.json': False,
-        'tokenizer_config.json': False,
+        # 'special_tokens_map.json': False,
+        # 'tokenizer_config.json': False,
         'vocab.txt': False,  # 或者其他词汇表文件名
     }
     # 检查所有必要的文件是否都存在
@@ -35,35 +35,38 @@ def load_pretrained_local(model_dir):
     return config, tokenizer, model
 
 
-def get_model_path(cache_path, model_name):
-    snapshots_dir = os.path.join(cache_path, model_name, 'snapshots')
+def get_model_path(cache_path, model_tag):
+    developer, model_name = tuple(model_tag.split('/'))
+    model_dir = f'models--{developer}--{model_name}'
+    snapshots_dir = os.path.join(cache_path, model_dir, 'snapshots')
     if os.path.exists(snapshots_dir):
         snapshots = os.listdir(snapshots_dir)
         if len(snapshots) > 0:
-            return snapshots[0]
+            return os.path.join(snapshots_dir, snapshots[0])
         else:
             raise Exception('No cache found in directory "snapshots"')
     else:
         return None
 
 
-# load pre-trained model, tokenizer and configuration of GPT-2
+# choose model scale
 # model_tag = "uer/gpt2-chinese-cluecorpussmall"  # GPT2-small
-model_tag = 'uer/gpt2-large-chinese-cluecorpussmall'  # GPT2-large
-developer_name, model_name = tuple(model_tag.split('/'))
+# model_tag = 'uer/gpt2-large-chinese-cluecorpussmall'  # GPT2-large
+model_tag = 'uer/gpt2-xlarge-chinese-cluecorpussmall'  # GPT2-xlarge
+
 cache_path = "model_file"
 
 cache_found = False
-model_path = get_model_path(cache_path, model_name)
+model_path = get_model_path(cache_path, model_tag)
 
-model_path = f'{cache_path}/models--{developer_name}--{model_name}/snapshots/c2c0249d8a2731f269414cc3b22dff021f8e07a3'
+# model_path = f'{cache_path}/models--{developer_name}--{model_name}/snapshots/c2c0249d8a2731f269414cc3b22dff021f8e07a3'
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 # device = 'cpu'
 print(f'Device={device}')
 
 # 检查模型文件是否完整
-if check_files_exist(model_path):
+if model_path is not None and check_files_exist(model_path):
     print("All required files are present.")
     # from local
     config = GPT2Config.from_pretrained(model_path)

@@ -1,6 +1,5 @@
 import asyncio
 from dist_comm.network_config import *
-from autoregressive_inference import *
 from distributedTP import *
 from comm import *
 

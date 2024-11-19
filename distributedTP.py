@@ -1,6 +1,3 @@
-import torch
-
-from autoregressive_inference import *
 from simple_test.split_layer_norm import split_LN
 from forward_use_weight import *
 
