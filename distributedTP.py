@@ -5,7 +5,7 @@ from simple_test.split_layer_norm import split_LN
 from forward_use_weight import *
 
 
-def split_weight_TP(model_weights, split_nums: int | list[int], config, split_embedding=False):
+def split_weight_TP(model_weights, split_nums: int | list[int], config, split_embedding=False, split_MLP=True):
     """
     split weights for TP, only has the weights in **layers**
     :param config: hyper params of the transformer model: configuration
@@ -15,6 +15,8 @@ def split_weight_TP(model_weights, split_nums: int | list[int], config, split_em
     :param split_nums: int or list(int), the heads number in each partition
     :return:
     """
+
+    assert not (split_embedding and not split_MLP)
     h = config.h
     # if isinstance(split_nums, int):  # equal split
     #     assert h % split_nums == 0
@@ -72,27 +74,32 @@ def split_weight_TP(model_weights, split_nums: int | list[int], config, split_em
         MLP_weights = layer_weights['MLP']
         mlp1_wb, mlp2_wb = MLP_weights
 
-        # split mlp1 weights
-        mlp1_w, mlp1_b = mlp1_wb
-        split_lens = [sen * config.rate for sen in
-                      split_embedding_num]  # todo: MLP may need another split setting, share the attn split setting first
-        split_mlp1_ws = mlp1_w.split(split_lens, dim=-1)
-        split_mlp1_ws = [partition.clone() for partition in split_mlp1_ws]  # clone()
-        split_mlp1_bs = mlp1_b.split(split_lens, dim=-1)
-        split_mlp1_bs = [partition.clone() for partition in split_mlp1_bs]  # clone()
-        split_mlp1_wb = tuple(zip(split_mlp1_ws, split_mlp1_bs))
+        if not split_MLP:
+            split_mlp1_wb = [mlp1_wb] * split_cnt
+            split_mlp2_wb = [mlp2_wb] * split_cnt
 
-        # split_mlp2 weights
-        mlp2_w, mlp2_b = mlp2_wb
-        split_mlp2_ws = mlp2_w.split(split_lens, dim=0)
-        split_mlp2_ws = [partition.clone() for partition in split_mlp2_ws]  # clone()
-        if split_embedding and layer_idx < config.n_layer - 1:  # split embedding as well
-            split_mlp2_bs = mlp2_b.split(split_embedding_num, dim=-1)
-            split_mlp2_bs = [partition.clone() for partition in split_mlp2_bs]  # clone()
-        else:  # let rank0 device keep the whole bias
-            # mlp2_b is applied for once after the results of ReduceSum, which is applied by only one partition
-            split_mlp2_bs = (mlp2_b,) + (None,) * (split_cnt - 1)
-        split_mlp2_wb = tuple(zip(split_mlp2_ws, split_mlp2_bs))
+        else:
+            # split mlp1 weights
+            mlp1_w, mlp1_b = mlp1_wb
+            split_lens = [sen * config.rate for sen in
+                          split_embedding_num]  # todo: MLP may need another split setting, share the attn split setting first
+            split_mlp1_ws = mlp1_w.split(split_lens, dim=-1)
+            split_mlp1_ws = [partition.clone() for partition in split_mlp1_ws]  # clone()
+            split_mlp1_bs = mlp1_b.split(split_lens, dim=-1)
+            split_mlp1_bs = [partition.clone() for partition in split_mlp1_bs]  # clone()
+            split_mlp1_wb = tuple(zip(split_mlp1_ws, split_mlp1_bs))
+
+            # split_mlp2 weights
+            mlp2_w, mlp2_b = mlp2_wb
+            split_mlp2_ws = mlp2_w.split(split_lens, dim=0)
+            split_mlp2_ws = [partition.clone() for partition in split_mlp2_ws]  # clone()
+            if split_embedding and layer_idx < config.n_layer - 1:  # split embedding as well
+                split_mlp2_bs = mlp2_b.split(split_embedding_num, dim=-1)
+                split_mlp2_bs = [partition.clone() for partition in split_mlp2_bs]  # clone()
+            else:  # let rank0 device keep the whole bias
+                # mlp2_b is applied for once after the results of ReduceSum, which is applied by only one partition
+                split_mlp2_bs = (mlp2_b,) + (None,) * (split_cnt - 1)
+            split_mlp2_wb = tuple(zip(split_mlp2_ws, split_mlp2_bs))
 
         layer_ln_weights = layer_weights['LN']
 
@@ -249,7 +256,7 @@ def split_layer_norm_local(split_embeddings, split_ln_params, eps):
     return split_embeddings
 
 
-def forward_layers_split_embedding_local(hidden_states: torch.Tensor, split_weights_layers, config, cache,
+def forward_layers_se_local(hidden_states: torch.Tensor, split_weights_layers, config, cache,
                                          use_cache=True):
     distributed_cache, cache_present = cache
 
@@ -456,8 +463,8 @@ def tp_local(input_ids, split_nums: int | list[int], split_weights_tp, config, d
     cache = distributed_cache, cache_present
     # forward layers
     if split_embedding:
-        hidden_states, cache_present = forward_layers_split_embedding_local(hidden_states, split_weights_tp, config,
-                                                                            cache, use_cache=True)
+        hidden_states, cache_present = forward_layers_se_local(hidden_states, split_weights_tp, config, cache,
+                                                               use_cache=True)
     else:
         hidden_states, cache_present = forward_layers_tp_local(hidden_states, split_weights_tp, config, cache,
                                                                use_cache=True)

@@ -35,36 +35,54 @@ def load_pretrained_local(model_dir):
     return config, tokenizer, model
 
 
+def get_model_path(cache_path, model_name):
+    snapshots_dir = os.path.join(cache_path, model_name, 'snapshots')
+    if os.path.exists(snapshots_dir):
+        snapshots = os.listdir(snapshots_dir)
+        if len(snapshots) > 0:
+            return snapshots[0]
+        else:
+            raise Exception('No cache found in directory "snapshots"')
+    else:
+        return None
+
+
 # load pre-trained model, tokenizer and configuration of GPT-2
-model_tag = "uer/gpt2-chinese-cluecorpussmall"
+# model_tag = "uer/gpt2-chinese-cluecorpussmall"  # GPT2-small
+model_tag = 'uer/gpt2-large-chinese-cluecorpussmall'  # GPT2-large
 developer_name, model_name = tuple(model_tag.split('/'))
 cache_path = "model_file"
+
+cache_found = False
+model_path = get_model_path(cache_path, model_name)
+
 model_path = f'{cache_path}/models--{developer_name}--{model_name}/snapshots/c2c0249d8a2731f269414cc3b22dff021f8e07a3'
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+# device = 'cpu'
+print(f'Device={device}')
 
 # 检查模型文件是否完整
 if check_files_exist(model_path):
     print("All required files are present.")
+    # from local
+    config = GPT2Config.from_pretrained(model_path)
+    # config = AutoConfig.from_pretrained(model_path)
+    print(config)
+    model = GPT2LMHeadModel.from_pretrained(model_path).to(device)
+    # tokenizer = AutoTokenizer.from_pretrained(model_path)
+    tokenizer = BertTokenizer.from_pretrained(model_path)
 else:
     print("Some required files are missing.")
+    config = GPT2Config.from_pretrained(model_tag, cache_dir=cache_path)
+    tokenizer = BertTokenizer.from_pretrained(model_tag, cache_dir=cache_path)
+    model = GPT2LMHeadModel.from_pretrained(model_tag, cache_dir=cache_path).to("cuda")
+    # model = AutoModel.from_pretrained(model_path).to(device)
 
-# config = GPT2Config.from_pretrained(model_path)
-config = AutoConfig.from_pretrained(model_path)
 model_config = (
-config.vocab_size, config.n_positions, config.n_layer, config.n_embd, config.n_head, config.n_embd // config.n_head, 4)
-print(config)
-
-# tokenizer = BertTokenizer.from_pretrained(model_tag, cache_dir=cache_path)
-# model = GPT2LMHeadModel.from_pretrained(model_tag, cache_dir=cache_path).to("cuda")
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
-# device = 'cpu'
-print(f'Device={device}')
-model = GPT2LMHeadModel.from_pretrained(model_path).to(device)
-# model = AutoModel.from_pretrained(model_path).to(device)
+    config.vocab_size, config.n_positions, config.n_layer, config.n_embd, config.n_head,
+    config.n_embd // config.n_head, 4)
 model.eval()
-
-# tokenizer = BertTokenizer.from_pretrained(model_path)
-tokenizer = AutoTokenizer.from_pretrained(model_path)
-
 
 if __name__ == '__main__':
     # 输入文本

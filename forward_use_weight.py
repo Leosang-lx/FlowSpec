@@ -85,7 +85,7 @@ def Conv1D_forward_use_weights(x, weights):
     weight, bias = weights
     if bias is None:
         size_out = x.size()[:-1] + (weight.size(-1),)
-        bias = torch.zeros(x.size(-2), weight.size(-1))
+        bias = torch.zeros(1, weight.size(-1))
     else:
         size_out = x.size()[:-1] + (bias.size(-1),)
     x = torch.addmm(bias, x.view(-1, x.size(-1)), weight)

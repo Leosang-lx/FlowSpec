@@ -140,21 +140,23 @@ async def async_send_data(send_socket: socket, data, waiting=0):
     return res
 
 
-def recv_data(recv_socket: socket):
+def recv_data(recv_socket: socket, return_bytes=False):
     msg = recv_socket.recv(data_header_size, socket.MSG_WAITALL)
     header = struct.unpack(data_header_format, msg)
     data_size = header[0]
-    data = bytearray(data_size)
-    ptr = memoryview(data)
+    raw_data = bytearray(data_size)
+    ptr = memoryview(raw_data)
     while data_size:
         nrecv = recv_socket.recv_into(buffer=ptr, nbytes=min(4096, data_size))
         ptr = ptr[nrecv:]
         data_size -= nrecv
         # recv = recv_socket.recv(min(4096, data_size), MSG_WAITALL)  # deprecated
-        # data += recv
+        # raw_data += recv
         # data_size -= len(recv)
-    data = pickle.loads(data)
-    return data
+    obj = pickle.loads(raw_data)
+    if return_bytes:
+        return obj, raw_data
+    return obj
 
 
 async def async_recv_data(recv_socket: socket):

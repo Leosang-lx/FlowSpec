@@ -3,7 +3,7 @@ import datetime
 import socket
 import os
 
-distributed = True
+distributed = False
 
 if distributed:
     MAIN_WORKER_IP = '192.168.1.101'

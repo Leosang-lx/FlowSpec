@@ -2,28 +2,40 @@
 Only for testing the distributed decoding performance
 """
 import argparse
+import os
 import sys
 import time
 
 import numpy as np
 import torch
 import torch.distributed as dist
+from datetime import datetime
 
 from cmd_util import get_ip_addr
 from comm import *
 from dist_comm.network_config import *
 from forward_use_weight import *
 
+
+def get_timestamp():
+    return datetime.datetime.now().strftime('%H:%M:%S')
+
+
 # parse server ip (optional) and group size
 parser = argparse.ArgumentParser()
-parser.add_argument('-i', '--ip', type=str, required=False, default=MAIN_WORKER_IP)
-parser.add_argument('-r', '--rank', type=int, required=False, default=0)
-parser.add_argument('-s', '--size', type=int, required=False, default=DEFAULT_SIZE)
+parser.add_argument('-a', '--addr', type=str, required=False, default=MAIN_WORKER_IP)
+parser.add_argument('-i', '--rank', type=int, required=False, default=0)
+parser.add_argument('-w', '--world_size', type=int, required=False, default=DEFAULT_SIZE)
+parser.add_argument('-r', '--repeat', type=int, required=False, default=1)
+parser.add_argument('-s', '--se', type=int, required=False, default=1)
 
 arguments = parser.parse_args()
-server_ip = arguments.ip
+server_ip = arguments.addr
 rank = arguments.rank
-world_size = arguments.size
+world_size = arguments.world_size
+repeat = arguments.repeat
+split_embedding = bool(arguments.se)
+
 # Enable when using RaspberryPi
 if distributed:
     os.environ['GLOO_SOCKET_IFNAME'] = 'eth0'
@@ -111,6 +123,8 @@ class DecodingWorker:
         lm_head:
             token embedding or independent weight (d_model, vocab_size)
         """
+        self.split_embedding = None
+
         self.split_weights = None
         self.layers_MLP_weights = None
         self.MLP_activation = transformers.activations.NewGELUActivation()
@@ -147,58 +161,9 @@ class DecodingWorker:
         self.top_k = 20
         self.top_p = 0.6
 
-    def prepare_cache_tp_send(self):
-        """
-        The rank_0 worker execute the prefill phase and transmit necessary data across the group
-        :param past_key_values: tuple(N) * tuple(2) * tensor(b, seq, d_model)
-        :param device_rank: 0_main worker; other_helping workers
-        :return:
-        """
-        # if device_rank == server_rank:  # send necessary data to others
-        V, P, N, d_model, h, d_h, r = self.config
-        # check cache
-        assert isinstance(self.KV_cache, tuple) and len(self.KV_cache) == N
-        for layer_cache in self.KV_cache:
-            assert isinstance(layer_cache, tuple) and len(layer_cache) == 2
-            k_layer, v_layer = layer_cache
-            assert isinstance(k_layer, torch.Tensor) and isinstance(v_layer, torch.Tensor)
-            # assert k_layer.shape == v_layer.shape == (self.batch_size, h, input_length, d_h)
-
-        # split cache by head: tuple(N) * tuple(2) * tensor(b, h, l_t, d_h) -> n * (list(N) * tuple(2) * tensor(b, h/n, l_t, d_h))
-        assert self.config.n_head % self.n_device == 0
-        h_split = h // self.n_device
-        split_cache = [[] * self.n_device]
-        # todo: 感觉不如改成逐个发，后面有可能会遇到内存紧张的情况，不过也可以后面再改
-        for k_layer, v_layer in self.KV_cache:
-            k_splits = [k_p.clone().detach() for k_p in torch.split(k_layer, self.n_device, dim=1)]
-            v_splits = [v_p.clone().detach() for v_p in torch.split(v_layer, self.n_device, dim=1)]
-
-            for i, kv_layer_split in enumerate(zip(k_splits, v_splits)):
-                split_cache[i].append(kv_layer_split)
-        self.split_KV_cache = split_cache[0]
-        send_cache_tasks = [async_send_data(self.connections[rank - 1], split_cache[rank]) for rank in
-                            range(1, self.n_device)]
-        self.loop.run_until_complete(asyncio.gather(*send_cache_tasks))
-        # return local_cache
-
-    # else:  # accept data from rank_0 device
-
-    def tp_init(self, conn_to_master: socket.socket, split_MLP=True):
-        """
-        init necessary weights for tensor parallelism
-        :param conn_to_master:
-        :param split_MLP:
-        :return:
-        """
-        request = f'TP_WEIGHT {self.rank} SPLIT_MLP {int(split_MLP)}\n'
-        conn_to_master.sendall(request.encode())
-        data = recv_data(conn_to_master)
+    def init_weights(self, data: tuple):
         if self.rank == 0:
-            if not split_MLP:
-                self.config, self.split_weights, self.tokenizer, embedding_weights, self.ln_f_weight, \
-                    self.layers_MLP_weights = data
-            else:
-                self.config, self.split_weights, self.tokenizer, embedding_weights, self.ln_f_weight = data
+            self.config, self.split_weights, self.tokenizer, embedding_weights, self.ln_f_weight = data
 
             token_embedding_weight, position_embedding_weight = embedding_weights
             self.token_embedding = nn.Embedding.from_pretrained(token_embedding_weight)
@@ -209,53 +174,62 @@ class DecodingWorker:
         else:  # other workers
             self.config, self.split_weights = data
 
-    def se_init(self, conn_to_master: socket.socket):
-        request = f'SE_WEIGHT {self.rank}\n'
-        conn_to_master.sendall(request.encode())
-        data = recv_data(conn_to_master)
-        if self.rank == 0:
-            self.config, self.split_weights, self.tokenizer, embedding_weights, self.all_split_embeddings = data
-
-            token_embedding_weight, position_embedding_weight = embedding_weights
-            self.token_embedding = nn.Embedding.from_pretrained(token_embedding_weight)
-            self.position_embedding = nn.Embedding.from_pretrained(position_embedding_weight)
-            self.lm_head = nn.Linear(self.config.d_model, self.config.vocab_size, bias=False)
-            self.lm_head.weight = nn.Parameter(token_embedding_weight)
-        else:
-            self.config, self.split_weights = data
-
-        h_d = self.config.h // self.n_device
-        self.split_heads = self.rank * h_d, (self.rank + 1) * h_d  # default: equal split
-        h_l, h_r = self.split_heads
-        self.split_embedding_range = h_l * self.config.d_h, h_r * self.config.d_h  # default: equal split
-
     def init(self, split_MLP=True, split_embedding=False):
         """
         Receive split_weight and config from master
         """
-        with socket.create_connection((MASTER_IP, master_port)) as conn:
-            if self.rank == 0:  # main worker
-                print('Send WORKER_NUM to master')
-                request = f'WORKER_NUM {self.n_device}\n'
+        # file_name for the split_weights
+        split_weights_dir = 'split_weights/'
+        if not os.path.exists(split_weights_dir):
+            os.makedirs(split_weights_dir)
+            print(f'[{get_timestamp()} Notice]: Directory of split_weights not found, create the directory')
+
+        split_weights_file = f'{model_name}-n={self.n_device}-r={self.rank}-se={1 if split_embedding else 0}.sw'
+        data = None  # split_weights
+        if not os.path.exists(split_weights_dir + split_weights_file):
+            print(f'[{get_timestamp()} Notice]: File of "{split_weights_file}" not found, download from Master')
+
+            with socket.create_connection((MASTER_IP, master_port)) as conn:
+                if self.rank == 0:  # main worker
+                    print('Send WORKER_NUM to master')
+                    request = f'WORKER_NUM {self.n_device}\n'
+                    conn.sendall(request.encode())
+                    reply = recv_data(conn)
+                    if reply != 'OK':
+                        raise Exception('Unknown reply from master')
+                    reply_tasks = [async_send_data(self.connections[rank - 1][0], 'OK') for rank in
+                                   range(1, self.n_device)]
+                    self.loop.run_until_complete(asyncio.gather(*reply_tasks))
+                else:
+                    reply = recv_data(self.client_socket)
+                    if reply != 'OK':
+                        raise Exception('Unknown reply from main worker')
+
+                # ask necessary weights from master
+                self.split_embedding = split_embedding
+                print('Get necessary weights from master')
+
+                if split_embedding:
+                    request = f'SE_WEIGHT {self.rank}\n'
+                else:
+                    request = f'TP_WEIGHT {self.rank} SPLIT_MLP {int(split_MLP)}\n'
+
                 conn.sendall(request.encode())
-                reply = recv_data(conn)
-                if reply != 'OK':
-                    raise Exception('Unknown reply from master')
-                reply_tasks = [async_send_data(self.connections[rank - 1][0], 'OK') for rank in
-                               range(1, self.n_device)]
-                self.loop.run_until_complete(asyncio.gather(*reply_tasks))
-            else:
-                reply = recv_data(self.client_socket)
-                if reply != 'OK':
-                    raise Exception('Unknown reply from main worker')
+                data, raw_data = recv_data(conn, return_bytes=True)
 
-            # ask necessary weights from master
-            print('Get necessary weights from master')
-            if split_embedding:
-                self.se_init(conn)
-            else:
-                self.tp_init(conn, split_MLP)
+                with open(split_weights_dir + split_weights_file, 'wb') as f:
+                    f.write(raw_data)
+        else:
+            print(f'[{get_timestamp()} Notice]: File of "{split_weights_file}" found, load from cache')
+            with open(split_weights_dir + split_weights_file, 'rb') as f:
+                data = pickle.load(f)
 
+        self.init_weights(data)
+        if split_embedding:
+            h_d = self.config.h // self.n_device
+            self.split_heads = self.rank * h_d, (self.rank + 1) * h_d  # default: equal split
+            h_l, h_r = self.split_heads
+            self.split_embedding_range = h_l * self.config.d_h, h_r * self.config.d_h  # default: equal split
         print('TP Init Done!')
 
     def co_forward_tp(self, input_ids=None, use_cache=True, split_MLP=True):
@@ -267,8 +241,9 @@ class DecodingWorker:
         # split_heads = self.config.split_heads
         d_model = self.config.d_model
 
-        # latency_measure
-        all_reduce_latency = []
+        if show_latency_se:
+            # latency_measure
+            all_reduce_latency = []
 
         if self.split_KV_cache is None:
             past_length = 0
@@ -319,9 +294,11 @@ class DecodingWorker:
 
             if split_MLP:  # split MLP inference on workers
                 # AllReduce
-                start_a_r = time.perf_counter()
+                start_ar = time.perf_counter()
                 dist.all_reduce(split_MHA_output, op=dist.ReduceOp.SUM)
-                all_reduce_latency.append(time.perf_counter() - start_a_r)
+                if show_latency_se:
+                    end_ar = time.perf_counter()
+                    all_reduce_latency.append(end_ar - start_ar)
 
                 # Residual connection
                 hidden_states = split_MHA_output + residual
@@ -335,12 +312,14 @@ class DecodingWorker:
                 split_MLP_output = MLP_forward_use_weights(hidden_states, split_MLP_weight, self.config)
 
                 # AllReduce or SingleReduce (for the last layer)
-                start_a_r = time.perf_counter()
+                start_ar = time.perf_counter()
                 if layer_idx == self.config.n_layer - 1:
                     dist.reduce(split_MLP_output, dst=0, op=dist.ReduceOp.SUM)
                 else:
                     dist.all_reduce(split_MLP_output, op=dist.ReduceOp.SUM)
-                all_reduce_latency.append(time.perf_counter() - start_a_r)
+                if show_latency_se:
+                    end_ar = time.perf_counter()
+                    all_reduce_latency.append(end_ar - start_ar)
 
                 # Residual connection
                 hidden_states = split_MLP_output + residual
@@ -361,7 +340,8 @@ class DecodingWorker:
         if use_cache:  # udpate cache
             self.split_KV_cache = cache_present
 
-        print(f'All-Reduce: total {np.sum(all_reduce_latency)}s, avg {np.mean(all_reduce_latency)}s')
+        if show_latency_se:
+            print(f'All-Reduce: total {np.sum(all_reduce_latency)}s, avg {np.mean(all_reduce_latency)}s')
 
         if self.rank == 0:
             hidden_states = F.layer_norm(hidden_states, (d_model,), *self.ln_f_weight, self.config.ln_eps)
@@ -382,7 +362,14 @@ class DecodingWorker:
         d_model = self.config.d_model
         d_h = self.config.d_h
 
-        distr_ln_latency = []
+        if show_latency_se:
+            layer_latency = []
+            ln_latency = []
+            qkv_latency = []
+            attn_latency = []
+            Wo_latency = []
+            mlp1_latency = []
+            mlp2_latency = []
 
         # init cache
         if self.split_KV_cache is None:
@@ -418,6 +405,8 @@ class DecodingWorker:
 
         # forward layers
         for layer_idx, (layer_weights, layer_cache) in enumerate(zip(self.split_weights, self.split_KV_cache)):
+            start_layer = time.perf_counter()
+            # split_layer_norm_weights
             ln1_w_b, ln2_w_b = layer_weights['LN']
 
             # MHA{
@@ -433,8 +422,9 @@ class DecodingWorker:
                 # LN1: complete weight
                 hidden_states = F.layer_norm(hidden_states, (d_model,), *ln1_w_b, self.config.ln_eps)
 
+                start_qkv_p = time.perf_counter()
                 # QKV projection
-                (Q, K, V), layer_cache = QKV_proj(hidden_states, QKV_proj_w_b, self.config.d_h, layer_cache)
+                QKV = Conv1D_forward_use_weights(hidden_states, QKV_proj_w_b)
 
             else:  # 2-n_l layers
                 # residual 1
@@ -443,17 +433,25 @@ class DecodingWorker:
                 # LN1: split_embedding
                 start_ln = time.perf_counter()
                 split_embeddings = distributed_layer_norm(split_embeddings, ln1_w_b, d_model, self.config.ln_eps)
-                distr_ln_latency.append(time.perf_counter() - start_ln)
+                if show_latency_se:
+                    end_ln = time.perf_counter()
+                    ln_latency.append(end_ln - start_ln)
 
+                start_qkv_p = time.perf_counter()
                 # QKV projection: split_embedding
                 QKV = self.ring_gather_reduce_comp_overlap(split_embeddings, *QKV_proj_w_b)
+            if show_latency_se:
+                end_qkv = time.perf_counter()
+                qkv_latency.append(end_qkv - start_qkv_p)
 
-                Q, K, V = split_QKV(QKV, self.config.d_h)
-                if layer_cache is not None:  # update layer_cache
-                    K_cache, V_cache = layer_cache
-                    K = torch.cat((K_cache, K), dim=2)
-                    V = torch.cat((V_cache, V), dim=2)
-                layer_cache = (K, V)
+            start_attn = time.perf_counter()
+            Q, K, V = split_QKV(QKV, d_h)
+
+            if layer_cache is not None:  # update layer_cache
+                K_cache, V_cache = layer_cache
+                K = torch.cat((K_cache, K), dim=2)
+                V = torch.cat((V_cache, V), dim=2)
+            layer_cache = (K, V)
 
             if use_cache:  # update cache
                 cache_present = cache_present + (layer_cache,)
@@ -461,12 +459,19 @@ class DecodingWorker:
             # attn
             attn_output, _ = attn(Q, K, V)
             split_embeddings = merge_heads(attn_output, d_h)
+            if show_latency_se:
+                end_attn = time.perf_counter()
+                attn_latency.append(end_attn - start_attn)
 
+            start_Wo = time.perf_counter()
             # Wo projection
             split_embeddings = self.ring_reduce_scatter_comp_overlap(split_embeddings, *Wo_proj_w_b)
+            if show_latency_se:
+                end_Wo = time.perf_counter()
+                Wo_latency.append(end_Wo - start_Wo)
 
             # residual connection 1
-            split_embeddings += residual
+            split_embeddings = residual + split_embeddings
             # }MHA
 
             # residual 2
@@ -478,14 +483,21 @@ class DecodingWorker:
             # LN2: split_embedding
             start_ln = time.perf_counter()
             split_embeddings = distributed_layer_norm(split_embeddings, ln2_w_b, d_model, self.config.ln_eps)
-            distr_ln_latency.append(time.perf_counter() - start_ln)
+            end_ln = time.perf_counter()
+            if show_latency_se:
+                ln_latency.append(end_ln - start_ln)
 
+            start_mlp1 = time.perf_counter()
             # MLP1
             split_embeddings = self.ring_gather_reduce_comp_overlap(split_embeddings, *mlp1_w_b)
+            if show_latency_se:
+                end_mlp1 = time.perf_counter()
+                mlp1_latency.append(end_mlp1 - start_mlp1)
 
             # activation
             split_embeddings = self.MLP_activation(split_embeddings)
 
+            start_mlp2 = time.perf_counter()
             if layer_idx != self.config.n_layer - 1:
                 # MLP2
                 split_embeddings = self.ring_reduce_scatter_comp_overlap(split_embeddings, *mlp2_w_b)
@@ -493,93 +505,45 @@ class DecodingWorker:
                 # residual connection 2
                 split_embeddings = residual + split_embeddings
 
-            else:  # final layer
-                # start all-gather the residual of split_embeddings
-                # init tensor container according to embedding size of all devices
-                residual_container = [torch.empty(*split_embeddings.shape[:-1], split_embeddings_size)
-                                      for split_embeddings_size in
-                                      self.all_split_embeddings] if self.rank == 0 else None
-                residual_gather_task = dist.gather(residual, residual_container, dst=0, async_op=True)
+            else:  # MLP2 of the final layer
                 # MLP2
                 hidden_states = Conv1D_forward_use_weights(split_embeddings, mlp2_w_b)
+
+                # residual connection 2: partial
+                hidden_states[..., se_l:se_r] += residual
 
                 # reduce to rank0 device
                 dist.reduce(hidden_states, dst=0)
 
-                residual_gather_task.wait()
+                # residual_gather_task.wait()
+            if show_latency_se:
+                end_layer = time.perf_counter()
+                mlp2_latency.append(end_layer - start_mlp2)
+                layer_latency.append(end_layer - start_layer)
 
         if use_cache:  # udpate cache
             self.split_KV_cache = cache_present
 
-        print(f'Distributed LayerNorm: total {np.sum(distr_ln_latency)}s, avg {np.mean(distr_ln_latency)}s')
+        if show_latency_se:
+            print(
+                f'Layer forward  : total {np.sum(layer_latency):.6f}s, avg {np.mean(layer_latency):.6f}s, max={np.argmax(layer_latency)} {np.max(layer_latency):.6f}s')
+            print(
+                f'LayerNorm      : total {np.sum(ln_latency):.6f}s, avg {np.mean(ln_latency):.6f}s, max={np.argmax(ln_latency)} {np.max(ln_latency):.6f}s')
+            print(
+                f'QKV projection : total {np.sum(qkv_latency):.6f}s, avg {np.mean(qkv_latency):.6f}s, max={np.argmax(qkv_latency)} {np.max(qkv_latency):.6f}s')
+            print(
+                f'Attention      : total {np.sum(attn_latency):.6f}s, avg {np.mean(attn_latency):.6f}s, max={np.argmax(attn_latency)} {np.max(attn_latency):.6f}s')
+            print(
+                f'Wo projection  : total {np.sum(Wo_latency):.6f}s, avg {np.mean(Wo_latency):.6f}s, max={np.argmax(Wo_latency)} {np.max(Wo_latency):.6f}s')
+            print(
+                f'MLP1 projection: total {np.sum(mlp1_latency):.6f}s, avg {np.mean(mlp1_latency):.6f}s, max={np.argmax(mlp1_latency)} {np.max(mlp1_latency):.6f}s')
+            print(
+                f'MLP2 projection: total {np.sum(mlp2_latency):.6f}s, avg {np.mean(mlp2_latency):.6f}s, max={np.argmax(mlp2_latency)} {np.max(mlp2_latency):.6f}s')
 
         if self.rank == 0:
-            residual = torch.concat(residual_container, dim=-1)
-            # final residual connection 2
-            hidden_states += residual
+            # LN_f
+            hidden_states = F.layer_norm(hidden_states, (d_model,), *self.ln_f_weight, self.config.ln_eps)
             return hidden_states
-
-    def tp_generate(self, max_length, split_MLP=True, split_embedding=False):
-        if split_embedding:
-            tp_forward = self.co_forward_se
-        else:
-            tp_forward = self.co_forward_tp
-
-        # prefill
-        if self.rank == 0:
-            input_ids = torch.LongTensor([self.tokenizer.convert_tokens_to_ids(list(self.text))])
-            cur_len = input_ids.size(-1)
-            assert cur_len < max_length
-            # share the cur_len
-            input_size = torch.tensor(input_ids.shape, dtype=torch.int32)
-            dist.broadcast(input_size, src=0)
-
-            self.split_KV_cache = None  # clear cache
-            generated_text = []
-
-            print('Start Prefill')
-            start_prefill = time.perf_counter()
-            hidden_states = tp_forward(input_ids)
-
-            start_lmhead = time.perf_counter()
-            logits = self.lm_head(hidden_states[:, -1, :])
-            next_token_ids = logits2token(logits)
-            input_ids = next_token_ids
-            end_prefill = time.perf_counter()
-            print(f'{end_prefill - start_lmhead}s for lm_head and token generation')
-
-        else:  # other workers
-            input_size = torch.empty(2, dtype=torch.int32)
-            dist.broadcast(input_size, src=0)
-            cur_len = input_size[-1]
-            print('Start Prefill')
-            tp_forward()
-
-        cur_len += 1
-
-        # decoding
-        print('Start decoding')
-        start_decoding = time.perf_counter()
-        for seq_len in tqdm(range(cur_len, max_length + 1)):
-            if self.rank == 0:
-                hidden_states = tp_forward(input_ids)
-                logits = self.lm_head(hidden_states[:, -1, :])
-                next_token_ids = logits2token(logits)
-                generated_token = self.tokenizer.convert_ids_to_tokens(next_token_ids)
-                generated_text.append(generated_token[0])
-                # input_ids = torch.concat((input_ids, next_token_ids), dim=-1)
-                input_ids = next_token_ids
-                # next_tokens = self.tokenizer.convert_ids_to_tokens
-            else:
-                tp_forward()
-        end_decoding = time.perf_counter()
-
-        if self.rank == 0:
-            prefill_t = end_prefill - start_prefill
-            decoding_t = end_decoding - start_decoding
-            print(f'Prefill : {prefill_t}s')
-            print(f'Decoding: {decoding_t}s')
-            return ''.join(generated_text)
 
     def get_ring_index(self, index: int, offset: int):  # ring index starts from 0
         ring_index = index + offset
@@ -712,6 +676,74 @@ class DecodingWorker:
                     y_reduce.add_(bi)
                 return y_reduce
 
+    def tp_generate(self, max_length, split_MLP=True, return_latency=False):
+        if self.split_embedding:
+            tp_forward = self.co_forward_se
+        else:
+            tp_forward = self.co_forward_tp
+
+        self.split_KV_cache = None  # clear cache
+
+        # prefill
+        if self.rank == 0:
+            input_ids = torch.LongTensor([self.tokenizer.convert_tokens_to_ids(list(self.text))])
+            if self.batch_size > 1:
+                input_ids = torch.concat([input_ids] * self.batch_size, dim=0)
+            cur_len = input_ids.size(-1)
+            assert cur_len < max_length
+            # share the cur_len
+            input_size = torch.tensor(input_ids.shape, dtype=torch.int32)
+            dist.broadcast(input_size, src=0)
+
+            generated_text = []
+
+            print('Start Prefill')
+            start_prefill = time.perf_counter()
+            hidden_states = tp_forward(input_ids)
+
+            start_lmhead = time.perf_counter()
+            logits = self.lm_head(hidden_states[:, -1, :])
+            next_token_ids = logits2token(logits)
+            input_ids = next_token_ids
+            end_prefill = time.perf_counter()
+            print(f'{end_prefill - start_lmhead}s for lm_head and token generation')
+
+        else:  # other workers
+            input_size = torch.empty(2, dtype=torch.int32)
+            dist.broadcast(input_size, src=0)
+            cur_len = input_size[-1]
+            print('Start Prefill')
+            tp_forward()
+
+        cur_len += 1
+
+        # decoding
+        print('Start decoding')
+        start_decoding = time.perf_counter()
+        for seq_len in tqdm(range(cur_len, max_length + 1)):
+            if self.rank == 0:
+                hidden_states = tp_forward(input_ids)
+                logits = self.lm_head(hidden_states[:, -1, :])
+                next_token_ids = logits2token(logits)
+                generated_token = self.tokenizer.convert_ids_to_tokens(next_token_ids)
+                generated_text.append(generated_token[0])
+                # input_ids = torch.concat((input_ids, next_token_ids), dim=-1)
+                input_ids = next_token_ids
+                # next_tokens = self.tokenizer.convert_ids_to_tokens
+            else:
+                tp_forward()
+        end_decoding = time.perf_counter()
+
+        if self.rank == 0:
+            prefill_t = end_prefill - start_prefill
+            decoding_t = end_decoding - start_decoding
+            print(f'Prefill : {prefill_t}s')
+            print(f'Decoding: {decoding_t}s')
+            output = (''.join(generated_text),)
+            if return_latency:
+                output = output + (prefill_t, decoding_t)
+            return output
+
 
 def distributed_layer_norm(split_embedding, split_LN_weights, d_model, eps):
     x_sum = split_embedding.sum(dim=-1, keepdim=True)
@@ -781,15 +813,34 @@ def test_overlap(w: DecodingWorker):
 
 if __name__ == '__main__':
     worker = DecodingWorker((MAIN_WORKER_IP, port_tcp))
+    show_latency_se = False
+    batch = 10
+    # split_embedding = False
+    return_latency = True
 
-    # test TP
-    params = {'split_embedding': True}
-
+    params = {
+        'split_embedding': split_embedding,
+    }
+    print(f'split_embedding={split_embedding}')
+    worker.batch_size = batch
     worker.init(**params)
     print(worker.text)
-    generated_text = worker.tp_generate(105, **params)
-    if worker.rank == 0:
-        print(generated_text)
+    repeat_latency = []
+
+    for r in range(repeat):
+        output = worker.tp_generate(200, return_latency=return_latency)
+        if worker.rank == 0:
+            if return_latency:
+                generated_text, t_prefill, t_decoding = output
+                repeat_latency.append([t_prefill, t_decoding])
+            else:
+                generated_text = output[0]
+            print(generated_text)
+
+    if worker.rank == 0 and return_latency:
+        repeat_latency = np.asarray(repeat_latency)
+        print(repeat_latency)
+        print(repeat_latency.mean(axis=0))
 
     # test overlap
     # test_overlap(worker)
