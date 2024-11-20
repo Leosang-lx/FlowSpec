@@ -2,6 +2,8 @@
 Only for testing the distributed decoding performance
 """
 import argparse
+import psutil
+from memory_profiler import profile
 import os
 import sys
 import time
@@ -41,7 +43,7 @@ if distributed:
     os.environ['GLOO_SOCKET_IFNAME'] = 'eth0'
 
 
-class DecodingWorker:
+class Worker:
     """
     Worker for distributed LLM decoding
     """
@@ -352,6 +354,7 @@ class DecodingWorker:
             #     else:
             #         return hidden_states.size(-2)
 
+    # @profile
     def co_forward_se(self, input_ids=None, use_cache=True):
         """
         :param input_ids: only the rank-0 device needs input
@@ -553,6 +556,7 @@ class DecodingWorker:
             ring_index %= self.n_device
         return ring_index
 
+    # @profile
     def ring_reduce_scatter_comp_overlap(self, xi: torch.Tensor, Wi: torch.Tensor, bi=None):
         """
         overlap the ring reduce-scatter comm operation with the **previous** matrix-vector multiplication
@@ -633,6 +637,7 @@ class DecodingWorker:
                 assert None not in split_results
                 return split_results
 
+    # @profile
     def ring_gather_reduce_comp_overlap(self, xi: torch.Tensor, Wi: torch.Tensor, bi=None):
         """
         overlap the ring all-gather comm operation with the **following** matrix-vector multiplication
@@ -724,6 +729,17 @@ class DecodingWorker:
         print('Start decoding')
         start_decoding = time.perf_counter()
         for seq_len in tqdm(range(cur_len, max_length + 1)):
+
+            time.sleep(0.5)
+            process = psutil.Process(os.getpid())
+
+            # 获取内存信息
+            mem_info = process.memory_info()
+
+            # 输出内存使用情况
+            print(f"Memory usage (RSS): {mem_info.rss / (1024 * 1024):.2f} MB")  # RSS是驻留集大小，即进程占用的实际物理内存
+            print(f"Memory usage (VMS): {mem_info.vms / (1024 * 1024):.2f} MB")  # VMS是虚拟内存大小
+
             if self.rank == 0:
                 hidden_states = tp_forward(input_ids)
                 logits = self.lm_head(hidden_states[:, -1, :])
@@ -746,6 +762,7 @@ class DecodingWorker:
             return output
 
 
+# @profile
 def distributed_layer_norm(split_embedding, split_LN_weights, d_model, eps):
     x_sum = split_embedding.sum(dim=-1, keepdim=True)
     # obtain x.SUM
@@ -764,7 +781,7 @@ def distributed_layer_norm(split_embedding, split_LN_weights, d_model, eps):
     return split_embedding
 
 
-def test_overlap(w: DecodingWorker):
+def test_overlap(w: Worker):
     # test overlap
     b = 1
     d_model = 4096
@@ -813,9 +830,9 @@ def test_overlap(w: DecodingWorker):
 
 
 if __name__ == '__main__':
-    worker = DecodingWorker((MAIN_WORKER_IP, port_tcp))
+    worker = Worker((MAIN_WORKER_IP, port_tcp))
     show_latency_se = False
-    batch = 10
+    batch = 1
     # split_embedding = False
     return_latency = True
 

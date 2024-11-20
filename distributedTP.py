@@ -42,19 +42,26 @@ def split_weight_TP(model_weights, split_nums: int | list[int], config, split_em
         split_embedding_num = [sn * config.d_h for sn in split_nums]
 
         # split QKV projection weights todo: detach() and clone() for torch.tensor
-        split_QKV_proj = [[] for _ in range(split_cnt)]
+        split_QKV_proj = [([], []) for _ in range(split_cnt)]
         # split into projection of Q, K, V
         attn_proj_w_QKV = attn_proj_w.split(config.d_model, dim=-1)
         attn_proj_b_QKV = attn_proj_b.split(config.d_model, dim=-1)
 
         for attn_proj_w_, attn_proj_b_ in zip(attn_proj_w_QKV, attn_proj_b_QKV):  # Q_proj, K_proj, V_proj
             split_attn_proj_ws_ = attn_proj_w_.split(split_embedding_num, dim=-1)
-            split_attn_proj_ws_ = [partition.clone() for partition in split_attn_proj_ws_]  # clone()
-            split_attn_proj_bs_ = attn_proj_b_.split(split_embedding_num, dim=-1)
-            split_attn_proj_bs_ = [partition.clone() for partition in split_attn_proj_bs_]  # clone()
 
-            for i, split_attn_proj_wb_ in enumerate(zip(split_attn_proj_ws_, split_attn_proj_bs_)):  # split_cnt
-                split_QKV_proj[i].append(split_attn_proj_wb_)
+            # split_attn_proj_ws_ = [partition.clone() for partition in split_attn_proj_ws_]  # clone()
+            split_attn_proj_bs_ = attn_proj_b_.split(split_embedding_num, dim=-1)
+            # split_attn_proj_bs_ = [partition.clone() for partition in split_attn_proj_bs_]  # clone()
+
+            for i in range(split_cnt):
+                qkv_w_i, qkv_b_i = split_QKV_proj[i]
+                qkv_w_i.append(split_attn_proj_ws_[i])
+                qkv_b_i.append(split_attn_proj_bs_[i])
+
+        for i in range(split_cnt):
+            qkv_w_i, qkv_b_i = split_QKV_proj[i]
+            split_QKV_proj[i] = (torch.concat(qkv_w_i, dim=-1).clone().contiguous(), torch.concat(qkv_b_i, dim=-1).clone().contiguous())
 
         # split multi-head projection weights Wo
         attn_Wo_w, attn_Wo_b = attn_Wo_w_b

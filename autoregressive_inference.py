@@ -78,10 +78,6 @@ def logits2token(logits: torch.Tensor, do_sample=False, **kwargs):
     return new_token
 
 
-def decode_iter(model: nn.Module, input_ids: torch.Tensor, use_cache=True, past_key_values=None, do_sample=False):
-    pass
-
-
 def decode(model: nn.Module, input_ids: torch.Tensor, max_length, use_cache=True, past_key_values=None, do_sample=False):
     """
     Is use_cache: based on the first generated token and KV cache, continuously generate the following tokens
@@ -165,7 +161,7 @@ def get_model_path(cache_path, model_tag):
 
 model_tag = "uer/gpt2-chinese-cluecorpussmall"  # GPT2-small
 # model_tag = 'uer/gpt2-large-chinese-cluecorpussmall'  # GPT2-large
-# model_tag = 'uer/gpt2-xlarge-chinese-cluecorpussmall'  # GPT2-xlarge
+# model_tag = 'uer/gpt2-xlarge-chinese-cluecorpu3ssmall'  # GPT2-xlarge
 
 developer_name, model_name = tuple(model_tag.split('/'))
 cache_path = "model_file"
@@ -230,7 +226,7 @@ if __name__ == '__main__':
     # KV-cache for the inference request
     past_key_values = None
     use_cache = True
-    do_sample = True
+    do_sample = False
     top_k = 20
     top_p = 0.6
     print(f'use_kv_cache={use_cache}')
