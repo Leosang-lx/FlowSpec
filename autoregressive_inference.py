@@ -1,10 +1,9 @@
-# import pathlib
 import time
 import torch.nn as nn
 import torch
 from tqdm import tqdm
-from transformers import GPT2LMHeadModel, BertTokenizer, GPT2Config
-from transformers import AutoModel, AutoTokenizer, AutoConfig
+from transformers import GPT2LMHeadModel, AutoTokenizer, AutoConfig
+# from transformers import AutoModel, BertTokenizer, GPT2Config
 from sampling import apply_sampling
 import os
 
@@ -159,9 +158,9 @@ def get_model_path(cache_path, model_tag):
 # project_dir = os.getcwd()
 # print(project_dir)
 
-model_tag = "uer/gpt2-chinese-cluecorpussmall"  # GPT2-small
+# model_tag = "uer/gpt2-chinese-cluecorpussmall"  # GPT2-small
 # model_tag = 'uer/gpt2-large-chinese-cluecorpussmall'  # GPT2-large
-# model_tag = 'uer/gpt2-xlarge-chinese-cluecorpu3ssmall'  # GPT2-xlarge
+model_tag = 'uer/gpt2-xlarge-chinese-cluecorpussmall'  # GPT2-xlarge
 
 developer_name, model_name = tuple(model_tag.split('/'))
 cache_path = "model_file"

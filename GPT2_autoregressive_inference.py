@@ -1,6 +1,7 @@
 import time
 import torch.nn as nn
 import torch
+from memory_profiler import profile
 from tqdm import tqdm
 from transformers import GPT2LMHeadModel, BertTokenizer, GPT2Config
 from transformers import AutoModel, AutoTokenizer, AutoConfig
@@ -61,33 +62,35 @@ model_path = get_model_path(cache_path, model_tag)
 
 # model_path = f'{cache_path}/models--{developer_name}--{model_name}/snapshots/c2c0249d8a2731f269414cc3b22dff021f8e07a3'
 
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
-# device = 'cpu'
+# device = 'cuda' if torch.cuda.is_available() else 'cpu'
+device = 'cpu'
 print(f'Device={device}')
 
-# 检查模型文件是否完整
-if model_path is not None and check_files_exist(model_path):
-    print("All required files are present.")
-    # from local
-    config = GPT2Config.from_pretrained(model_path)
-    # config = AutoConfig.from_pretrained(model_path)
-    print(config)
-    model = GPT2LMHeadModel.from_pretrained(model_path).to(device)
-    # tokenizer = AutoTokenizer.from_pretrained(model_path)
-    tokenizer = BertTokenizer.from_pretrained(model_path)
-else:
-    print("Some required files are missing.")
-    config = GPT2Config.from_pretrained(model_tag, cache_dir=cache_path)
-    tokenizer = BertTokenizer.from_pretrained(model_tag, cache_dir=cache_path)
-    model = GPT2LMHeadModel.from_pretrained(model_tag, cache_dir=cache_path).to("cuda")
-    # model = AutoModel.from_pretrained(model_path).to(device)
 
-model_config = (
-    config.vocab_size, config.n_positions, config.n_layer, config.n_embd, config.n_head,
-    config.n_embd // config.n_head, 4)
-model.eval()
+@profile
+def test_autoregressive_inference():
+    # 检查模型文件是否完整
+    if model_path is not None and check_files_exist(model_path):
+        print("All required files are present.")
+        # from local
+        config = GPT2Config.from_pretrained(model_path)
+        # config = AutoConfig.from_pretrained(model_path)
+        print(config)
+        model = GPT2LMHeadModel.from_pretrained(model_path).to(device)
+        # tokenizer = AutoTokenizer.from_pretrained(model_path)
+        tokenizer = BertTokenizer.from_pretrained(model_path)
+    else:
+        print("Some required files are missing.")
+        config = GPT2Config.from_pretrained(model_tag, cache_dir=cache_path)
+        tokenizer = BertTokenizer.from_pretrained(model_tag, cache_dir=cache_path)
+        model = GPT2LMHeadModel.from_pretrained(model_tag, cache_dir=cache_path).to("cuda")
+        # model = AutoModel.from_pretrained(model_path).to(device)
 
-if __name__ == '__main__':
+    model_config = (
+        config.vocab_size, config.n_positions, config.n_layer, config.n_embd, config.n_head,
+        config.n_embd // config.n_head, 4)
+    model.eval()
+
     # 输入文本
     # 101 tokens
     text = "在一个风和日丽的下午，小镇的街道上人来人往，孩子们在巷口追逐嬉戏。李阿姨拿着刚从市场买回来的菜篮子，步履轻盈地走回家。街边的老槐树下，几位老人正围坐在一起下象棋，不时传来欢声笑语。今天是不是一个好日子？"
@@ -165,3 +168,6 @@ if __name__ == '__main__':
     print(f'Generation latency: {consumption}s')
     print(f'Prefill latency: {prefill_latency}s')
     print(f'Decoding latency: {decoding_latency}s')
+
+if __name__ == '__main__':
+    test_autoregressive_inference()

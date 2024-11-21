@@ -1,6 +1,9 @@
 import asyncio
 from dist_comm.network_config import *
-from distributedTP import *
+from autoregressive_inference import model_path, load_local_pretrained_model
+from types import SimpleNamespace
+from forward_use_weight import get_transformer_model_weight
+from distributedTP import split_weight_TP
 from comm import *
 
 
@@ -10,6 +13,7 @@ class Master:
         self.server_ip = '192.168.1.150'
 
         self.n_workers = 0
+        print('Load model from', model_path)
         self.config, self.tokenizer, self.model = load_local_pretrained_model(model_path)
         config = self.config
         vocab_size, max_p, n_layer, d_model, h, d_h, rate = \

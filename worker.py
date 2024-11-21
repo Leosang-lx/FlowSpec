@@ -2,9 +2,6 @@
 Only for testing the distributed decoding performance
 """
 import argparse
-import psutil
-from memory_profiler import profile
-import os
 import sys
 import time
 
@@ -43,11 +40,14 @@ if distributed:
     os.environ['GLOO_SOCKET_IFNAME'] = 'eth0'
 
 
+def log(log_type: str, message:str):
+    print(f'[{get_timestamp()} {log_type}]: {message}')
+
+
 class Worker:
     """
     Worker for distributed LLM decoding
     """
-
     def __init__(self, main_worker_addr: tuple):
         # server_ip, port = server_addr
         self.server_addr = main_worker_addr
@@ -184,16 +184,17 @@ class Worker:
         split_weights_dir = 'split_weights/'
         if not os.path.exists(split_weights_dir):
             os.makedirs(split_weights_dir)
-            print(f'[{get_timestamp()} Notice]: Directory of split_weights not found, create the directory')
+            log('Notice', 'Directory of split_weights not found, create the directory')
 
         split_weights_file = f'{model_name}-n={self.n_device}-r={self.rank}-se={1 if split_embedding else 0}.sw'
         data = None  # split_weights
         if not os.path.exists(split_weights_dir + split_weights_file):
             print(f'[{get_timestamp()} Notice]: File of "{split_weights_file}" not found, download from Master')
+            log('Notice', f'File of "{split_weights_file}" not found, download from Master')
 
             with socket.create_connection((MASTER_IP, master_port)) as conn:
                 if self.rank == 0:  # main worker
-                    print('Send WORKER_NUM to master')
+                    log('Notice', 'Send WORKER_NUM to master')
                     request = f'WORKER_NUM {self.n_device}\n'
                     conn.sendall(request.encode())
                     reply = recv_data(conn)
@@ -209,7 +210,7 @@ class Worker:
 
                 # ask necessary weights from master
                 self.split_embedding = split_embedding
-                print('Get necessary weights from master')
+                log('Notice', 'Get necessary weights from master')
 
                 if split_embedding:
                     request = f'SE_WEIGHT {self.rank}\n'
@@ -232,7 +233,7 @@ class Worker:
             self.split_heads = self.rank * h_d, (self.rank + 1) * h_d  # default: equal split
             h_l, h_r = self.split_heads
             self.split_embedding_range = h_l * self.config.d_h, h_r * self.config.d_h  # default: equal split
-        print('TP Init Done!')
+        log('Notice', 'TP Init Done!')
 
     def co_forward_tp(self, input_ids=None, use_cache=True, split_MLP=True):
         """
@@ -258,7 +259,7 @@ class Worker:
 
         if self.rank == 0:  # main worker
             token_embedding = self.token_embedding(input_ids)
-            position_ids = torch.arange(past_length, input_ids.shape[-1] + past_length, dtype=torch.long,
+            position_ids = torch.arange(past_length, input_ids.shape[-1] + past_length, dtype=torch.int,
                                         device=input_ids.device)
             position_ids = position_ids.unsqueeze(0)
             position_embedding = self.position_embedding(position_ids)
@@ -354,7 +355,6 @@ class Worker:
             #     else:
             #         return hidden_states.size(-2)
 
-    # @profile
     def co_forward_se(self, input_ids=None, use_cache=True):
         """
         :param input_ids: only the rank-0 device needs input
@@ -414,9 +414,10 @@ class Worker:
 
             # MHA{
             QKV_proj_w_b, Wo_proj_w_b = layer_weights['MHA']
-            # merge QKV_proj_w_b
-            if len(QKV_proj_w_b) == 3:
-                QKV_proj_w_b = tuple([torch.concat(ws_or_bs, dim=-1) for ws_or_bs in zip(*QKV_proj_w_b)])
+
+            # merge QKV_proj_w_b: already merged in master
+            # if len(QKV_proj_w_b) == 3:
+            #     QKV_proj_w_b = tuple([torch.concat(ws_or_bs, dim=-1) for ws_or_bs in zip(*QKV_proj_w_b)])
 
             if layer_idx == 0:  # 1st layer
                 # residual 1
@@ -433,8 +434,8 @@ class Worker:
                 # residual 1
                 residual = split_embeddings
 
-                # LN1: split_embedding
                 start_ln = time.perf_counter()
+                # LN1: split_embedding
                 split_embeddings = distributed_layer_norm(split_embeddings, ln1_w_b, d_model, self.config.ln_eps)
                 if show_latency_se:
                     end_ln = time.perf_counter()
@@ -483,8 +484,8 @@ class Worker:
             # MLP
             mlp1_w_b, mlp2_w_b = layer_weights['MLP']
 
-            # LN2: split_embedding
             start_ln = time.perf_counter()
+            # LN2: split_embedding
             split_embeddings = distributed_layer_norm(split_embeddings, ln2_w_b, d_model, self.config.ln_eps)
             end_ln = time.perf_counter()
             if show_latency_se:
@@ -556,7 +557,6 @@ class Worker:
             ring_index %= self.n_device
         return ring_index
 
-    # @profile
     def ring_reduce_scatter_comp_overlap(self, xi: torch.Tensor, Wi: torch.Tensor, bi=None):
         """
         overlap the ring reduce-scatter comm operation with the **previous** matrix-vector multiplication
@@ -594,7 +594,9 @@ class Worker:
 
             # recv result from others
             if recv_task:
-                send_task.wait()
+                # comment the send_task.wait() for distributed=True
+                if not distributed:
+                    send_task.wait()
                 recv_task.wait()
                 # print(f'done')
                 yi.add_(from_tensor)  # reduce
@@ -637,7 +639,6 @@ class Worker:
                 assert None not in split_results
                 return split_results
 
-    # @profile
     def ring_gather_reduce_comp_overlap(self, xi: torch.Tensor, Wi: torch.Tensor, bi=None):
         """
         overlap the ring all-gather comm operation with the **following** matrix-vector multiplication
@@ -689,96 +690,91 @@ class Worker:
 
         self.split_KV_cache = None  # clear cache
 
-        # prefill
-        if self.rank == 0:
-            input_ids = torch.LongTensor([self.tokenizer.convert_tokens_to_ids(list(self.text))])
-            if self.batch_size > 1:
-                input_ids = torch.concat([input_ids] * self.batch_size, dim=0)
-            cur_len = input_ids.size(-1)
-            assert cur_len < max_length
-            # share the cur_len
-            input_size = torch.tensor(input_ids.shape, dtype=torch.int32)
-            dist.broadcast(input_size, src=0)
-
-            generated_text = []
-
-            print('Start Prefill')
-            start_prefill = time.perf_counter()
-            hidden_states = tp_forward(input_ids)
-
-            start_lmhead = time.perf_counter()
-            logits = self.lm_head(hidden_states[:, -1, :])
-            next_token_ids = logits2token(logits)
-            input_ids = next_token_ids
-            end_prefill = time.perf_counter()
-            prefill_t = end_prefill - start_prefill
-            print(f'Prefill : {prefill_t}s')
-            if show_latency_se:
-                print(f'{end_prefill - start_lmhead}s for lm_head and token generation')
-
-        else:  # other workers
-            input_size = torch.empty(2, dtype=torch.int32)
-            dist.broadcast(input_size, src=0)
-            cur_len = input_size[-1]
-            print('Start Prefill')
-            tp_forward()
-
-        cur_len += 1
-
-        # decoding
-        print('Start decoding')
-        start_decoding = time.perf_counter()
-        for seq_len in tqdm(range(cur_len, max_length + 1)):
-
-            time.sleep(0.5)
-            process = psutil.Process(os.getpid())
-
-            # 获取内存信息
-            mem_info = process.memory_info()
-
-            # 输出内存使用情况
-            print(f"Memory usage (RSS): {mem_info.rss / (1024 * 1024):.2f} MB")  # RSS是驻留集大小，即进程占用的实际物理内存
-            print(f"Memory usage (VMS): {mem_info.vms / (1024 * 1024):.2f} MB")  # VMS是虚拟内存大小
-
+        with torch.no_grad():  # no_grad() to release memory
+            # prefill
             if self.rank == 0:
+                input_ids = torch.LongTensor([self.tokenizer.convert_tokens_to_ids(list(self.text))])
+                if self.batch_size > 1:
+                    input_ids = torch.concat([input_ids] * self.batch_size, dim=0)
+                cur_len = input_ids.size(-1)
+                assert cur_len < max_length
+                # share the cur_len
+                input_size = torch.tensor(input_ids.shape, dtype=torch.int32)
+                dist.broadcast(input_size, src=0)
+
+                generated_ids = []
+
+                print('Start Prefill')
+                start_prefill = time.perf_counter()
                 hidden_states = tp_forward(input_ids)
+
+                start_lmhead = time.perf_counter()
                 logits = self.lm_head(hidden_states[:, -1, :])
                 next_token_ids = logits2token(logits)
-                generated_token = self.tokenizer.convert_ids_to_tokens(next_token_ids)
-                generated_text.append(generated_token[0])
-                # input_ids = torch.concat((input_ids, next_token_ids), dim=-1)
                 input_ids = next_token_ids
-                # next_tokens = self.tokenizer.convert_ids_to_tokens
-            else:
+
+                end_prefill = time.perf_counter()
+                prefill_t = end_prefill - start_prefill
+                print(f'Prefill : {prefill_t}s')
+
+                generated_ids.append(next_token_ids)
+                if show_latency_se:
+                    print(f'{end_prefill - start_lmhead}s for lm_head and token generation')
+
+            else:  # other workers
+                input_size = torch.empty(2, dtype=torch.int32)
+                dist.broadcast(input_size, src=0)
+                cur_len = input_size[-1]
+                print('Start Prefill')
                 tp_forward()
-        end_decoding = time.perf_counter()
+
+            cur_len += 1
+
+            # decoding
+            print('Start decoding')
+            start_decoding = time.perf_counter()
+            for seq_len in tqdm(range(cur_len, max_length)):
+                if self.rank == 0:
+                    hidden_states = tp_forward(input_ids)
+                    logits = self.lm_head(hidden_states[:, -1, :])
+                    next_token_ids = logits2token(logits)
+                    generated_ids.append(next_token_ids)
+
+                    # generated_token = self.tokenizer.convert_ids_to_tokens(next_token_ids)
+                    # generated_text.append(generated_token[0])
+                    # input_ids = torch.concat((input_ids, next_token_ids), dim=-1)
+                    input_ids = next_token_ids
+                    # next_tokens = self.tokenizer.convert_ids_to_tokens
+                else:
+                    tp_forward()
+            end_decoding = time.perf_counter()
 
         if self.rank == 0:
             decoding_t = end_decoding - start_decoding
             print(f'Decoding: {decoding_t}s')
+            generated_text = self.tokenizer.convert_ids_to_tokens(generated_ids)
             output = (''.join(generated_text),)
             if return_latency:
                 output = output + (prefill_t, decoding_t)
             return output
 
 
-# @profile
-def distributed_layer_norm(split_embedding, split_LN_weights, d_model, eps):
-    x_sum = split_embedding.sum(dim=-1, keepdim=True)
+def distributed_layer_norm(split_embeddings, split_LN_weights, d_model, eps):
+    x_sum = split_embeddings.sum(dim=-1, keepdim=True)
     # obtain x.SUM
     dist.all_reduce(x_sum, op=dist.ReduceOp.SUM)
     x_mean = x_sum.div(d_model)
-    x_ssd = (split_embedding - x_mean).square().sum(dim=-1, keepdim=True)
+    x_ssd = (split_embeddings - x_mean).square().sum(dim=-1, keepdim=True)
     # obtain x.SSD (Sum of Squared Deviations)
     dist.all_reduce(x_ssd, op=dist.ReduceOp.SUM)
     x_var = x_ssd.div(d_model)
 
     # perform partial LayerNorm on split_embedding
-    split_embedding = (split_embedding - x_mean) / torch.sqrt(x_var + eps)
+    split_embeddings = (split_embeddings - x_mean) / torch.sqrt(x_var + eps)
     if split_LN_weights is not None:
         split_w, split_b = split_LN_weights
-        return split_embedding * split_w + split_b
-    return split_embedding
+        return split_embeddings * split_w + split_b
+    return split_embeddings
 
 
 def test_overlap(w: Worker):
@@ -839,10 +835,13 @@ if __name__ == '__main__':
     params = {
         'split_embedding': split_embedding,
     }
-    print(f'split_embedding={split_embedding}')
     worker.batch_size = batch
-    print(f'batch={batch}')
     worker.init(**params)
+
+    print(f'- Model={model_tag}')
+    print(f'- split_embedding={split_embedding}')
+    print(f'- batch={batch}')
+    print(f'- model_config:\n{worker.config}')
     print(worker.text)
     repeat_latency = []
 
