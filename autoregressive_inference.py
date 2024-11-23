@@ -159,8 +159,8 @@ def get_model_path(cache_path, model_tag):
 # print(project_dir)
 
 # model_tag = "uer/gpt2-chinese-cluecorpussmall"  # GPT2-small
-# model_tag = 'uer/gpt2-large-chinese-cluecorpussmall'  # GPT2-large
-model_tag = 'uer/gpt2-xlarge-chinese-cluecorpussmall'  # GPT2-xlarge
+model_tag = 'uer/gpt2-large-chinese-cluecorpussmall'  # GPT2-large
+# model_tag = 'uer/gpt2-xlarge-chinese-cluecorpussmall'  # GPT2-xlarge
 
 developer_name, model_name = tuple(model_tag.split('/'))
 cache_path = "model_file"

@@ -1,14 +1,14 @@
 """
-Only for testing the distributed decoding performance
+Worker.py: distributed autoregressive inference for transformer-based LM
 """
 import argparse
 import sys
-import time
-
 import numpy as np
 import torch
 import torch.distributed as dist
 from datetime import datetime
+
+# from memory_profiler import profile
 
 from cmd_util import get_ip_addr
 from comm import *
@@ -40,7 +40,7 @@ if distributed:
     os.environ['GLOO_SOCKET_IFNAME'] = 'eth0'
 
 
-def log(log_type: str, message:str):
+def log(log_type: str, message: str):
     print(f'[{get_timestamp()} {log_type}]: {message}')
 
 
@@ -48,6 +48,7 @@ class Worker:
     """
     Worker for distributed LLM decoding
     """
+
     def __init__(self, main_worker_addr: tuple):
         # server_ip, port = server_addr
         self.server_addr = main_worker_addr
@@ -189,7 +190,6 @@ class Worker:
         split_weights_file = f'{model_name}-n={self.n_device}-r={self.rank}-se={1 if split_embedding else 0}.sw'
         data = None  # split_weights
         if not os.path.exists(split_weights_dir + split_weights_file):
-            print(f'[{get_timestamp()} Notice]: File of "{split_weights_file}" not found, download from Master')
             log('Notice', f'File of "{split_weights_file}" not found, download from Master')
 
             with socket.create_connection((MASTER_IP, master_port)) as conn:
@@ -290,7 +290,7 @@ class Worker:
 
             # split MHA
             split_MHA_weight = split_weight_layer['MHA']
-            split_MHA_output, layer_cache = MHA_forward_use_weights(hidden_states, split_MHA_weight, self.config,
+            hidden_states, layer_cache = MHA_forward_use_weights(hidden_states, split_MHA_weight, self.config,
                                                                     split_cache_layer)
             if use_cache:
                 cache_present = cache_present + (layer_cache,)
@@ -298,13 +298,14 @@ class Worker:
             if split_MLP:  # split MLP inference on workers
                 # AllReduce
                 start_ar = time.perf_counter()
-                dist.all_reduce(split_MHA_output, op=dist.ReduceOp.SUM)
+                # dist.all_reduce(hidden_states, op=dist.ReduceOp.SUM)
+                hidden_states = self.all_reduce(hidden_states)
                 if show_latency_se:
                     end_ar = time.perf_counter()
                     all_reduce_latency.append(end_ar - start_ar)
 
                 # Residual connection
-                hidden_states = split_MHA_output + residual
+                hidden_states = hidden_states + residual
 
                 if self.rank == 0:  # central
                     residual = hidden_states
@@ -319,7 +320,8 @@ class Worker:
                 if layer_idx == self.config.n_layer - 1:
                     dist.reduce(split_MLP_output, dst=0, op=dist.ReduceOp.SUM)
                 else:
-                    dist.all_reduce(split_MLP_output, op=dist.ReduceOp.SUM)
+                    # dist.all_reduce(split_MLP_output, op=dist.ReduceOp.SUM)
+                    split_MLP_output = self.all_reduce(split_MLP_output)
                 if show_latency_se:
                     end_ar = time.perf_counter()
                     all_reduce_latency.append(end_ar - start_ar)
@@ -328,9 +330,9 @@ class Worker:
                 hidden_states = split_MLP_output + residual
 
             else:  # inference MLP only on device 0
-                dist.reduce(split_MHA_output, dst=0, op=dist.ReduceOp.SUM)
+                dist.reduce(hidden_states, dst=0, op=dist.ReduceOp.SUM)
                 if self.rank == 0:
-                    hidden_states = split_MHA_output + residual
+                    hidden_states = hidden_states + residual
                     residual = hidden_states
                     # LN2
                     hidden_states = F.layer_norm(hidden_states, (d_model,), *ln2_w_b, self.config.ln_eps)
@@ -557,6 +559,55 @@ class Worker:
             ring_index %= self.n_device
         return ring_index
 
+    # call dist.d2d comm (send, recv) to implement all-reduce
+    def reduce_scatter(self, xi: torch.Tensor, split_dim=-1):
+        """
+        :param split_dim: split_dim=-1 for TP
+        :return:
+        """
+        assert xi.size(-1) % self.n_device == 0
+        se = xi.size(-1) // self.n_device
+        xis_p = [xi_p.contiguous() for xi_p in xi.split(se, dim=split_dim)]
+        from_index = self.get_ring_index(self.rank, -1)
+        from_tensor = torch.empty_like(xis_p[0])
+        to_index = self.get_ring_index(self.rank, 1)
+        # n-1 rounds comm
+        for i in range(self.n_device - 1, 0, -1):
+            send_idx = self.get_ring_index(self.rank, i)
+            recv_idx = self.get_ring_index(send_idx, -1)
+
+            recv_task = dist.irecv(from_tensor, src=from_index)
+            send_task = dist.isend(xis_p[send_idx], dst=to_index)
+
+            # send_task.wait()
+            recv_task.wait()
+
+            xis_p[recv_idx].add_(from_tensor)
+
+        return xis_p[self.rank]
+
+    def all_gather(self, x_p):
+        to_gathers = [x_p if i == self.rank else torch.empty_like(x_p) for i in range(self.n_device)]
+        from_index = self.get_ring_index(self.rank, -1)
+        to_index = self.get_ring_index(self.rank, 1)
+        send_idx = self.rank
+        recv_idx = self.get_ring_index(send_idx, -1)
+
+        for i in range(world_size - 1):
+            recv_task = dist.irecv(to_gathers[recv_idx], src=from_index)
+            send_task = dist.isend(to_gathers[send_idx], dst=to_index)
+
+            recv_task.wait()
+            send_idx = recv_idx
+            recv_idx = self.get_ring_index(send_idx, -1)
+
+        return to_gathers
+
+    def all_reduce(self, xi, split_dim=-1):
+        x_p = self.reduce_scatter(xi, split_dim)
+        x_ps = self.all_gather(x_p)
+        return torch.concat(x_ps, dim=split_dim)
+
     def ring_reduce_scatter_comp_overlap(self, xi: torch.Tensor, Wi: torch.Tensor, bi=None):
         """
         overlap the ring reduce-scatter comm operation with the **previous** matrix-vector multiplication
@@ -682,6 +733,7 @@ class Worker:
                     y_reduce.add_(bi)
                 return y_reduce
 
+    # @profile
     def tp_generate(self, max_length, split_MLP=True, return_latency=False):
         if split_embedding:
             tp_forward = self.co_forward_se
@@ -734,7 +786,11 @@ class Worker:
             print('Start decoding')
             start_decoding = time.perf_counter()
             for seq_len in tqdm(range(cur_len, max_length)):
+
                 if self.rank == 0:
+                    # process = psutil.Process(os.getpid())
+                    # log('Monitor', f'Current RSS: {process.memory_info().rss>>20:.2f} MiB')
+
                     hidden_states = tp_forward(input_ids)
                     logits = self.lm_head(hidden_states[:, -1, :])
                     next_token_ids = logits2token(logits)
@@ -777,54 +833,6 @@ def distributed_layer_norm(split_embeddings, split_LN_weights, d_model, eps):
     return split_embeddings
 
 
-def test_overlap(w: Worker):
-    # test overlap
-    b = 1
-    d_model = 4096
-    intermediate_dimension = 11008
-    dtype = torch.float32
-    split_size = d_model // world_size
-    xi = torch.randn(split_size, dtype=dtype)
-    print(xi)
-
-    # test ring_reduce_scatter_overlap()
-    Wi = torch.randn(split_size, d_model, dtype=dtype)
-    print(Wi)
-    yi = w.ring_reduce_scatter_comp_overlap(xi, Wi)
-    print(yi)
-    # verify result
-    xis = [torch.empty_like(xi, dtype=dtype)] * world_size
-    dist.all_gather(xis, xi)
-    for x in xis:
-        print(torch.equal(x, xi))
-    x = torch.concat(xis, dim=0)
-    Wis = [torch.empty_like(Wi, dtype=dtype)] * world_size
-    dist.all_gather(Wis, Wi)  # bug
-    Wis[rank] = Wi
-    Wis = torch.concat(Wis, dim=0)
-    print(Wis)
-    Wi = torch.split(Wis, split_size, dim=-1)[rank]
-    yi_correct = x @ Wi
-    print(torch.allclose(yi_correct, yi, atol=1e-3))  # >> True
-    print(torch.equal(yi_correct, yi))  # >> False
-    print(yi_correct)
-
-    # test ring_reduce_scatter_overlap()
-    Wi = torch.randn(d_model, intermediate_dimension // world_size, dtype=dtype)
-    print(Wi)
-    yi = w.ring_gather_reduce_comp_overlap(xi, Wi)
-    print(yi)
-    # verify result
-    xis = [torch.empty_like(xi, dtype=dtype)] * world_size
-    dist.all_gather(xis, xi)  # bug
-    xis[rank] = xi
-    x = torch.concat(xis, dim=0)
-    yi_correct = x @ Wi
-    print(torch.allclose(yi_correct, yi, atol=1e-3))  # >> True
-    print(torch.equal(yi_correct, yi))  # >> False
-    print(yi_correct)
-
-
 if __name__ == '__main__':
     worker = Worker((MAIN_WORKER_IP, port_tcp))
     show_latency_se = False
@@ -847,6 +855,7 @@ if __name__ == '__main__':
 
     for r in range(repeat):
         output = worker.tp_generate(200, return_latency=return_latency)
+
         if worker.rank == 0:
             if return_latency:
                 generated_text, t_prefill, t_decoding = output
@@ -859,8 +868,3 @@ if __name__ == '__main__':
         repeat_latency = np.asarray(repeat_latency)
         print(repeat_latency)
         print(repeat_latency.mean(axis=0))
-
-    # test overlap
-    # test_overlap(worker)
-
-    # test split_embedding
