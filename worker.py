@@ -3,6 +3,8 @@ Worker.py: distributed autoregressive inference for transformer-based LM
 """
 import argparse
 import sys
+import time
+
 import numpy as np
 import torch
 import torch.distributed as dist
@@ -222,8 +224,9 @@ class Worker:
 
                 with open(split_weights_dir + split_weights_file, 'wb') as f:
                     f.write(raw_data)
+                del raw_data
         else:
-            print(f'[{get_timestamp()} Notice]: File of "{split_weights_file}" found, load from cache')
+            print(f'[{get_timestamp()} Notice]: File "{split_weights_file}" found, load from cache')
             with open(split_weights_dir + split_weights_file, 'rb') as f:
                 data = pickle.load(f)
 
@@ -235,6 +238,38 @@ class Worker:
             self.split_embedding_range = h_l * self.config.d_h, h_r * self.config.d_h  # default: equal split
         log('Notice', 'TP Init Done!')
 
+    def init_inference(self, input_ids=None):
+        # init cache
+        if self.split_KV_cache is None:
+            past_length = 0
+            self.split_KV_cache = (None,) * self.config.n_layer
+        else:
+            past_length = self.split_KV_cache[0][0].size(-2)
+
+        # init hidden_states
+        # start_init = time.perf_counter()
+        if self.rank == 0:  # main worker todo: choose to send tokens or hidden_states
+            token_embedding = self.token_embedding(input_ids)
+            position_ids = torch.arange(past_length, input_ids.shape[-1] + past_length, dtype=torch.long,
+                                        device=input_ids.device)
+            position_ids = position_ids.unsqueeze(0)
+            position_embedding = self.position_embedding(position_ids)
+            hidden_states = token_embedding + position_embedding
+            input_shape = torch.tensor(hidden_states.shape, dtype=torch.int32)
+            dist.broadcast(input_shape, src=0)
+
+        else:
+            # send shape first
+            input_shape = torch.zeros(3, dtype=torch.int32)
+
+            dist.broadcast(input_shape, src=0)
+            hidden_states = torch.zeros(*input_shape)
+
+        dist.broadcast(hidden_states, src=0)  # init hidden_states
+        # end_init = time.perf_counter()
+        # print(f'{end_init - start_init}s for inference init')
+        return hidden_states
+
     def co_forward_tp(self, input_ids=None, use_cache=True, split_MLP=True):
         """
         :param input_ids: only the rank-0 device needs input
@@ -244,63 +279,84 @@ class Worker:
         # split_heads = self.config.split_heads
         d_model = self.config.d_model
 
-        if show_latency_se:
+        if show_latency:
             # latency_measure
+            layer_latency = []
+            ln_latency = []
+            qkv_latency = []
+            attn_latency = []
+            Wo_latency = []
+            mlp1_latency = []
+            mlp2_latency = []
+
             all_reduce_latency = []
-
-        if self.split_KV_cache is None:
-            past_length = 0
-            self.split_KV_cache = (None,) * self.config.n_layer
-        else:
-            past_length = self.split_KV_cache[0][0].size(-2)
-        # print(f'past_length={past_length}')
         if use_cache:
-            cache_present = ()  # store updated KV-Cache by layer
+            cache_present = ()
 
-        if self.rank == 0:  # main worker
-            token_embedding = self.token_embedding(input_ids)
-            position_ids = torch.arange(past_length, input_ids.shape[-1] + past_length, dtype=torch.int,
-                                        device=input_ids.device)
-            position_ids = position_ids.unsqueeze(0)
-            position_embedding = self.position_embedding(position_ids)
-            hidden_states = token_embedding + position_embedding
-            input_shape = torch.tensor(hidden_states.shape, dtype=torch.int32)
-            dist.broadcast(input_shape, src=0)
-            # send_shapes = [async_send_data(conn, tuple(hidden_states.shape)) for conn, _ in self.connections]
-            # self.loop.run_until_complete(asyncio.gather(*send_shapes))  # send shape
-
-        else:
-            # send shape first
-            input_shape = torch.zeros(3, dtype=torch.int32)
-            dist.broadcast(input_shape, src=0)
-            # input_shape = recv_data(self.client_socket)
-            hidden_states = torch.zeros(*input_shape)
-
-        dist.broadcast(hidden_states, src=0)  # init input
+        # init inference: obtain hidden_states and broadcast across devices
+        hidden_states = self.init_inference(input_ids)
 
         # forward_layers
         for layer_idx in range(self.config.n_layer):
+            start_layer = time.perf_counter()
+
             split_weight_layer = self.split_weights[layer_idx]
             ln1_w_b, ln2_w_b = split_weight_layer['LN']
             split_cache_layer = self.split_KV_cache[layer_idx]
 
             residual = hidden_states
+
+            start_ln = time.perf_counter()
             # LN1
             hidden_states = F.layer_norm(hidden_states, (d_model,), *ln1_w_b, self.config.ln_eps)
+            if show_latency:
+                end_ln = time.perf_counter()
+                ln_latency.append(end_ln - start_ln)
 
             # split MHA
-            split_MHA_weight = split_weight_layer['MHA']
-            hidden_states, layer_cache = MHA_forward_use_weights(hidden_states, split_MHA_weight, self.config,
-                                                                    split_cache_layer)
+            attn_proj_w_b, attn_Wo_w_b = split_weight_layer['MHA']
+            # hidden_states, layer_cache = MHA_forward_use_weights(hidden_states, split_MHA_weight, self.config,
+            #                                                         split_cache_layer)
+
+            start_qkv = time.perf_counter()
+            # QKV projection
+            QKV = Conv1D_forward_use_weights(hidden_states, attn_proj_w_b)
+            if show_latency:
+                end_qkv = time.perf_counter()
+                qkv_latency.append(end_qkv - start_qkv)
+
+            Q, K, V = split_QKV(QKV, self.config.d_h)
+
+            if split_cache_layer is not None:
+                # update layer_cache
+                K_cache, V_cache = split_cache_layer
+                K = torch.cat((K_cache, K), dim=2)
+                V = torch.cat((V_cache, V), dim=2)
+            split_cache_layer = (K, V)
+
+            start_attn = time.perf_counter()
+            attn_output, attn_weights = attn(Q, K, V)
+            attn_output = merge_heads(attn_output, self.config.d_h)
+            if show_latency:
+                end_attn = time.perf_counter()
+                attn_latency.append(end_attn - start_attn)
+
+            start_Wo = time.perf_counter()
+            # Wo projection
+            hidden_states = Conv1D_forward_use_weights(attn_output, attn_Wo_w_b)
+            if show_latency:
+                end_Wo = time.perf_counter()
+                Wo_latency.append(end_Wo - start_Wo)
+
             if use_cache:
-                cache_present = cache_present + (layer_cache,)
+                cache_present = cache_present + (split_cache_layer,)
 
             if split_MLP:  # split MLP inference on workers
                 # AllReduce
                 start_ar = time.perf_counter()
                 # dist.all_reduce(hidden_states, op=dist.ReduceOp.SUM)
                 hidden_states = self.all_reduce(hidden_states)
-                if show_latency_se:
+                if show_latency:
                     end_ar = time.perf_counter()
                     all_reduce_latency.append(end_ar - start_ar)
 
@@ -309,20 +365,43 @@ class Worker:
 
                 if self.rank == 0:  # central
                     residual = hidden_states
+
+                start_ln = time.perf_counter()
                 # LN2
                 hidden_states = F.layer_norm(hidden_states, (d_model,), *ln2_w_b, self.config.ln_eps)
+                if show_latency:
+                    end_ln = time.perf_counter()
+                    ln_latency.append(end_ln - start_ln)
+
                 # split MLP
-                split_MLP_weight = split_weight_layer['MLP']
-                split_MLP_output = MLP_forward_use_weights(hidden_states, split_MLP_weight, self.config)
+                mlp1_w_b, mlp2_w_b = split_weight_layer['MLP']
+                # split_MLP_output = MLP_forward_use_weights(hidden_states, split_MLP_weight, self.config)
+
+                start_mlp1 = time.perf_counter()
+                # mlp1
+                hidden_states = Conv1D_forward_use_weights(hidden_states, mlp1_w_b)
+                if show_latency:
+                    end_mlp1 = time.perf_counter()
+                    mlp1_latency.append(end_mlp1 - start_mlp1)
+
+                # activation
+                hidden_states = self.MLP_activation(hidden_states)
+
+                start_mlp2 = time.perf_counter()
+                # mlp2
+                hidden_states = Conv1D_forward_use_weights(hidden_states, mlp2_w_b)
+                if show_latency:
+                    end_mlp2 = time.perf_counter()
+                    mlp2_latency.append(end_mlp2 - start_mlp2)
 
                 # AllReduce or SingleReduce (for the last layer)
                 start_ar = time.perf_counter()
                 if layer_idx == self.config.n_layer - 1:
-                    dist.reduce(split_MLP_output, dst=0, op=dist.ReduceOp.SUM)
+                    dist.reduce(hidden_states, dst=0, op=dist.ReduceOp.SUM)
                 else:
                     # dist.all_reduce(split_MLP_output, op=dist.ReduceOp.SUM)
-                    split_MLP_output = self.all_reduce(split_MLP_output)
-                if show_latency_se:
+                    split_MLP_output = self.all_reduce(hidden_states)
+                if show_latency:
                     end_ar = time.perf_counter()
                     all_reduce_latency.append(end_ar - start_ar)
 
@@ -341,21 +420,34 @@ class Worker:
                     hidden_states = MLP_forward_use_weights(hidden_states, MLP_weight_layer, self.config)
                     # Residual connection
                     hidden_states = hidden_states + residual
+            if show_latency:
+                end_layer = time.perf_counter()
+                layer_latency.append(end_layer - start_layer)
+
 
         if use_cache:  # udpate cache
             self.split_KV_cache = cache_present
 
-        if show_latency_se:
+        if show_latency:
+            print(
+                f'Layer forward  : total {np.sum(layer_latency):.6f}s, avg {np.mean(layer_latency):.6f}s, max={np.argmax(layer_latency)} {np.max(layer_latency):.6f}s')
+            print(
+                f'LayerNorm      : total {np.sum(ln_latency):.6f}s, avg {np.mean(ln_latency):.6f}s, max={np.argmax(ln_latency)} {np.max(ln_latency):.6f}s')
+            print(
+                f'QKV projection : total {np.sum(qkv_latency):.6f}s, avg {np.mean(qkv_latency):.6f}s, max={np.argmax(qkv_latency)} {np.max(qkv_latency):.6f}s')
+            print(
+                f'Attention      : total {np.sum(attn_latency):.6f}s, avg {np.mean(attn_latency):.6f}s, max={np.argmax(attn_latency)} {np.max(attn_latency):.6f}s')
+            print(
+                f'Wo projection  : total {np.sum(Wo_latency):.6f}s, avg {np.mean(Wo_latency):.6f}s, max={np.argmax(Wo_latency)} {np.max(Wo_latency):.6f}s')
+            print(
+                f'MLP1 projection: total {np.sum(mlp1_latency):.6f}s, avg {np.mean(mlp1_latency):.6f}s, max={np.argmax(mlp1_latency)} {np.max(mlp1_latency):.6f}s')
+            print(
+                f'MLP2 projection: total {np.sum(mlp2_latency):.6f}s, avg {np.mean(mlp2_latency):.6f}s, max={np.argmax(mlp2_latency)} {np.max(mlp2_latency):.6f}s')
             print(f'All-Reduce: total {np.sum(all_reduce_latency)}s, avg {np.mean(all_reduce_latency)}s')
 
         if self.rank == 0:
             hidden_states = F.layer_norm(hidden_states, (d_model,), *self.ln_f_weight, self.config.ln_eps)
             return hidden_states
-            # else:  # other worker: 返回当前长度
-            #     if use_cache:
-            #         return self.split_KV_cache[0][0].size(-2) + 1
-            #     else:
-            #         return hidden_states.size(-2)
 
     def co_forward_se(self, input_ids=None, use_cache=True):
         """
@@ -367,7 +459,7 @@ class Worker:
         d_model = self.config.d_model
         d_h = self.config.d_h
 
-        if show_latency_se:
+        if show_latency:
             layer_latency = []
             ln_latency = []
             qkv_latency = []
@@ -376,37 +468,11 @@ class Worker:
             mlp1_latency = []
             mlp2_latency = []
 
-        # init cache
-        if self.split_KV_cache is None:
-            past_length = 0
-            self.split_KV_cache = (None,) * self.config.n_layer
-        else:
-            past_length = self.split_KV_cache[0][0].size(-2)
-
         if use_cache:
-            cache_present = ()  # store updated KV-Cache by layer
+            cache_present = ()
 
-        # init inference
-        # start_init = time.perf_counter()
-        if self.rank == 0:  # main worker todo: choose to send tokens or hidden_states
-            token_embedding = self.token_embedding(input_ids)
-            position_ids = torch.arange(past_length, input_ids.shape[-1] + past_length, dtype=torch.long,
-                                        device=input_ids.device)
-            position_ids = position_ids.unsqueeze(0)
-            position_embedding = self.position_embedding(position_ids)
-            hidden_states = token_embedding + position_embedding
-            input_shape = torch.tensor(hidden_states.shape, dtype=torch.int32)
-            dist.broadcast(input_shape, src=0)
-
-        else:
-            # send shape first
-            input_shape = torch.zeros(3, dtype=torch.int32)
-            dist.broadcast(input_shape, src=0)
-            hidden_states = torch.zeros(*input_shape)
-
-        dist.broadcast(hidden_states, src=0)  # init hidden_states
-        # end_init = time.perf_counter()
-        # print(f'{end_init - start_init}s for inference init')
+        # init inference: obtain hidden_states and broadcast across devices
+        hidden_states = self.init_inference(input_ids)
 
         # forward layers
         for layer_idx, (layer_weights, layer_cache) in enumerate(zip(self.split_weights, self.split_KV_cache)):
@@ -438,15 +504,15 @@ class Worker:
 
                 start_ln = time.perf_counter()
                 # LN1: split_embedding
-                split_embeddings = distributed_layer_norm(split_embeddings, ln1_w_b, d_model, self.config.ln_eps)
-                if show_latency_se:
+                split_embeddings = layer_norm_se(split_embeddings, ln1_w_b, d_model, self.config.ln_eps)
+                if show_latency:
                     end_ln = time.perf_counter()
                     ln_latency.append(end_ln - start_ln)
 
                 start_qkv_p = time.perf_counter()
                 # QKV projection: split_embedding
                 QKV = self.ring_gather_reduce_comp_overlap(split_embeddings, *QKV_proj_w_b)
-            if show_latency_se:
+            if show_latency:
                 end_qkv = time.perf_counter()
                 qkv_latency.append(end_qkv - start_qkv_p)
 
@@ -465,14 +531,14 @@ class Worker:
             # attn
             attn_output, _ = attn(Q, K, V)
             split_embeddings = merge_heads(attn_output, d_h)
-            if show_latency_se:
+            if show_latency:
                 end_attn = time.perf_counter()
                 attn_latency.append(end_attn - start_attn)
 
             start_Wo = time.perf_counter()
             # Wo projection
             split_embeddings = self.ring_reduce_scatter_comp_overlap(split_embeddings, *Wo_proj_w_b)
-            if show_latency_se:
+            if show_latency:
                 end_Wo = time.perf_counter()
                 Wo_latency.append(end_Wo - start_Wo)
 
@@ -488,15 +554,15 @@ class Worker:
 
             start_ln = time.perf_counter()
             # LN2: split_embedding
-            split_embeddings = distributed_layer_norm(split_embeddings, ln2_w_b, d_model, self.config.ln_eps)
+            split_embeddings = layer_norm_se(split_embeddings, ln2_w_b, d_model, self.config.ln_eps)
             end_ln = time.perf_counter()
-            if show_latency_se:
+            if show_latency:
                 ln_latency.append(end_ln - start_ln)
 
             start_mlp1 = time.perf_counter()
             # MLP1
             split_embeddings = self.ring_gather_reduce_comp_overlap(split_embeddings, *mlp1_w_b)
-            if show_latency_se:
+            if show_latency:
                 end_mlp1 = time.perf_counter()
                 mlp1_latency.append(end_mlp1 - start_mlp1)
 
@@ -522,7 +588,7 @@ class Worker:
                 dist.reduce(hidden_states, dst=0)
 
                 # residual_gather_task.wait()
-            if show_latency_se:
+            if show_latency:
                 end_layer = time.perf_counter()
                 mlp2_latency.append(end_layer - start_mlp2)
                 layer_latency.append(end_layer - start_layer)
@@ -530,7 +596,7 @@ class Worker:
         if use_cache:  # udpate cache
             self.split_KV_cache = cache_present
 
-        if show_latency_se:
+        if show_latency:
             print(
                 f'Layer forward  : total {np.sum(layer_latency):.6f}s, avg {np.mean(layer_latency):.6f}s, max={np.argmax(layer_latency)} {np.max(layer_latency):.6f}s')
             print(
@@ -608,6 +674,46 @@ class Worker:
         x_ps = self.all_gather(x_p)
         return torch.concat(x_ps, dim=split_dim)
 
+    # todo: 这玩意为什么会有问题啊
+    # def ring_reduce_scatter_comp_overlap(self, xi: torch.Tensor, Wi: torch.Tensor, bi=None):
+    #     """
+    #     overlap the ring reduce-scatter comm operation with the **previous** matrix-vector multiplication
+    #     :return: split reduced results
+    #     """
+    #     W_in, W_out = Wi.shape
+    #     # the whole weight matrix is split along row dimension(dim=0) across devices
+    #     assert xi.size(-1) == W_in and W_out % self.n_device == 0
+    #
+    #     # further split partial weight along column dimension(dim=1)
+    #     W_split_size = W_out // self.n_device
+    #     Wi_split = Wi.split(W_split_size, dim=-1)
+    #
+    #     comm_from_index = self.get_ring_index(self.rank, -1)
+    #     from_tensor = torch.zeros(*xi.shape[:-1], W_split_size)
+    #     comm_to_index = self.get_ring_index(self.rank, 1)
+    #
+    #     comp_index = self.get_ring_index(self.rank, -1)
+    #     yi = torch.matmul(xi, Wi_split[comp_index])
+    #
+    #     for i in range(0, self.n_device - 1):  # reverse order from n-1 to 0
+    #         # start receiving
+    #         send_task = dist.isend(yi, dst=comm_to_index)
+    #         recv_task = dist.irecv(from_tensor, src=comm_from_index)
+    #
+    #         # partial computation
+    #         comp_index = self.get_ring_index(comp_index, -1)  # [rank-1, rank-2, ..., rank]
+    #         yi = torch.matmul(xi, Wi_split[comp_index])
+    #
+    #         # recv result from others
+    #         # comment the send_task.wait() for distributed=True
+    #         # if not distributed:
+    #         #     send_task.wait()
+    #         recv_task.wait()
+    #         yi.add_(from_tensor)  # reduce
+    #     if bi is not None:
+    #         yi.add_(bi)
+    #     return yi
+
     def ring_reduce_scatter_comp_overlap(self, xi: torch.Tensor, Wi: torch.Tensor, bi=None):
         """
         overlap the ring reduce-scatter comm operation with the **previous** matrix-vector multiplication
@@ -625,16 +731,12 @@ class Worker:
         from_tensor = torch.zeros(*xi.shape[:-1], W_split_size)
         comm_to_index = self.get_ring_index(self.rank, 1)
 
-        # split_results = [None] * self.n_device
-
         for i in range(self.n_device - 1, -1, -1):  # reverse order from n-1 to 0
 
             comp_index = self.get_ring_index(self.rank, i)  # [rank-1, rank-2, ..., rank]
             # start receiving
             if i != self.n_device - 1:
                 send_task = dist.isend(yi, dst=comm_to_index)
-                # print(f'd_{self.rank} send to d_{comm_to_index}')
-                # print(f'{self.rank} recv from d_{comm_from_index}...', end='')
                 recv_task = dist.irecv(from_tensor, src=comm_from_index)
 
             else:
@@ -649,7 +751,6 @@ class Worker:
                 if not distributed:
                     send_task.wait()
                 recv_task.wait()
-                # print(f'done')
                 yi.add_(from_tensor)  # reduce
         if bi is not None:
             yi.add_(bi)
@@ -707,7 +808,6 @@ class Worker:
         comm_from_index = self.get_ring_index(self.rank, -1)
         comm_to_index = self.get_ring_index(self.rank, 1)
         from_tensor = torch.zeros_like(xi)
-        # to_tensor = xi
         y_reduce = None
 
         for i in range(self.n_device - 1, -1, -1):  # reverse order from n-1 to 0
@@ -733,8 +833,10 @@ class Worker:
                     y_reduce.add_(bi)
                 return y_reduce
 
-    # @profile
-    def tp_generate(self, max_length, split_MLP=True, return_latency=False):
+    # def co_forward_tsp(self, input_ids=None, use_cache=True):
+
+    def tp_generate(self, generate_length=2, max_length=200, split_MLP=True, return_latency=False):
+        # todo: modify the max_length to generate_length
         if split_embedding:
             tp_forward = self.co_forward_se
         else:
@@ -770,7 +872,7 @@ class Worker:
                 print(f'Prefill : {prefill_t}s')
 
                 generated_ids.append(next_token_ids)
-                if show_latency_se:
+                if show_latency:
                     print(f'{end_prefill - start_lmhead}s for lm_head and token generation')
 
             else:  # other workers
@@ -786,7 +888,6 @@ class Worker:
             print('Start decoding')
             start_decoding = time.perf_counter()
             for seq_len in tqdm(range(cur_len, max_length)):
-
                 if self.rank == 0:
                     # process = psutil.Process(os.getpid())
                     # log('Monitor', f'Current RSS: {process.memory_info().rss>>20:.2f} MiB')
@@ -796,13 +897,10 @@ class Worker:
                     next_token_ids = logits2token(logits)
                     generated_ids.append(next_token_ids)
 
-                    # generated_token = self.tokenizer.convert_ids_to_tokens(next_token_ids)
-                    # generated_text.append(generated_token[0])
-                    # input_ids = torch.concat((input_ids, next_token_ids), dim=-1)
                     input_ids = next_token_ids
-                    # next_tokens = self.tokenizer.convert_ids_to_tokens
                 else:
                     tp_forward()
+
             end_decoding = time.perf_counter()
 
         if self.rank == 0:
@@ -815,27 +913,31 @@ class Worker:
             return output
 
 
-def distributed_layer_norm(split_embeddings, split_LN_weights, d_model, eps):
-    x_sum = split_embeddings.sum(dim=-1, keepdim=True)
+def layer_norm_se(split_embeddings, split_LN_weights, d_model, eps):
+    x_mean = split_embeddings.sum(dim=-1, keepdim=True).div(d_model)
+    # start_comm = time.perf_counter()
     # obtain x.SUM
-    dist.all_reduce(x_sum, op=dist.ReduceOp.SUM)
-    x_mean = x_sum.div(d_model)
-    x_ssd = (split_embeddings - x_mean).square().sum(dim=-1, keepdim=True)
+    dist.all_reduce(x_mean, op=dist.ReduceOp.SUM)
+    # x_mean.div_(d_model)
+    split_embeddings = split_embeddings - x_mean  # attention: cannot modify the original split_embeddings
+    x_var = split_embeddings.square().sum(dim=-1, keepdim=True).div(d_model)
     # obtain x.SSD (Sum of Squared Deviations)
-    dist.all_reduce(x_ssd, op=dist.ReduceOp.SUM)
-    x_var = x_ssd.div(d_model)
+    dist.all_reduce(x_var, op=dist.ReduceOp.SUM)
+    # ssd_all_reduce_task.wait()
+    # end_comm = time.perf_counter()
+    x_var.add_(eps)
 
     # perform partial LayerNorm on split_embedding
-    split_embeddings = (split_embeddings - x_mean) / torch.sqrt(x_var + eps)
+    split_embeddings.div_(torch.sqrt(x_var))
     if split_LN_weights is not None:
         split_w, split_b = split_LN_weights
-        return split_embeddings * split_w + split_b
+        return torch.addcmul(split_b, split_embeddings, split_w)  # split_embedding * split_w + split_b
     return split_embeddings
 
 
 if __name__ == '__main__':
     worker = Worker((MAIN_WORKER_IP, port_tcp))
-    show_latency_se = False
+    show_latency = False
     batch = 1
     # split_embedding = False
     return_latency = True
@@ -854,7 +956,7 @@ if __name__ == '__main__':
     repeat_latency = []
 
     for r in range(repeat):
-        output = worker.tp_generate(200, return_latency=return_latency)
+        output = worker.tp_generate(120, return_latency=return_latency)
 
         if worker.rank == 0:
             if return_latency:
@@ -868,3 +970,6 @@ if __name__ == '__main__':
         repeat_latency = np.asarray(repeat_latency)
         print(repeat_latency)
         print(repeat_latency.mean(axis=0))
+
+    if dist.is_initialized():
+        dist.destroy_process_group()

@@ -5,6 +5,8 @@ import torch
 from dist_comm.network_config import *
 from comm import send_data, recv_data
 import time
+from worker import layer_norm_se
+
 
 # os.environ['USE_LIBUV'] = 'False'
 # os.environ['GLOO_SOCKET_IFNAME'] = 'eth2'
@@ -30,6 +32,13 @@ def socket_send_and_recv():
     end_conn.close()
     server_socket.close()
 
+
+def dist_init(rank: int):
+    init_method = gen_init_method(MAIN_WORKER_IP, port_torch)
+    print('init_method:', init_method)
+    # store = dist.TCPStore(server_ip, port, )
+    dist.init_process_group(backend='gloo', init_method=init_method, world_size=2, rank=rank)
+    print(dist.is_initialized())
 
 
 def send_and_recv():
@@ -71,6 +80,25 @@ def test_broadcast():
     print(data)
 
 
+def test_distributed_layerNorm():
+    split_embeddings = torch.randn(640)
+    split_w = torch.randn(640)
+    split_b = torch.randn(640)
+    total_t = []
+    comm_t = []
+    for i in range(100):
+        start_ln = time.perf_counter()
+        y, t_comm = layer_norm_se(split_embeddings, (split_w, split_b), 1280, 1e-3)
+        end_ln = time.perf_counter()
+        total = end_ln - start_ln
+        total_t.append(total)
+        comm_t.append(t_comm)
+    print(f'LayerNorm: Total:{sum(total_t):.6f}s, avg:{sum(total_t) / 100:.6f}s')
+    print(f'Comm     : Total:{sum(comm_t):.6f}s, avg:{sum(comm_t) / 100:.6f}s')
+
+
 if __name__ == "__main__":
-    socket_send_and_recv()
-    send_and_recv()
+    # socket_send_and_recv()
+    dist_init(0)
+    # send_and_recv()
+    test_distributed_layerNorm()

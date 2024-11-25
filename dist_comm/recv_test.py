@@ -1,6 +1,10 @@
+import time
+
 import torch
 import torch.distributed as dist
 import socket
+
+from worker import layer_norm_se
 from comm import send_data, recv_data
 import os
 from dist_comm.network_config import *
@@ -26,9 +30,18 @@ def get_ip_address():
     else:
         return None
 
+
 # parser = argparse.ArgumentParser()
 # parser.add_argument('-i', '--ip', required=False)
 tensor_shape = (1, 64, 224, 112)
+
+
+def dist_init(rank: int):
+    init_method = gen_init_method(MAIN_WORKER_IP, port_torch)
+    print('init_method:', init_method)
+    # store = dist.TCPStore(server_ip, port, )
+    dist.init_process_group(backend='gloo', init_method=init_method, world_size=2, rank=rank)
+    print(dist.is_initialized())
 
 
 def socket_recv_and_send():
@@ -41,22 +54,11 @@ def socket_recv_and_send():
     end_conn.close()
 
 
-
-
-
 def recv_and_send():
-    init_method = gen_init_method(MAIN_WORKER_IP, port_torch)
-    print('init_method:', init_method)
-    # store = dist.TCPStore(server_ip, port, )
-    dist.init_process_group(backend='gloo', init_method=init_method, world_size=2, rank=1)
-    print(dist.is_initialized())
-
     # sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     # sock.bind((server_ip, port))
     # sock.listen()
-
     # 初始化分布式环境
-
     print(dist.get_rank())
 
     # 创建一个空的张量来接收客户端发送的数据
@@ -71,6 +73,7 @@ def recv_and_send():
 
     dist.destroy_process_group()
 
+
 def test_broadcast():
     data = torch.randn(1, 100, 768)
     shape = torch.tensor(data.shape, dtype=torch.int32)
@@ -79,7 +82,25 @@ def test_broadcast():
     dist.broadcast(data, src=1)
     print(data)
 
+def test_distributed_layerNorm():
+    split_embeddings = torch.randn(640)
+    split_w = torch.randn(640)
+    split_b = torch.randn(640)
+    total_t = []
+    comm_t = []
+    for i in range(100):
+        start_ln = time.perf_counter()
+        y, t_comm = layer_norm_se(split_embeddings, (split_w, split_b), 1280, 1e-3)
+        end_ln = time.perf_counter()
+        total = end_ln - start_ln
+        total_t.append(total)
+        comm_t.append(t_comm)
+    print(f'LayerNorm: Total:{sum(total_t):.6f}s, avg:{sum(total_t) / 100:.6f}s')
+    print(f'Comm     : Total:{sum(comm_t):.6f}s, avg:{sum(comm_t) / 100:.6f}s')
 
 if __name__ == "__main__":
-    socket_recv_and_send()
-    recv_and_send()
+    # socket_recv_and_send()
+    dist_init(1)
+    # recv_and_send()
+    test_distributed_layerNorm()
+

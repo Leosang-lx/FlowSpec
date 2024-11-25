@@ -1,7 +1,7 @@
 import time
 import torch.nn as nn
 import torch
-from memory_profiler import profile
+# from memory_profiler import profile
 from tqdm import tqdm
 from transformers import GPT2LMHeadModel, BertTokenizer, GPT2Config
 from transformers import AutoModel, AutoTokenizer, AutoConfig
@@ -51,9 +51,9 @@ def get_model_path(cache_path, model_tag):
 
 
 # choose model scale
-# model_tag = "uer/gpt2-chinese-cluecorpussmall"  # GPT2-small
+model_tag = "uer/gpt2-chinese-cluecorpussmall"  # GPT2-small
 # model_tag = 'uer/gpt2-large-chinese-cluecorpussmall'  # GPT2-large
-model_tag = 'uer/gpt2-xlarge-chinese-cluecorpussmall'  # GPT2-xlarge
+# model_tag = 'uer/gpt2-xlarge-chinese-cluecorpussmall'  # GPT2-xlarge
 
 cache_path = "model_file"
 
@@ -67,7 +67,7 @@ device = 'cpu'
 print(f'Device={device}')
 
 
-@profile
+# @profile
 def test_autoregressive_inference():
     # 检查模型文件是否完整
     if model_path is not None and check_files_exist(model_path):
@@ -76,14 +76,18 @@ def test_autoregressive_inference():
         config = GPT2Config.from_pretrained(model_path)
         # config = AutoConfig.from_pretrained(model_path)
         print(config)
-        model = GPT2LMHeadModel.from_pretrained(model_path).to(device)
+        # model = GPT2LMHeadModel.from_pretrained(model_path).to(device)
+        model = GPT2LMHeadModel.from_pretrained(model_path, cache_dir=cache_path, torch_dtype=torch.float16).to(device)
         # tokenizer = AutoTokenizer.from_pretrained(model_path)
         tokenizer = BertTokenizer.from_pretrained(model_path)
     else:
         print("Some required files are missing.")
         config = GPT2Config.from_pretrained(model_tag, cache_dir=cache_path)
         tokenizer = BertTokenizer.from_pretrained(model_tag, cache_dir=cache_path)
-        model = GPT2LMHeadModel.from_pretrained(model_tag, cache_dir=cache_path).to("cuda")
+        # if model_tag == 'uer/gpt2-xlarge-chinese-cluecorpussmall':
+        # model = GPT2LMHeadModel.from_pretrained(model_tag, cache_dir=cache_path, torch_dtype=torch.float16).to(device)
+        # else:
+        model = GPT2LMHeadModel.from_pretrained(model_tag, cache_dir=cache_path).to(device)
         # model = AutoModel.from_pretrained(model_path).to(device)
 
     model_config = (
@@ -100,12 +104,13 @@ def test_autoregressive_inference():
 
     batch_size = 1
     input_ids = torch.LongTensor([tokenizer.convert_tokens_to_ids(list(text))]).to(device)
-    # input_ids = tokenizer.encode(text, return_tensors='pt').to('cuda')  # 将文本编码为ID
+    # input_ids = tokenizer.encode(text, return_tensors='pt').to(device)  # 将文本编码为ID
+
 
     # KV-cache for the inference request
     past_key_values = None
     use_cache = True
-    do_sample = True
+    do_sample = False
     top_k = 20
     top_p = 0.6
     print(f'use_kv_cache={use_cache}')
@@ -168,6 +173,7 @@ def test_autoregressive_inference():
     print(f'Generation latency: {consumption}s')
     print(f'Prefill latency: {prefill_latency}s')
     print(f'Decoding latency: {decoding_latency}s')
+
 
 if __name__ == '__main__':
     test_autoregressive_inference()
