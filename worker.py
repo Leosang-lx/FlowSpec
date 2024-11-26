@@ -29,6 +29,9 @@ parser.add_argument('-i', '--rank', type=int, required=False, default=0)
 parser.add_argument('-w', '--world_size', type=int, required=False, default=DEFAULT_SIZE)
 parser.add_argument('-r', '--repeat', type=int, required=False, default=1)
 parser.add_argument('-s', '--se', type=int, required=False, default=1)
+parser.add_argument('-g', '--generate_length', type=int, required=False, default=2)  # default: prefill:1 + decoding:1
+parser.add_argument('-p', '--prefill_length', type=int, required=False, default=100)  # default: length of init input
+
 
 arguments = parser.parse_args()
 server_ip = arguments.addr
@@ -36,6 +39,8 @@ rank = arguments.rank
 world_size = arguments.world_size
 repeat = arguments.repeat
 split_embedding = bool(arguments.se)
+generate_length = arguments.generate_length
+prefill_length = arguments.prefill_length
 
 # Enable when using RaspberryPi
 if distributed:
@@ -423,7 +428,6 @@ class Worker:
             if show_latency:
                 end_layer = time.perf_counter()
                 layer_latency.append(end_layer - start_layer)
-
 
         if use_cache:  # udpate cache
             self.split_KV_cache = cache_present
@@ -835,30 +839,36 @@ class Worker:
 
     # def co_forward_tsp(self, input_ids=None, use_cache=True):
 
-    def tp_generate(self, generate_length=2, max_length=200, split_MLP=True, return_latency=False):
+    def tp_generate(self, input_len=100, generate_len=100, split_MLP=True, return_latency=False):
         # todo: modify the max_length to generate_length
         if split_embedding:
             tp_forward = self.co_forward_se
         else:
             tp_forward = self.co_forward_tp
 
+        max_input_length = len(self.text)
+        assert input_len > 0
+        input_len = min(max_input_length, input_len)
+        assert input_len + generate_len <= 1024
+        log('Task', f'input_length={input_len}, generate_length={generate_len}')
+
         self.split_KV_cache = None  # clear cache
 
         with torch.no_grad():  # no_grad() to release memory
             # prefill
             if self.rank == 0:
-                input_ids = torch.LongTensor([self.tokenizer.convert_tokens_to_ids(list(self.text))])
+                input_ids = torch.LongTensor([self.tokenizer.convert_tokens_to_ids(list(self.text[:input_len]))])
                 if self.batch_size > 1:
                     input_ids = torch.concat([input_ids] * self.batch_size, dim=0)
-                cur_len = input_ids.size(-1)
-                assert cur_len < max_length
+                # cur_len = input_ids.size(-1)
+                # assert cur_len < max_length
                 # share the cur_len
                 input_size = torch.tensor(input_ids.shape, dtype=torch.int32)
                 dist.broadcast(input_size, src=0)
 
                 generated_ids = []
 
-                print('Start Prefill')
+                log('Task', 'Start Prefill')
                 start_prefill = time.perf_counter()
                 hidden_states = tp_forward(input_ids)
 
@@ -869,25 +879,25 @@ class Worker:
 
                 end_prefill = time.perf_counter()
                 prefill_t = end_prefill - start_prefill
-                print(f'Prefill : {prefill_t}s')
+                log('Task', f'Prefill : {prefill_t}s')
 
                 generated_ids.append(next_token_ids)
                 if show_latency:
-                    print(f'{end_prefill - start_lmhead}s for lm_head and token generation')
+                    log('Task', f'{end_prefill - start_lmhead}s for lm_head and token generation')
 
             else:  # other workers
-                input_size = torch.empty(2, dtype=torch.int32)
-                dist.broadcast(input_size, src=0)
-                cur_len = input_size[-1]
-                print('Start Prefill')
+                # input_size = torch.empty(2, dtype=torch.int32)
+                # dist.broadcast(input_size, src=0)
+                # cur_len = input_size[-1]
+                log('Task', 'Start Prefill')
                 tp_forward()
 
-            cur_len += 1
+            # cur_len += 1
 
             # decoding
-            print('Start decoding')
+            log('Task', 'Start decoding')
             start_decoding = time.perf_counter()
-            for seq_len in tqdm(range(cur_len, max_length)):
+            for seq_len in tqdm(range(1, generate_len)):
                 if self.rank == 0:
                     # process = psutil.Process(os.getpid())
                     # log('Monitor', f'Current RSS: {process.memory_info().rss>>20:.2f} MiB')
@@ -905,7 +915,7 @@ class Worker:
 
         if self.rank == 0:
             decoding_t = end_decoding - start_decoding
-            print(f'Decoding: {decoding_t}s')
+            log('Task', f'Decoding: {decoding_t}s')
             generated_text = self.tokenizer.convert_ids_to_tokens(generated_ids)
             output = (''.join(generated_text),)
             if return_latency:
@@ -956,7 +966,7 @@ if __name__ == '__main__':
     repeat_latency = []
 
     for r in range(repeat):
-        output = worker.tp_generate(120, return_latency=return_latency)
+        output = worker.tp_generate(5, 2, return_latency=return_latency)
 
         if worker.rank == 0:
             if return_latency:

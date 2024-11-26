@@ -51,9 +51,9 @@ def get_model_path(cache_path, model_tag):
 
 
 # choose model scale
-model_tag = "uer/gpt2-chinese-cluecorpussmall"  # GPT2-small
+# model_tag = "uer/gpt2-chinese-cluecorpussmall"  # GPT2-small
 # model_tag = 'uer/gpt2-large-chinese-cluecorpussmall'  # GPT2-large
-# model_tag = 'uer/gpt2-xlarge-chinese-cluecorpussmall'  # GPT2-xlarge
+model_tag = 'uer/gpt2-xlarge-chinese-cluecorpussmall'  # GPT2-xlarge
 
 cache_path = "model_file"
 
@@ -97,9 +97,9 @@ def test_autoregressive_inference():
 
     # 输入文本
     # 101 tokens
-    text = "在一个风和日丽的下午，小镇的街道上人来人往，孩子们在巷口追逐嬉戏。李阿姨拿着刚从市场买回来的菜篮子，步履轻盈地走回家。街边的老槐树下，几位老人正围坐在一起下象棋，不时传来欢声笑语。今天是不是一个好日子？"
+    # text = "在一个风和日丽的下午，小镇的街道上人来人往，孩子们在巷口追逐嬉戏。李阿姨拿着刚从市场买回来的菜篮子，步履轻盈地走回家。街边的老槐树下，几位老人正围坐在一起下象棋，不时传来欢声笑语。今天是不是一个好日子？"
     # 5 tokens
-    # text = "明天降温了"
+    text = "明天降温了"
     print('Input length:', len(text))
 
     batch_size = 1
