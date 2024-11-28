@@ -72,40 +72,33 @@ class Master:
                             split_mlp = True
 
                         if self.split_weights is None or self.split_embedding:
-                            self.split_weights = split_weight_TP(self.model_weights, self.n_workers,
-                                                                 self.model_config, split_MLP=split_mlp)  # default: equal split
+                            self.split_weights = split_weight_TP(self.model_weights, self.n_workers, self.model_config,
+                                                                 split_MLP=split_mlp, return_view=True)  # default: equal split
                             self.split_embedding = False
 
-                        # ln_weights = tuple(
-                        #     [layer_weight['LN'] for layer_weight in self.model_weights['layers_weights']])
-                        ln_f_weights = self.model_weights['ln_f_weights']
-                        # ln_weights = ln_weights, ln_f_weights
-                        data_to_send = self.model_config, self.split_weights[worker_rank]
+                        # data_to_send = self.model_config, self.model_weights['embedding_weights'], self.split_weights[worker_rank]
+                        #
+                        # if worker_rank == 0:  # additional embedding weights and layer norm weights for central processing
+                        #     data_to_send = data_to_send + (self.tokenizer, self.model_weights['ln_f_weights'])
 
-                        if worker_rank == 0:  # additional embedding weights and layer norm weights for central processing
-                            data_to_send = data_to_send + (
-                                self.tokenizer, self.model_weights['embedding_weights'], ln_f_weights)
 
                     elif fields[0] == 'SE_WEIGHT':  # send model weights: split_embedding=True
                         worker_rank = int(fields[1])
                         assert self.n_workers > 0 and worker_rank < self.n_workers
                         if self.split_weights is None or not self.split_embedding:
                             self.split_weights = split_weight_TP(self.model_weights, self.n_workers, self.model_config,
-                                                                 split_embedding=True)
+                                                                 split_embedding=True, return_view=True)
                             self.split_embedding = True
 
-                        ln_f_weights = self.model_weights['ln_f_weights']
-                        data_to_send = self.model_config, self.split_weights[worker_rank]
-                        if worker_rank == 0:
-                            # all_split_embeddings = [
-                            #                            self.model_config.d_model // self.n_workers] * self.n_workers  # equal split
-                            data_to_send = data_to_send + (
-                                self.tokenizer, self.model_weights['embedding_weights'], ln_f_weights)
+                        # data_to_send = self.model_config, self.model_weights['embedding_weights'], self.split_weights[worker_rank]
+                        # if worker_rank == 0:
+                        #     # all_split_embeddings = [
+                        #     data_to_send = data_to_send + (
+                        #         self.tokenizer, self.model_weights['ln_f_weights'])
                     else:
                         raise Exception(f'Unknown request: {request}')
 
-                    writer.write(gen_bytes(data_to_send))
-                    await writer.drain()
+                    await self.send_split_weights(writer, worker_rank)
                     break
 
         except asyncio.CancelledError or ConnectionResetError as e:
@@ -113,6 +106,44 @@ class Master:
         finally:
             writer.close()
             await writer.wait_closed()
+
+    async def send_split_weights(self, writer, rank):
+        assert self.n_workers > 1
+        # model_config
+        config = self.model_config
+        writer.write(gen_bytes(config))
+        await writer.drain()
+        # embedding
+        embedding_weights = self.model_weights['embedding_weights']
+        writer.write(gen_bytes(embedding_weights))
+        await writer.drain()
+        # split_weights: send by layers
+        split_layers_weights = self.split_weights[rank]  # view of split_weights
+        for split_layer_weights in split_layers_weights:
+            blocks = split_layer_weights.keys()
+            writer.write(gen_bytes(list(blocks)))
+            await writer.drain()
+            for block in blocks:  # ['MHA', 'MLP', 'LN']
+                (proj1_w, proj1_b), (proj2_w, proj2_b) = split_layer_weights[block]
+                if proj1_w is not None:
+                    proj1_w = proj1_w.clone().contiguous()
+                if proj1_b is not None:
+                    proj1_b = proj1_b.clone().contiguous()
+                if proj2_w is not None:
+                    proj2_w = proj2_w.clone().contiguous()
+                if proj2_b is not None:
+                    proj2_b = proj2_b.clone().contiguous()
+                block_weights = (proj1_w, proj1_b), (proj2_w, proj2_b)
+                writer.write(gen_bytes(block_weights))
+                await writer.drain()
+        if rank == 0:
+            # tokenizer
+            writer.write(gen_bytes(self.tokenizer))
+            await writer.drain()
+            # ln_f
+            ln_f_weights = self.model_weights['ln_f_weights']
+            writer.write(gen_bytes(ln_f_weights))
+            await writer.drain()
 
     async def start_handling(self):
         server = await asyncio.start_server(self.handle_worker, self.server_ip, master_port)

@@ -1,4 +1,3 @@
-import torch
 import torch.nn as nn
 import numpy as np
 
@@ -47,7 +46,7 @@ def estimated_KV_cache(model_config_params, batch_and_length, use_cache=True):
     return KV_cache_size
 
 
-from GPT2_autoregressive_inference import model, config, model_config
+from simple_test.GPT2_autoregressive_inference import model, model_config
 
 if __name__ == '__main__':
     estimated_model_params(model)

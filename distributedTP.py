@@ -2,14 +2,14 @@ from simple_test.split_layer_norm import split_LN
 from forward_use_weight import *
 
 
-def split_weight_TP(model_weights, split_nums: int | list[int], config, split_embedding=False, split_MLP=True):
+def split_weight_TP(model_weights, split_nums: int | list[int], config, split_embedding=False, split_MLP=True, return_view=False):
     """
     split weights for TP, only has the weights in **layers**
+    :param model_weights: complete weight of a decoder-based transformer model for inference
+    :param split_nums: int or list(int), the heads number in each partition
     :param config: hyper params of the transformer model: configuration
     :param split_embedding: False: normal TP; True: split embeddings
-    :param model_weights: complete weight of a transformer model for inference
-    :param heads:
-    :param split_nums: int or list(int), the heads number in each partition
+    :param return_view: False: return parameters with clone(); True: return split tensors of views
     :return:
     """
 
@@ -61,15 +61,22 @@ def split_weight_TP(model_weights, split_nums: int | list[int], config, split_em
 
         for i in range(split_cnt):
             qkv_w_i, qkv_b_i = split_QKV_proj[i]
-            split_QKV_proj[i] = (torch.concat(qkv_w_i, dim=-1).clone().contiguous(), torch.concat(qkv_b_i, dim=-1).clone().contiguous())
+            qkv_w_i, qkv_b_i = torch.concat(qkv_w_i, dim=-1), torch.concat(qkv_b_i, dim=-1)
+            # split_QKV_proj[i] = (torch.concat(qkv_w_i, dim=-1), torch.concat(qkv_b_i, dim=-1))
+            if not return_view:
+                qkv_w_i = qkv_w_i.clone().contiguous()
+                qkv_b_i = qkv_b_i.clone().contiguous()
+            split_QKV_proj[i] = (qkv_w_i, qkv_b_i)
 
         # split multi-head projection weights Wo
         attn_Wo_w, attn_Wo_b = attn_Wo_w_b
         split_attn_Wo_ws = attn_Wo_w.split(split_embedding_num, dim=0)
-        split_attn_Wo_ws = [partition.clone() for partition in split_attn_Wo_ws]  # clone()
+        if not return_view:
+            split_attn_Wo_ws = [partition.clone() for partition in split_attn_Wo_ws]  # clone()
         if split_embedding:  # split_embedding: split bias as well
             split_attn_Wo_bs = attn_Wo_b.split(split_embedding_num, dim=-1)
-            split_attn_Wo_bs = [partition.clone() for partition in split_attn_Wo_bs]  # clone()
+            if not return_view:
+                split_attn_Wo_bs = [partition.clone() for partition in split_attn_Wo_bs]  # clone()
         else:  # normal TP: let rank0 device keep the whole bias
             split_attn_Wo_bs = (attn_Wo_b,) + (None,) * (split_cnt - 1)
         split_Wo_proj = tuple(zip(split_attn_Wo_ws, split_attn_Wo_bs))
@@ -88,18 +95,22 @@ def split_weight_TP(model_weights, split_nums: int | list[int], config, split_em
             split_lens = [sen * config.rate for sen in
                           split_embedding_num]  # todo: MLP may need another split setting, share the attn split setting first
             split_mlp1_ws = mlp1_w.split(split_lens, dim=-1)
-            split_mlp1_ws = [partition.clone() for partition in split_mlp1_ws]  # clone()
+            if not return_view:
+                split_mlp1_ws = [partition.clone() for partition in split_mlp1_ws]  # clone()
             split_mlp1_bs = mlp1_b.split(split_lens, dim=-1)
-            split_mlp1_bs = [partition.clone() for partition in split_mlp1_bs]  # clone()
+            if not return_view:
+                split_mlp1_bs = [partition.clone() for partition in split_mlp1_bs]  # clone()
             split_mlp1_wb = tuple(zip(split_mlp1_ws, split_mlp1_bs))
 
             # split_mlp2 weights
             mlp2_w, mlp2_b = mlp2_wb
             split_mlp2_ws = mlp2_w.split(split_lens, dim=0)
-            split_mlp2_ws = [partition.clone() for partition in split_mlp2_ws]  # clone()
+            if return_view:
+                split_mlp2_ws = [partition.clone() for partition in split_mlp2_ws]  # clone()
             if split_embedding and layer_idx < config.n_layer - 1:  # split embedding as well
                 split_mlp2_bs = mlp2_b.split(split_embedding_num, dim=-1)
-                split_mlp2_bs = [partition.clone() for partition in split_mlp2_bs]  # clone()
+                if return_view:
+                    split_mlp2_bs = [partition.clone() for partition in split_mlp2_bs]  # clone()
             else:  # let rank0 device keep the whole bias
                 # mlp2_b is applied for once after the results of ReduceSum, which is applied by only one partition
                 split_mlp2_bs = (mlp2_b,) + (None,) * (split_cnt - 1)
@@ -116,16 +127,20 @@ def split_weight_TP(model_weights, split_nums: int | list[int], config, split_em
                 split_ln1_bs = [ln1_b] * split_cnt
             else:
                 split_ln1_ws = ln1_w.split(split_embedding_num, dim=-1)
-                split_ln1_ws = [partition.clone() for partition in split_ln1_ws]
+                if return_view:
+                    split_ln1_ws = [partition.clone() for partition in split_ln1_ws]
                 split_ln1_bs = ln1_b.split(split_embedding_num, dim=-1)
-                split_ln1_bs = [partition.clone() for partition in split_ln1_bs]
+                if return_view:
+                    split_ln1_bs = [partition.clone() for partition in split_ln1_bs]
 
             # split LN2
             ln2_w, ln2_b = ln2_w_b
             split_ln2_ws = ln2_w.split(split_embedding_num, dim=-1)
-            split_ln2_ws = [partition.clone() for partition in split_ln2_ws]
+            if return_view:
+                split_ln2_ws = [partition.clone() for partition in split_ln2_ws]
             split_ln2_bs = ln2_b.split(split_embedding_num, dim=-1)
-            split_ln2_bs = [partition.clone() for partition in split_ln2_bs]
+            if return_view:
+                split_ln2_bs = [partition.clone() for partition in split_ln2_bs]
 
         for idx_split in range(split_cnt):
             split_layer_weights = {

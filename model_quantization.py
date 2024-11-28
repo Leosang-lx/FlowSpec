@@ -1,5 +1,4 @@
-from GPT2_autoregressive_inference import *
-import torch.quantization as quan
+from simple_test.GPT2_autoregressive_inference import *
 from transformers import PretrainedConfig
 
 

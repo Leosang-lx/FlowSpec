@@ -29,9 +29,8 @@ parser.add_argument('-i', '--rank', type=int, required=False, default=0)
 parser.add_argument('-w', '--world_size', type=int, required=False, default=DEFAULT_SIZE)
 parser.add_argument('-r', '--repeat', type=int, required=False, default=1)
 parser.add_argument('-s', '--se', type=int, required=False, default=1)
-parser.add_argument('-g', '--generate_length', type=int, required=False, default=2)  # default: prefill:1 + decoding:1
 parser.add_argument('-p', '--prefill_length', type=int, required=False, default=100)  # default: length of init input
-
+parser.add_argument('-g', '--generate_length', type=int, required=False, default=2)  # default: prefill:1 + decoding:1
 
 arguments = parser.parse_args()
 server_ip = arguments.addr
@@ -39,16 +38,16 @@ rank = arguments.rank
 world_size = arguments.world_size
 repeat = arguments.repeat
 split_embedding = bool(arguments.se)
-generate_length = arguments.generate_length
 prefill_length = arguments.prefill_length
+generate_length = arguments.generate_length  # generate_length=1 means only prefill
 
 # Enable when using RaspberryPi
 if distributed:
     os.environ['GLOO_SOCKET_IFNAME'] = 'eth0'
 
 
-def log(log_type: str, message: str):
-    print(f'[{get_timestamp()} {log_type}]: {message}')
+def log(log_type: str, message: str, end=None):
+    print(f'[{get_timestamp()} {log_type}]: {message}', end=end)
 
 
 class Worker:
@@ -171,18 +170,43 @@ class Worker:
         self.top_k = 20
         self.top_p = 0.6
 
+    def recv_weights(self, master_conn: socket.socket):
+        # model_config
+        log('Init', 'Receiving model_config and embedding_weights...')
+        config = recv_data(master_conn)
+        # embedding
+        embedding_weights = recv_data(master_conn)
+        # split_layers_weights
+        layers_weights = ()
+        log('Init', 'Receiving layers_weights...')
+        for l in tqdm(range(config.n_layer)):
+            blocks = recv_data(master_conn)
+            split_layer_weights = {}
+            for block in blocks:
+                split_layer_weights[block] = recv_data(master_conn)
+            layers_weights = layers_weights + (split_layer_weights,)
+        nece_data = config, embedding_weights, layers_weights
+
+        if self.rank == 0:
+            log('Init', 'Receiving tokenizer and ln_f_weights...')
+            tokenizer = recv_data(master_conn)
+            ln_f_weights = recv_data(master_conn)
+            nece_data = nece_data + (tokenizer, ln_f_weights)
+        return nece_data
+
     def init_weights(self, data: tuple):
         if self.rank == 0:
-            self.config, self.split_weights, self.tokenizer, embedding_weights, self.ln_f_weight = data
+            self.config, embedding_weights, self.split_weights, self.tokenizer, self.ln_f_weight = data
 
-            token_embedding_weight, position_embedding_weight = embedding_weights
-            self.token_embedding = nn.Embedding.from_pretrained(token_embedding_weight)
-            self.position_embedding = nn.Embedding.from_pretrained(position_embedding_weight)
             self.lm_head = nn.Linear(self.config.d_model, self.config.vocab_size, bias=False)
-            self.lm_head.weight = nn.Parameter(token_embedding_weight)
+            self.lm_head.weight = nn.Parameter(embedding_weights[0])  # embedding_weights should be tuple
 
         else:  # other workers
-            self.config, self.split_weights = data
+            self.config, embedding_weights, self.split_weights = data
+
+        token_embedding_weight, position_embedding_weight = embedding_weights
+        self.token_embedding = nn.Embedding.from_pretrained(token_embedding_weight)
+        self.position_embedding = nn.Embedding.from_pretrained(position_embedding_weight)
 
     def init(self, split_MLP=True, split_embedding=False):
         """
@@ -225,13 +249,13 @@ class Worker:
                     request = f'TP_WEIGHT {self.rank} SPLIT_MLP {int(split_MLP)}\n'
 
                 conn.sendall(request.encode())
-                data, raw_data = recv_data(conn, return_bytes=True)
-
+                # data, raw_data = recv_data(conn, return_bytes=True)
+                data = self.recv_weights(conn)
+                # save the split_weights
                 with open(split_weights_dir + split_weights_file, 'wb') as f:
-                    f.write(raw_data)
-                del raw_data
+                    pickle.dump(data, f)
         else:
-            print(f'[{get_timestamp()} Notice]: File "{split_weights_file}" found, load from cache')
+            log('Notice', f'File "{split_weights_file}" found, load from cache')
             with open(split_weights_dir + split_weights_file, 'rb') as f:
                 data = pickle.load(f)
 
@@ -678,46 +702,6 @@ class Worker:
         x_ps = self.all_gather(x_p)
         return torch.concat(x_ps, dim=split_dim)
 
-    # todo: 这玩意为什么会有问题啊
-    # def ring_reduce_scatter_comp_overlap(self, xi: torch.Tensor, Wi: torch.Tensor, bi=None):
-    #     """
-    #     overlap the ring reduce-scatter comm operation with the **previous** matrix-vector multiplication
-    #     :return: split reduced results
-    #     """
-    #     W_in, W_out = Wi.shape
-    #     # the whole weight matrix is split along row dimension(dim=0) across devices
-    #     assert xi.size(-1) == W_in and W_out % self.n_device == 0
-    #
-    #     # further split partial weight along column dimension(dim=1)
-    #     W_split_size = W_out // self.n_device
-    #     Wi_split = Wi.split(W_split_size, dim=-1)
-    #
-    #     comm_from_index = self.get_ring_index(self.rank, -1)
-    #     from_tensor = torch.zeros(*xi.shape[:-1], W_split_size)
-    #     comm_to_index = self.get_ring_index(self.rank, 1)
-    #
-    #     comp_index = self.get_ring_index(self.rank, -1)
-    #     yi = torch.matmul(xi, Wi_split[comp_index])
-    #
-    #     for i in range(0, self.n_device - 1):  # reverse order from n-1 to 0
-    #         # start receiving
-    #         send_task = dist.isend(yi, dst=comm_to_index)
-    #         recv_task = dist.irecv(from_tensor, src=comm_from_index)
-    #
-    #         # partial computation
-    #         comp_index = self.get_ring_index(comp_index, -1)  # [rank-1, rank-2, ..., rank]
-    #         yi = torch.matmul(xi, Wi_split[comp_index])
-    #
-    #         # recv result from others
-    #         # comment the send_task.wait() for distributed=True
-    #         # if not distributed:
-    #         #     send_task.wait()
-    #         recv_task.wait()
-    #         yi.add_(from_tensor)  # reduce
-    #     if bi is not None:
-    #         yi.add_(bi)
-    #     return yi
-
     def ring_reduce_scatter_comp_overlap(self, xi: torch.Tensor, Wi: torch.Tensor, bi=None):
         """
         overlap the ring reduce-scatter comm operation with the **previous** matrix-vector multiplication
@@ -735,30 +719,69 @@ class Worker:
         from_tensor = torch.zeros(*xi.shape[:-1], W_split_size)
         comm_to_index = self.get_ring_index(self.rank, 1)
 
-        for i in range(self.n_device - 1, -1, -1):  # reverse order from n-1 to 0
+        comp_index = self.get_ring_index(self.rank, -1)
+        yi = torch.matmul(xi, Wi_split[comp_index])
 
-            comp_index = self.get_ring_index(self.rank, i)  # [rank-1, rank-2, ..., rank]
+        for i in range(0, self.n_device - 1):  # reverse order from n-1 to 0
             # start receiving
-            if i != self.n_device - 1:
-                send_task = dist.isend(yi, dst=comm_to_index)
-                recv_task = dist.irecv(from_tensor, src=comm_from_index)
-
-            else:
-                recv_task = None
+            send_task = dist.isend(yi, dst=comm_to_index)
+            recv_task = dist.irecv(from_tensor, src=comm_from_index)
 
             # partial computation
+            comp_index = self.get_ring_index(comp_index, -1)  # [rank-1, rank-2, ..., rank]
             yi = torch.matmul(xi, Wi_split[comp_index])
 
             # recv result from others
-            if recv_task:
-                # comment the send_task.wait() for distributed=True
-                if not distributed:
-                    send_task.wait()
-                recv_task.wait()
-                yi.add_(from_tensor)  # reduce
+            # comment the send_task.wait() for distributed=True
+            if not distributed:
+                send_task.wait()
+            recv_task.wait()
+            yi.add_(from_tensor)  # reduce
         if bi is not None:
             yi.add_(bi)
         return yi
+
+    # def ring_reduce_scatter_comp_overlap(self, xi: torch.Tensor, Wi: torch.Tensor, bi=None):
+    #     """
+    #     overlap the ring reduce-scatter comm operation with the **previous** matrix-vector multiplication
+    #     :return: split reduced results
+    #     """
+    #     W_in, W_out = Wi.shape
+    #     # the whole weight matrix is split along row dimension(dim=0) across devices
+    #     assert xi.size(-1) == W_in and W_out % self.n_device == 0
+    #
+    #     # further split partial weight along column dimension(dim=1)
+    #     W_split_size = W_out // self.n_device
+    #     Wi_split = Wi.split(W_split_size, dim=-1)
+    #
+    #     comm_from_index = self.get_ring_index(self.rank, -1)
+    #     from_tensor = torch.zeros(*xi.shape[:-1], W_split_size)
+    #     comm_to_index = self.get_ring_index(self.rank, 1)
+    #
+    #     for i in range(self.n_device - 1, -1, -1):  # reverse order from n-1 to 0
+    #
+    #         comp_index = self.get_ring_index(self.rank, i)  # [rank-1, rank-2, ..., rank]
+    #         # start receiving
+    #         if i != self.n_device - 1:
+    #             send_task = dist.isend(yi, dst=comm_to_index)
+    #             recv_task = dist.irecv(from_tensor, src=comm_from_index)
+    #
+    #         else:
+    #             recv_task = None
+    #
+    #         # partial computation
+    #         yi = torch.matmul(xi, Wi_split[comp_index])
+    #
+    #         # recv result from others
+    #         if recv_task:
+    #             # comment the send_task.wait() for distributed=True
+    #             if not distributed:
+    #                 send_task.wait()
+    #             recv_task.wait()
+    #             yi.add_(from_tensor)  # reduce
+    #     if bi is not None:
+    #         yi.add_(bi)
+    #     return yi
 
     def ring_all_gather_comp_overlap(self, xi: torch.Tensor, Wi: torch.Tensor, b=None):
         # 好像用不着，先留着吧，考虑作为benchmark的时候用
@@ -828,9 +851,9 @@ class Worker:
                 y_reduce = yi
 
             if i > 0:
-                send_task.wait()
+                if not distributed:
+                    send_task.wait()
                 recv_task.wait()  # recv next xi from other device
-                # send_task.wait(timeout=timeout_max)
                 xi, from_tensor = from_tensor, xi  # exchange reference
             else:
                 if bi is not None:
@@ -839,7 +862,7 @@ class Worker:
 
     # def co_forward_tsp(self, input_ids=None, use_cache=True):
 
-    def tp_generate(self, input_len=100, generate_len=100, split_MLP=True, return_latency=False):
+    def tp_generate(self, input_text: str, generate_len=100, split_MLP=True, return_latency=False):
         # todo: modify the max_length to generate_length
         if split_embedding:
             tp_forward = self.co_forward_se
@@ -847,28 +870,24 @@ class Worker:
             tp_forward = self.co_forward_tp
 
         max_input_length = len(self.text)
+        input_len = len(input_text)
         assert input_len > 0
         input_len = min(max_input_length, input_len)
         assert input_len + generate_len <= 1024
-        log('Task', f'input_length={input_len}, generate_length={generate_len}')
+        # log('Task', f'input_length={input_len}, generate_length={generate_len}')
 
         self.split_KV_cache = None  # clear cache
 
         with torch.no_grad():  # no_grad() to release memory
             # prefill
             if self.rank == 0:
-                input_ids = torch.LongTensor([self.tokenizer.convert_tokens_to_ids(list(self.text[:input_len]))])
+                input_ids = torch.LongTensor([self.tokenizer.convert_tokens_to_ids(list(input_text))])
                 if self.batch_size > 1:
                     input_ids = torch.concat([input_ids] * self.batch_size, dim=0)
-                # cur_len = input_ids.size(-1)
-                # assert cur_len < max_length
-                # share the cur_len
-                input_size = torch.tensor(input_ids.shape, dtype=torch.int32)
-                dist.broadcast(input_size, src=0)
 
                 generated_ids = []
 
-                log('Task', 'Start Prefill')
+                log('Task', 'Prefill', end='')
                 start_prefill = time.perf_counter()
                 hidden_states = tp_forward(input_ids)
 
@@ -879,48 +898,65 @@ class Worker:
 
                 end_prefill = time.perf_counter()
                 prefill_t = end_prefill - start_prefill
-                log('Task', f'Prefill : {prefill_t}s')
+                print(f' {prefill_t:.6f}s')
 
                 generated_ids.append(next_token_ids)
                 if show_latency:
-                    log('Task', f'{end_prefill - start_lmhead}s for lm_head and token generation')
+                    log('Task', f'{end_prefill - start_lmhead:.6f}s for lm_head and token generation')
 
             else:  # other workers
-                # input_size = torch.empty(2, dtype=torch.int32)
-                # dist.broadcast(input_size, src=0)
-                # cur_len = input_size[-1]
-                log('Task', 'Start Prefill')
+                log('Task', 'Prefill')
                 tp_forward()
 
-            # cur_len += 1
+            if generate_len > 1:  # decoding
+                log('Task', 'Decoding')
+                start_decoding = time.perf_counter()
+                for seq_len in tqdm(range(1, generate_len)):
+                    if self.rank == 0:
+                        # process = psutil.Process(os.getpid())
+                        # log('Monitor', f'Current RSS: {process.memory_info().rss>>20:.2f} MiB')
 
-            # decoding
-            log('Task', 'Start decoding')
-            start_decoding = time.perf_counter()
-            for seq_len in tqdm(range(1, generate_len)):
-                if self.rank == 0:
-                    # process = psutil.Process(os.getpid())
-                    # log('Monitor', f'Current RSS: {process.memory_info().rss>>20:.2f} MiB')
+                        hidden_states = tp_forward(input_ids)
+                        logits = self.lm_head(hidden_states[:, -1, :])
+                        next_token_ids = logits2token(logits)
+                        generated_ids.append(next_token_ids)
 
-                    hidden_states = tp_forward(input_ids)
-                    logits = self.lm_head(hidden_states[:, -1, :])
-                    next_token_ids = logits2token(logits)
-                    generated_ids.append(next_token_ids)
+                        input_ids = next_token_ids
+                    else:
+                        tp_forward()
 
-                    input_ids = next_token_ids
-                else:
-                    tp_forward()
-
-            end_decoding = time.perf_counter()
+                end_decoding = time.perf_counter()
+                decoding_t = end_decoding - start_decoding
+                log('Task', f'Decoding {decoding_t:.6f}s')
+            else:
+                decoding_t = 0
 
         if self.rank == 0:
-            decoding_t = end_decoding - start_decoding
-            log('Task', f'Decoding: {decoding_t}s')
             generated_text = self.tokenizer.convert_ids_to_tokens(generated_ids)
             output = (''.join(generated_text),)
             if return_latency:
                 output = output + (prefill_t, decoding_t)
             return output
+
+    def sync_layer_norm(self, split_embeddings, split_LN_weights, d_model, eps):
+        # todo: verify the one-shot layer_norm
+        local_mean = split_embeddings.mean(dim=-1, keepdim=True)
+        local_var = split_embeddings.var(dim=-1, keepdim=True)
+        local_mean_var = torch.concat((local_mean, local_var), dim=-1)
+        mean_var_shape = local_mean_var.shape
+        local_mean_var.view(-1, 1)
+        mean_vars = [torch.empty_like(local_mean_var) for _ in range(self.n_device)]
+        dist.all_gather(mean_vars, local_mean_var)
+        global_mean_var = torch.concat(mean_vars, dim=-1)
+        global_mean_var = (global_mean_var * self.all_split_embeddings).sum(dim=-1)
+        x_mean, x_var = global_mean_var.view(mean_var_shape).split(1, dim=-1)
+
+        # layer_norm
+        split_embeddings = (split_embeddings - x_mean) / torch.sqrt(x_var + eps)
+        if split_LN_weights is not None:
+            split_w, split_b = split_LN_weights
+            return torch.addcmul(split_b, split_embeddings, split_w)  # split_embedding * split_w + split_b
+        return split_embeddings
 
 
 def layer_norm_se(split_embeddings, split_LN_weights, d_model, eps):
@@ -928,12 +964,10 @@ def layer_norm_se(split_embeddings, split_LN_weights, d_model, eps):
     # start_comm = time.perf_counter()
     # obtain x.SUM
     dist.all_reduce(x_mean, op=dist.ReduceOp.SUM)
-    # x_mean.div_(d_model)
     split_embeddings = split_embeddings - x_mean  # attention: cannot modify the original split_embeddings
     x_var = split_embeddings.square().sum(dim=-1, keepdim=True).div(d_model)
     # obtain x.SSD (Sum of Squared Deviations)
     dist.all_reduce(x_var, op=dist.ReduceOp.SUM)
-    # ssd_all_reduce_task.wait()
     # end_comm = time.perf_counter()
     x_var.add_(eps)
 
@@ -951,6 +985,7 @@ if __name__ == '__main__':
     batch = 1
     # split_embedding = False
     return_latency = True
+    test = 'decoding'
 
     params = {
         'split_embedding': split_embedding,
@@ -961,25 +996,39 @@ if __name__ == '__main__':
     print(f'- Model={model_tag}')
     print(f'- split_embedding={split_embedding}')
     print(f'- batch={batch}')
-    print(f'- model_config:\n{worker.config}')
-    print(worker.text)
-    repeat_latency = []
+    print(f'- model_config={vars(worker.config)}')
 
-    for r in range(repeat):
-        output = worker.tp_generate(5, 2, return_latency=return_latency)
+    if test == 'prefill':
+        prefill_length_range = range(1, 30)
+    else:
+        prefill_length_range = [prefill_length]
 
-        if worker.rank == 0:
-            if return_latency:
-                generated_text, t_prefill, t_decoding = output
-                repeat_latency.append([t_prefill, t_decoding])
-            else:
-                generated_text = output[0]
-            print(generated_text)
+    attempts_avg = []
+    for prefill_length in prefill_length_range:
+        input_text = worker.text[:prefill_length]
+        log('Task', f'Init length: {prefill_length}, generate length: {generate_length}, input text: {input_text}')
+        repeat_latency = []
 
-    if worker.rank == 0 and return_latency:
-        repeat_latency = np.asarray(repeat_latency)
-        print(repeat_latency)
-        print(repeat_latency.mean(axis=0))
+        for r in range(repeat):
+            output = worker.tp_generate(input_text, generate_length, return_latency=return_latency)
+
+            if worker.rank == 0:
+                if return_latency:
+                    generated_text, t_prefill, t_decoding = output
+                    repeat_latency.append([t_prefill, t_decoding])
+                else:
+                    generated_text = output[0]
+                print(generated_text)
+
+        if worker.rank == 0 and return_latency:
+            repeat_latency = np.asarray(repeat_latency)
+            print('Latency:\n', repeat_latency)
+            mean = repeat_latency.mean(axis=0)
+            print('Average:', repeat_latency.mean(axis=0))
+            attempts_avg.append(mean)
+
+    if return_latency:
+        print(np.asarray(attempts_avg))
 
     if dist.is_initialized():
         dist.destroy_process_group()

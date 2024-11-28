@@ -28,6 +28,10 @@ def check_files_exist(model_directory):
     return all(required_files.values())
 
 
+def count_parameters(model):
+    return sum(p.numel() for p in model.parameters())
+
+
 def load_pretrained_local(model_dir):
     config = AutoConfig.from_pretrained(model_dir)
     tokenizer = AutoTokenizer.from_pretrained(model_dir)
@@ -55,7 +59,7 @@ def get_model_path(cache_path, model_tag):
 # model_tag = 'uer/gpt2-large-chinese-cluecorpussmall'  # GPT2-large
 model_tag = 'uer/gpt2-xlarge-chinese-cluecorpussmall'  # GPT2-xlarge
 
-cache_path = "model_file"
+cache_path = "../model_file"
 
 cache_found = False
 model_path = get_model_path(cache_path, model_tag)
@@ -95,6 +99,8 @@ def test_autoregressive_inference():
         config.n_embd // config.n_head, 4)
     model.eval()
 
+    print(f'Number of parameters in model {model_tag}: {count_parameters(model):,}')
+
     # 输入文本
     # 101 tokens
     # text = "在一个风和日丽的下午，小镇的街道上人来人往，孩子们在巷口追逐嬉戏。李阿姨拿着刚从市场买回来的菜篮子，步履轻盈地走回家。街边的老槐树下，几位老人正围坐在一起下象棋，不时传来欢声笑语。今天是不是一个好日子？"
@@ -105,7 +111,6 @@ def test_autoregressive_inference():
     batch_size = 1
     input_ids = torch.LongTensor([tokenizer.convert_tokens_to_ids(list(text))]).to(device)
     # input_ids = tokenizer.encode(text, return_tensors='pt').to(device)  # 将文本编码为ID
-
 
     # KV-cache for the inference request
     past_key_values = None
@@ -175,5 +180,21 @@ def test_autoregressive_inference():
     print(f'Decoding latency: {decoding_latency}s')
 
 
+def test_my_model():
+    my_config = {
+        'vocab_size': 21128,
+        'n_layer': 12,
+        'n_head': 32,
+        'n_embd': 4096,
+        'n_positions': 2048,
+        'n_inner': 16384
+    }
+    my_config = GPT2Config(**my_config)
+
+    my_model = GPT2LMHeadModel(my_config)
+    print(f'Number of parameters of myGPT2: {count_parameters(my_model):,}')
+
+
 if __name__ == '__main__':
-    test_autoregressive_inference()
+    # test_autoregressive_inference()
+    test_my_model()
