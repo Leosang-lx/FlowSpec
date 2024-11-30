@@ -3,13 +3,10 @@ Worker.py: distributed autoregressive inference for transformer-based LM
 """
 import argparse
 import sys
-import time
-
 import numpy as np
-import torch
 import torch.distributed as dist
 from datetime import datetime
-
+from mmap import mmap
 # from memory_profiler import profile
 
 from cmd_util import get_ip_addr
@@ -99,7 +96,6 @@ class Worker:
 
             else:  # helping worker
                 self.client_socket = socket.create_connection(self.server_addr)
-                # self.client_socket = socket.create_connection(('127.0.0.1', port_tcp))
                 self.rank = recv_data(self.client_socket)
                 # self.client_socket.close()  # 暂时先用自己的socket来传数据
         except Exception as e:
@@ -108,12 +104,12 @@ class Worker:
 
         # initial distributed group using torch.distributed
         assert isinstance(self.rank, int) and self.rank != -1
-        print(f'  Rank={self.rank}')
-        self.init_method = gen_init_method(server_ip, port_torch)
-        print(f'init_method={self.init_method}')
+        log('Init', f'Rank={self.rank}')
+        init_method = gen_init_method(server_ip, port_torch)
+        log('Init', f'init_method={init_method}')
 
         try:
-            dist.init_process_group(backend='gloo', init_method=self.init_method, world_size=self.n_device,
+            dist.init_process_group(backend='gloo', init_method=init_method, world_size=self.n_device,
                                     rank=self.rank)
         except Exception as e:
             print(e)
@@ -132,19 +128,15 @@ class Worker:
         lm_head:
             token embedding or independent weight (d_model, vocab_size)
         """
-        self.split_embedding = None
-
+        self.cache_dir = 'split_weights'
         self.split_weights = None
-        self.layers_MLP_weights = None
         self.MLP_activation = transformers.activations.NewGELUActivation()
 
         self.tokenizer = None
         self.config = None
 
-        # self.embedding_weights = None
         self.token_embedding = None
         self.position_embedding = None
-        self.layers_ln_weight = None
         self.all_split_embeddings = None
         self.split_heads = None  # split heads range (indexes set from 0 to h-1)
         self.split_embedding_range = None  # = split_heads * d_h
@@ -155,7 +147,6 @@ class Worker:
         self.split_KV_cache = None
 
         # init input and output configuration
-        # self.tokenizer = load_local_pretrained_model(model_path, 'tokenizer')[0]
         self.batch_size = 1
         self.text = "在一个风和日丽的下午，小镇的街道上人来人往，孩子们在巷口追逐嬉戏。李阿姨拿着刚从市场买回来的菜篮子，步履轻盈地走回家。街边的老槐树下，几位老人正围坐在一起下象棋，不时传来欢声笑语。今天是不是一个好日子？"
         self.input_length = len(self.text)
@@ -170,12 +161,17 @@ class Worker:
         self.top_k = 20
         self.top_p = 0.6
 
-    def recv_weights(self, master_conn: socket.socket):
+    # @profile
+    def recv_save_weights(self, master_conn: socket.socket, weights_dir):
         # model_config
+        if not os.path.exists(weights_dir):
+            os.mkdir(weights_dir)
         log('Init', 'Receiving model_config and embedding_weights...')
-        config = recv_data(master_conn)
+        config, raw_data = recv_data(master_conn, return_bytes=True)
+        save_obj(raw_data, os.path.join(weights_dir, f'model_config.bin'))
         # embedding
-        embedding_weights = recv_data(master_conn)
+        embedding_weights, raw_data = recv_data(master_conn, return_bytes=True)
+        save_obj(raw_data, os.path.join(weights_dir, f'embedding_weights.bin'))
         # split_layers_weights
         layers_weights = ()
         log('Init', 'Receiving layers_weights...')
@@ -184,13 +180,28 @@ class Worker:
             split_layer_weights = {}
             for block in blocks:
                 split_layer_weights[block] = recv_data(master_conn)
+            save_obj(split_layer_weights, os.path.join(weights_dir, f'layer{l}_weights.bin'))
             layers_weights = layers_weights + (split_layer_weights,)
         nece_data = config, embedding_weights, layers_weights
 
         if self.rank == 0:
             log('Init', 'Receiving tokenizer and ln_f_weights...')
-            tokenizer = recv_data(master_conn)
-            ln_f_weights = recv_data(master_conn)
+            tokenizer, raw_data = recv_data(master_conn, return_bytes=True)
+            save_obj(raw_data, os.path.join(weights_dir, f'tokenizer.bin'))
+            ln_f_weights, raw_data = recv_data(master_conn, return_bytes=True)
+            save_obj(raw_data, os.path.join(weights_dir, f'ln_f_weights.bin'))
+            nece_data = nece_data + (tokenizer, ln_f_weights)
+        return nece_data
+
+    def load_weights(self, weights_dir):
+
+        config = load_obj(os.path.join(weights_dir, 'model_config.bin'))
+        embedding_weights = load_obj(os.path.join(weights_dir, 'embedding_weights.bin'))
+        layers_weights = [load_obj(os.path.join(weights_dir, f'layer{l}_weights.bin')) for l in tqdm(range(config.n_layer))]
+        nece_data = config, embedding_weights, layers_weights
+        if self.rank == 0:
+            tokenizer = load_obj(os.path.join(weights_dir, 'tokenizer.bin'))
+            ln_f_weights = load_obj(os.path.join(weights_dir, 'ln_f_weights.bin'))
             nece_data = nece_data + (tokenizer, ln_f_weights)
         return nece_data
 
@@ -208,20 +219,20 @@ class Worker:
         self.token_embedding = nn.Embedding.from_pretrained(token_embedding_weight)
         self.position_embedding = nn.Embedding.from_pretrained(position_embedding_weight)
 
+    # @profile
     def init(self, split_MLP=True, split_embedding=False):
         """
         Receive split_weight and config from master
         """
         # file_name for the split_weights
-        split_weights_dir = 'split_weights/'
-        if not os.path.exists(split_weights_dir):
-            os.makedirs(split_weights_dir)
+        if not os.path.exists(self.cache_dir):
+            os.makedirs(self.cache_dir)
             log('Notice', 'Directory of split_weights not found, create the directory')
 
-        split_weights_file = f'{model_name}-n={self.n_device}-r={self.rank}-se={1 if split_embedding else 0}.sw'
+        split_weights_dir = os.path.join(self.cache_dir, f'{model_name}-n={self.n_device}-r={self.rank}-se={1 if split_embedding else 0}')
         data = None  # split_weights
-        if not os.path.exists(split_weights_dir + split_weights_file):
-            log('Notice', f'File of "{split_weights_file}" not found, download from Master')
+        if not os.path.exists(split_weights_dir):
+            log('Notice', f'Directory "{split_weights_dir}" not found, download from Master')
 
             with socket.create_connection((MASTER_IP, master_port)) as conn:
                 if self.rank == 0:  # main worker
@@ -240,7 +251,6 @@ class Worker:
                         raise Exception('Unknown reply from main worker')
 
                 # ask necessary weights from master
-                self.split_embedding = split_embedding
                 log('Notice', 'Get necessary weights from master')
 
                 if split_embedding:
@@ -250,14 +260,11 @@ class Worker:
 
                 conn.sendall(request.encode())
                 # data, raw_data = recv_data(conn, return_bytes=True)
-                data = self.recv_weights(conn)
-                # save the split_weights
-                with open(split_weights_dir + split_weights_file, 'wb') as f:
-                    pickle.dump(data, f)
+                data = self.recv_save_weights(conn, split_weights_dir)
+
         else:
-            log('Notice', f'File "{split_weights_file}" found, load from cache')
-            with open(split_weights_dir + split_weights_file, 'rb') as f:
-                data = pickle.load(f)
+            log('Notice', f'File "{split_weights_dir}" found, load from cache')
+            data = self.load_weights(split_weights_dir)
 
         self.init_weights(data)
         if split_embedding:
@@ -532,7 +539,8 @@ class Worker:
 
                 start_ln = time.perf_counter()
                 # LN1: split_embedding
-                split_embeddings = layer_norm_se(split_embeddings, ln1_w_b, d_model, self.config.ln_eps)
+                # split_embeddings = layer_norm_se(split_embeddings, ln1_w_b, d_model, self.config.ln_eps)
+                split_embeddings = sync_layer_norm(split_embeddings, ln1_w_b, d_model, self.config.ln_eps)
                 if show_latency:
                     end_ln = time.perf_counter()
                     ln_latency.append(end_ln - start_ln)
@@ -582,7 +590,8 @@ class Worker:
 
             start_ln = time.perf_counter()
             # LN2: split_embedding
-            split_embeddings = layer_norm_se(split_embeddings, ln2_w_b, d_model, self.config.ln_eps)
+            # split_embeddings = layer_norm_se(split_embeddings, ln2_w_b, d_model, self.config.ln_eps)
+            split_embeddings = sync_layer_norm(split_embeddings, ln2_w_b, d_model, self.config.ln_eps)
             end_ln = time.perf_counter()
             if show_latency:
                 ln_latency.append(end_ln - start_ln)
@@ -863,7 +872,6 @@ class Worker:
     # def co_forward_tsp(self, input_ids=None, use_cache=True):
 
     def tp_generate(self, input_text: str, generate_len=100, split_MLP=True, return_latency=False):
-        # todo: modify the max_length to generate_length
         if split_embedding:
             tp_forward = self.co_forward_se
         else:
@@ -887,7 +895,7 @@ class Worker:
 
                 generated_ids = []
 
-                log('Task', 'Prefill', end='')
+                log('Task', 'Prefill')
                 start_prefill = time.perf_counter()
                 hidden_states = tp_forward(input_ids)
 
@@ -898,11 +906,11 @@ class Worker:
 
                 end_prefill = time.perf_counter()
                 prefill_t = end_prefill - start_prefill
-                print(f' {prefill_t:.6f}s')
+                log('Task', f'Prefill {prefill_t:.6f}s')
 
                 generated_ids.append(next_token_ids)
                 if show_latency:
-                    log('Task', f'{end_prefill - start_lmhead:.6f}s for lm_head and token generation')
+                    log('Task', f'{end_prefill - start_lmhead:.6f}s for lm_head')
 
             else:  # other workers
                 log('Task', 'Prefill')
@@ -938,37 +946,36 @@ class Worker:
                 output = output + (prefill_t, decoding_t)
             return output
 
-    def sync_layer_norm(self, split_embeddings, split_LN_weights, d_model, eps):
-        # todo: verify the one-shot layer_norm
-        local_mean = split_embeddings.mean(dim=-1, keepdim=True)
-        local_var = split_embeddings.var(dim=-1, keepdim=True)
-        local_mean_var = torch.concat((local_mean, local_var), dim=-1)
-        mean_var_shape = local_mean_var.shape
-        local_mean_var.view(-1, 1)
-        mean_vars = [torch.empty_like(local_mean_var) for _ in range(self.n_device)]
-        dist.all_gather(mean_vars, local_mean_var)
-        global_mean_var = torch.concat(mean_vars, dim=-1)
-        global_mean_var = (global_mean_var * self.all_split_embeddings).sum(dim=-1)
-        x_mean, x_var = global_mean_var.view(mean_var_shape).split(1, dim=-1)
 
-        # layer_norm
-        split_embeddings = (split_embeddings - x_mean) / torch.sqrt(x_var + eps)
-        if split_LN_weights is not None:
-            split_w, split_b = split_LN_weights
-            return torch.addcmul(split_b, split_embeddings, split_w)  # split_embedding * split_w + split_b
-        return split_embeddings
+def sync_layer_norm(split_embeddings, split_LN_weights, d_model, eps):
+    ratio = 1 / d_model
+    # sync_sums = torch.empty(*split_embeddings.shape[:-1], 2)
+    # sync_sum, sync_square_sum = sync_sums.split(1, dim=-1)
+    sync_sum = (split_embeddings * ratio).sum(dim=-1, keepdims=True)
+    sync_square_sum = (split_embeddings.square() * ratio).sum(dim=-1, keepdims=True)
+    sync_sums = torch.concat((sync_sum, sync_square_sum), dim=-1).contiguous()
+    dist.all_reduce(sync_sums, dist.ReduceOp.SUM)
+
+    x_mean, x_var = sync_sums.split(1, dim=-1)
+    # x_mean = x_sum / d_model
+    x_var.sub_(x_mean.square())
+
+    # layer_norm
+    split_embeddings = (split_embeddings - x_mean) / torch.sqrt(x_var + eps)
+    if split_LN_weights is not None:
+        split_w, split_b = split_LN_weights
+        return torch.addcmul(split_b, split_embeddings, split_w)  # split_embedding * split_w + split_b
+    return split_embeddings
 
 
 def layer_norm_se(split_embeddings, split_LN_weights, d_model, eps):
     x_mean = split_embeddings.sum(dim=-1, keepdim=True).div(d_model)
-    # start_comm = time.perf_counter()
     # obtain x.SUM
     dist.all_reduce(x_mean, op=dist.ReduceOp.SUM)
     split_embeddings = split_embeddings - x_mean  # attention: cannot modify the original split_embeddings
     x_var = split_embeddings.square().sum(dim=-1, keepdim=True).div(d_model)
     # obtain x.SSD (Sum of Squared Deviations)
     dist.all_reduce(x_var, op=dist.ReduceOp.SUM)
-    # end_comm = time.perf_counter()
     x_var.add_(eps)
 
     # perform partial LayerNorm on split_embedding
@@ -981,7 +988,7 @@ def layer_norm_se(split_embeddings, split_LN_weights, d_model, eps):
 
 if __name__ == '__main__':
     worker = Worker((MAIN_WORKER_IP, port_tcp))
-    show_latency = False
+    show_latency = True
     batch = 1
     # split_embedding = False
     return_latency = True

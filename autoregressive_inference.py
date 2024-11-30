@@ -1,4 +1,3 @@
-import time
 import torch.nn as nn
 import torch
 from tqdm import tqdm
@@ -6,6 +5,14 @@ from transformers import GPT2LMHeadModel, AutoTokenizer, AutoConfig
 # from transformers import AutoModel, BertTokenizer, GPT2Config
 from sampling import apply_sampling
 import os
+
+# model_tag = "uer/gpt2-chinese-cluecorpussmall"  # GPT2-small
+# model_tag = 'uer/gpt2-large-chinese-cluecorpussmall'  # GPT2-large
+# model_tag = 'uer/gpt2-xlarge-chinese-cluecorpussmall'  # GPT2-xlarge
+model_tag = 'my/gpt2-like-LLaMa2-7B'  # GPT2: similar configuration of LLaMa2-7B
+
+developer_name, model_name = tuple(model_tag.split('/'))
+cache_path = "model_file"
 
 
 def check_files_exist(model_directory):
@@ -77,7 +84,8 @@ def logits2token(logits: torch.Tensor, do_sample=False, **kwargs):
     return new_token
 
 
-def decode(model: nn.Module, input_ids: torch.Tensor, max_length, use_cache=True, past_key_values=None, do_sample=False):
+def decode(model: nn.Module, input_ids: torch.Tensor, max_length, use_cache=True, past_key_values=None,
+           do_sample=False):
     """
     Is use_cache: based on the first generated token and KV cache, continuously generate the following tokens
     Not use_cache: inference with the additional token sequence
@@ -136,7 +144,8 @@ def autoregressive_inference(model: nn.Module, input_text: str, max_length, use_
     # else:
     input_ids = torch.concat((input_ids, first_token), dim=-1)
 
-    generated_text = decode(model, input_ids, max_length, use_cache=use_cache, past_key_values=past_key_values, do_sample=do_sample)
+    generated_text = decode(model, input_ids, max_length, use_cache=use_cache, past_key_values=past_key_values,
+                            do_sample=do_sample)
     print(generated_text)
 
 
@@ -154,40 +163,7 @@ def get_model_path(cache_path, model_tag):
         return None
 
 
-# load pre-trained model, tokenizer and configuration of GPT-2
-# project_dir = os.getcwd()
-# print(project_dir)
-
-# model_tag = "uer/gpt2-chinese-cluecorpussmall"  # GPT2-small
-model_tag = 'uer/gpt2-large-chinese-cluecorpussmall'  # GPT2-large
-# model_tag = 'uer/gpt2-xlarge-chinese-cluecorpussmall'  # GPT2-xlarge
-
-developer_name, model_name = tuple(model_tag.split('/'))
-cache_path = "model_file"
-
 model_path = get_model_path(cache_path, model_tag)
-
-# model_path = pathlib.Path(f'{cache_path}/models--{developer_name}--{model_name}/snapshots/c2c0249d8a2731f269414cc3b22dff021f8e07a3')
-# model_path = project_dir.joinpath(model_path)
-
-
-
-
-# # config = GPT2Config.from_pretrained(model_path)
-# config = AutoConfig.from_pretrained(model_path)
-# # print(config)
-#
-#
-# device = 'cuda' if torch.cuda.is_available() else 'cpu'
-# # device = 'cpu'
-# print(f'Device={device}')
-#
-# model = GPT2LMHeadModel.from_pretrained(model_path).to(device)
-# # model = AutoModel.from_pretrained(model_path).to(device)
-# model.eval()
-#
-# # tokenizer = BertTokenizer.from_pretrained(model_path)
-# tokenizer = AutoTokenizer.from_pretrained(model_path)
 
 if __name__ == '__main__':
 

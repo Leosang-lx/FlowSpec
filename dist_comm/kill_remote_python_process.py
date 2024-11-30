@@ -1,6 +1,6 @@
 import paramiko
 
-remote_ip = '192.168.1.101'
+remote_ip = '192.168.1.102'
 username = 'pi'
 password = '88888888'
 

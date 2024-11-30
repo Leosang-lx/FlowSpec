@@ -57,7 +57,8 @@ def get_model_path(cache_path, model_tag):
 # choose model scale
 # model_tag = "uer/gpt2-chinese-cluecorpussmall"  # GPT2-small
 # model_tag = 'uer/gpt2-large-chinese-cluecorpussmall'  # GPT2-large
-model_tag = 'uer/gpt2-xlarge-chinese-cluecorpussmall'  # GPT2-xlarge
+# model_tag = 'uer/gpt2-xlarge-chinese-cluecorpussmall'  # GPT2-xlarge
+model_tag = 'my/gpt2-like-LLaMa2-7B'
 
 cache_path = "../model_file"
 
@@ -181,18 +182,35 @@ def test_autoregressive_inference():
 
 
 def test_my_model():
+    developer, model_name = model_tag.split('/')
+    if developer != 'my':
+        return
+
+    file_path = os.path.join(cache_path, f'models--{developer}--{model_name}', 'snapshots', '0')
+
     my_config = {
         'vocab_size': 21128,
         'n_layer': 12,
         'n_head': 32,
         'n_embd': 4096,
         'n_positions': 2048,
-        'n_inner': 16384
+        'n_inner': 16384,
+        'tokenizer_class': 'BertTokenizer'
     }
     my_config = GPT2Config(**my_config)
+    config_path = os.path.join(file_path, 'config.json')
+    if not os.path.exists(config_path):
+        my_config.save_pretrained(file_path)
 
     my_model = GPT2LMHeadModel(my_config)
     print(f'Number of parameters of myGPT2: {count_parameters(my_model):,}')
+    # save model weights
+    if not os.path.exists(file_path):
+        os.makedirs(file_path)
+    weights_path = os.path.join(file_path, 'pytorch_model.bin')
+    if not os.path.exists(weights_path):
+        with open(weights_path, 'wb') as f:
+            torch.save(my_model.state_dict(), f)
 
 
 if __name__ == '__main__':

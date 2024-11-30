@@ -40,6 +40,20 @@ def ping(dest: str, ping_cnt: int, timeout: int):  # '1' means connected, else 0
         return False
 
 
+def save_obj(obj, file_path):
+    with open(file_path, 'wb') as f:
+        if isinstance(obj, (bytes, bytearray)):
+            f.write(obj)
+            f.flush()
+        else:
+            pickle.dump(obj, f)
+
+
+def load_obj(file_path):
+    with open(file_path, 'rb') as f:
+        return pickle.load(f)
+
+
 data_header_format = 'I'
 data_header_size = struct.calcsize(data_header_format)
 
