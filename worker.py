@@ -683,7 +683,7 @@ class Worker:
             send_task = dist.isend(xis_p[send_idx], dst=to_index)
 
             # send_task.wait()
-            recv_task.wait()
+            recv_task.wait(timeout=timeout_max)
 
             xis_p[recv_idx].add_(from_tensor)
 
@@ -700,7 +700,7 @@ class Worker:
             recv_task = dist.irecv(to_gathers[recv_idx], src=from_index)
             send_task = dist.isend(to_gathers[send_idx], dst=to_index)
 
-            recv_task.wait()
+            recv_task.wait(timeout=timeout_max)
             send_idx = recv_idx
             recv_idx = self.get_ring_index(send_idx, -1)
 
@@ -710,45 +710,6 @@ class Worker:
         x_p = self.reduce_scatter(xi, split_dim)
         x_ps = self.all_gather(x_p)
         return torch.concat(x_ps, dim=split_dim)
-
-    def ring_reduce_scatter_comp_overlap(self, xi: torch.Tensor, Wi: torch.Tensor, bi=None):
-        """
-        overlap the ring reduce-scatter comm operation with the **previous** matrix-vector multiplication
-        :return: split reduced results
-        """
-        W_in, W_out = Wi.shape
-        # the whole weight matrix is split along row dimension(dim=0) across devices
-        assert xi.size(-1) == W_in and W_out % self.n_device == 0
-
-        # further split partial weight along column dimension(dim=1)
-        W_split_size = W_out // self.n_device
-        Wi_split = Wi.split(W_split_size, dim=-1)
-
-        comm_from_index = self.get_ring_index(self.rank, -1)
-        from_tensor = torch.zeros(*xi.shape[:-1], W_split_size)
-        comm_to_index = self.get_ring_index(self.rank, 1)
-
-        comp_index = self.get_ring_index(self.rank, -1)
-        yi = torch.matmul(xi, Wi_split[comp_index])
-
-        for i in range(0, self.n_device - 1):  # reverse order from n-1 to 0
-            # start receiving
-            send_task = dist.isend(yi, dst=comm_to_index)
-            recv_task = dist.irecv(from_tensor, src=comm_from_index)
-
-            # partial computation
-            comp_index = self.get_ring_index(comp_index, -1)  # [rank-1, rank-2, ..., rank]
-            yi = torch.matmul(xi, Wi_split[comp_index])
-
-            # recv result from others
-            # comment the send_task.wait() for distributed=True
-            if not distributed:
-                send_task.wait()
-            recv_task.wait()
-            yi.add_(from_tensor)  # reduce
-        if bi is not None:
-            yi.add_(bi)
-        return yi
 
     # def ring_reduce_scatter_comp_overlap(self, xi: torch.Tensor, Wi: torch.Tensor, bi=None):
     #     """
@@ -767,30 +728,69 @@ class Worker:
     #     from_tensor = torch.zeros(*xi.shape[:-1], W_split_size)
     #     comm_to_index = self.get_ring_index(self.rank, 1)
     #
-    #     for i in range(self.n_device - 1, -1, -1):  # reverse order from n-1 to 0
+    #     comp_index = self.get_ring_index(self.rank, -1)
+    #     yi = torch.matmul(xi, Wi_split[comp_index])
     #
-    #         comp_index = self.get_ring_index(self.rank, i)  # [rank-1, rank-2, ..., rank]
+    #     for i in range(0, self.n_device - 1):  # reverse order from n-1 to 0
     #         # start receiving
-    #         if i != self.n_device - 1:
-    #             send_task = dist.isend(yi, dst=comm_to_index)
-    #             recv_task = dist.irecv(from_tensor, src=comm_from_index)
-    #
-    #         else:
-    #             recv_task = None
+    #         send_task = dist.isend(yi, dst=comm_to_index)
+    #         recv_task = dist.irecv(from_tensor, src=comm_from_index)
     #
     #         # partial computation
+    #         comp_index = self.get_ring_index(comp_index, -1)  # [rank-1, rank-2, ..., rank]
     #         yi = torch.matmul(xi, Wi_split[comp_index])
     #
     #         # recv result from others
-    #         if recv_task:
-    #             # comment the send_task.wait() for distributed=True
-    #             if not distributed:
-    #                 send_task.wait()
-    #             recv_task.wait()
-    #             yi.add_(from_tensor)  # reduce
+    #         # comment the send_task.wait() for distributed=True
+    #         if not distributed:
+    #             send_task.wait(timeout=timeout_max)
+    #         recv_task.wait(timeout=timeout_max)
+    #         yi.add_(from_tensor)  # reduce
     #     if bi is not None:
     #         yi.add_(bi)
     #     return yi
+
+    def ring_reduce_scatter_comp_overlap(self, xi: torch.Tensor, Wi: torch.Tensor, bi=None):
+        """
+        overlap the ring reduce-scatter comm operation with the **previous** matrix-vector multiplication
+        :return: split reduced results
+        """
+        W_in, W_out = Wi.shape
+        # the whole weight matrix is split along row dimension(dim=0) across devices
+        assert xi.size(-1) == W_in and W_out % self.n_device == 0
+
+        # further split partial weight along column dimension(dim=1)
+        W_split_size = W_out // self.n_device
+        Wi_split = Wi.split(W_split_size, dim=-1)
+
+        comm_from_index = self.get_ring_index(self.rank, -1)
+        from_tensor = torch.zeros(*xi.shape[:-1], W_split_size)
+        comm_to_index = self.get_ring_index(self.rank, 1)
+
+        for i in range(self.n_device - 1, -1, -1):  # reverse order from n-1 to 0
+
+            comp_index = self.get_ring_index(self.rank, i)  # [rank-1, rank-2, ..., rank]
+            # start receiving
+            if i != self.n_device - 1:
+                send_task = dist.isend(yi, dst=comm_to_index)
+                recv_task = dist.irecv(from_tensor, src=comm_from_index)
+
+            else:
+                recv_task = None
+
+            # partial computation
+            yi = torch.matmul(xi, Wi_split[comp_index])
+
+            # recv result from others
+            if recv_task:
+                # comment the send_task.wait() for distributed=True
+                # if not distributed:
+                send_task.wait(timeout=timeout_max)
+                recv_task.wait(timeout=timeout_max)
+                yi.add_(from_tensor)  # reduce
+        if bi is not None:
+            yi.add_(bi)
+        return yi
 
     def ring_all_gather_comp_overlap(self, xi: torch.Tensor, Wi: torch.Tensor, b=None):
         # 好像用不着，先留着吧，考虑作为benchmark的时候用
@@ -860,9 +860,9 @@ class Worker:
                 y_reduce = yi
 
             if i > 0:
-                if not distributed:
-                    send_task.wait()
-                recv_task.wait()  # recv next xi from other device
+                # if not distributed:
+                send_task.wait(timeout=timeout_max)
+                recv_task.wait(timeout=timeout_max)  # recv next xi from other device
                 xi, from_tensor = from_tensor, xi  # exchange reference
             else:
                 if bi is not None:

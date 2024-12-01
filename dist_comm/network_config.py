@@ -6,15 +6,16 @@ import os
 distributed = False
 
 if distributed:
-    MAIN_WORKER_IP = '192.168.1.101'
+    MAIN_WORKER_IP = '192.168.1.104'
     ipvx = socket.AF_INET
     # Enable when using RaspberryPi
     os.environ['GLOO_SOCKET_IFNAME'] = 'eth0'
+    os.environ['GLOO_TIMEOUT'] = '10s'
 else:
     MAIN_WORKER_IP = '::1'
     ipvx = socket.AF_INET6
 
-MASTER_IP = '192.168.1.150'
+MASTER_IP = '192.168.1.101'
 INTERFACE = 'eth0'
 SUBNET = '192.168.1.1'
 # server_ip = 'fe80::1d6b:9eb3:d29b:c7e0'

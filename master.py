@@ -10,7 +10,7 @@ from comm import *
 class Master:
     def __init__(self):
         # self.main_worker_ip = MAIN_WORKER_IP
-        self.server_ip = '192.168.1.150'
+        self.server_ip = MASTER_IP
 
         self.n_workers = 0
         print('Load model from', model_path)
