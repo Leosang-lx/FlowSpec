@@ -7,9 +7,10 @@ from sampling import apply_sampling
 import os
 
 # model_tag = "uer/gpt2-chinese-cluecorpussmall"  # GPT2-small
-# model_tag = 'uer/gpt2-large-chinese-cluecorpussmall'  # GPT2-large
+model_tag = 'uer/gpt2-large-chinese-cluecorpussmall'  # GPT2-large
 # model_tag = 'uer/gpt2-xlarge-chinese-cluecorpussmall'  # GPT2-xlarge
-model_tag = 'my/gpt2-like-LLaMa2-7B'  # GPT2: similar configuration of LLaMa2-7B
+# model_tag = 'my/gpt2-like-LLaMa2-7B'  # GPT2: similar configuration of LLaMa2-7B
+
 
 developer_name, model_name = tuple(model_tag.split('/'))
 cache_path = "model_file"

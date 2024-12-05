@@ -1,0 +1,1 @@
+scp SUST@192.168.1.106:/C:/Users/SUST/Desktop/Transformers/LLM-Inference/worker.py /media/LLMInference

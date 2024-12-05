@@ -81,6 +81,8 @@ def test_broadcast():
 
 
 def test_distributed_layerNorm():
+    layer_norm = layer_norm_se
+    # layer_norm = sync_layer_norm
     split_embeddings = torch.randn(640)
     split_w = torch.randn(640)
     split_b = torch.randn(640)
@@ -88,25 +90,12 @@ def test_distributed_layerNorm():
     comm_t = []
     for i in range(100):
         start_ln = time.perf_counter()
-        y, t_comm = layer_norm_se(split_embeddings, (split_w, split_b), 1280, 1e-3)
+        y, t_comm = layer_norm(split_embeddings, (split_w, split_b), 1280, 1e-3)
         end_ln = time.perf_counter()
         total = end_ln - start_ln
         total_t.append(total)
         comm_t.append(t_comm)
     print('2 * All-Reduce')
-    print(f'LayerNorm: Total:{sum(total_t):.6f}s, avg:{sum(total_t) / 100:.6f}s')
-    print(f'Comm     : Total:{sum(comm_t):.6f}s, avg:{sum(comm_t) / 100:.6f}s')
-
-    total_t = []
-    comm_t = []
-    for i in range(100):
-        start_ln = time.perf_counter()
-        y, t_comm = sync_layer_norm(split_embeddings, (split_w, split_b), 1280, 1e-3)
-        end_ln = time.perf_counter()
-        total = end_ln - start_ln
-        total_t.append(total)
-        comm_t.append(t_comm)
-    print('1 * All-Reduce')
     print(f'LayerNorm: Total:{sum(total_t):.6f}s, avg:{sum(total_t) / 100:.6f}s')
     print(f'Comm     : Total:{sum(comm_t):.6f}s, avg:{sum(comm_t) / 100:.6f}s')
 

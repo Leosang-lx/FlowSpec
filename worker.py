@@ -4,10 +4,11 @@ Worker.py: distributed autoregressive inference for transformer-based LM
 import argparse
 import sys
 import numpy as np
+import torch
 import torch.distributed as dist
 from datetime import datetime
-from mmap import mmap
 # from memory_profiler import profile
+from line_profiler import profile
 
 from cmd_util import get_ip_addr
 from comm import *
@@ -28,6 +29,7 @@ parser.add_argument('-r', '--repeat', type=int, required=False, default=1)
 parser.add_argument('-s', '--se', type=int, required=False, default=1)
 parser.add_argument('-p', '--prefill_length', type=int, required=False, default=100)  # default: length of init input
 parser.add_argument('-g', '--generate_length', type=int, required=False, default=2)  # default: prefill:1 + decoding:1
+parser.add_argument('-t', '--task', type=str, required=False, default='pd')  # default: test prefill + decoding
 
 arguments = parser.parse_args()
 server_ip = arguments.addr
@@ -37,6 +39,7 @@ repeat = arguments.repeat
 split_embedding = bool(arguments.se)
 prefill_length = arguments.prefill_length
 generate_length = arguments.generate_length  # generate_length=1 means only prefill
+task = arguments.task
 
 # Enable when using RaspberryPi
 if distributed:
@@ -53,8 +56,8 @@ class Worker:
     """
 
     def __init__(self, main_worker_addr: tuple):
-        # server_ip, port = server_addr
-        self.server_addr = main_worker_addr
+        # initialization for communication
+        self.server_addr = main_worker_addr# server_ip, port = server_addr
         self.loop = asyncio.get_event_loop()
 
         # system initialization: share the n_device and allocate ranks to all devices
@@ -62,63 +65,45 @@ class Worker:
             self.ip = get_ip_addr(INTERFACE)
         else:
             self.ip = '127.0.0.1'
-        print(f'Local ip: {self.ip}')
+        log('Init', f'Local ip: {self.ip}')
         # 0 means server, -1 means helping worker and uninitialized
-        self.rank = -1
+        self.rank = ip_to_rank[self.ip] if distributed else rank
         self.n_device = world_size
-        self.init_method = None
 
-        # rank 0
+        # rank 0 device
         self.server_socket = None
         self.connections = None
-        # other
+        # other devices
         self.client_socket = None
 
-        print('Initialize connection and process group...')
-        try:
-            if distributed:
-                rank0 = self.ip == server_ip
-                af = socket.AF_INET  # ipv4
-            else:
-                rank0 = rank == 0
-                af = socket.AF_INET6
-
-            if rank0:
-                self.rank = SERVER_RANK  # SERVER_RANK=0
-                self.server_socket = socket.create_server((server_ip, port_tcp), family=af)
-                self.connections = accept_n_connections(self.server_socket,
-                                                        self.n_device - 1)  # ensure n accepted connections
-                # allocate rank by the connections' order
-                send_rank_tasks = [async_send_data(self.connections[i - 1][0], i) for i in
-                                   range(1, self.n_device)]  # only transmit rank
-
-                self.loop.run_until_complete(asyncio.gather(*send_rank_tasks))
-
-            else:  # helping worker
-                self.client_socket = socket.create_connection(self.server_addr)
-                self.rank = recv_data(self.client_socket)
-                # self.client_socket.close()  # 暂时先用自己的socket来传数据
-        except Exception as e:
-            print(e)
-            sys.exit(0)
-
-        # initial distributed group using torch.distributed
-        assert isinstance(self.rank, int) and self.rank != -1
-        log('Init', f'Rank={self.rank}')
-        init_method = gen_init_method(server_ip, port_torch)
-        log('Init', f'init_method={init_method}')
-
-        try:
-            dist.init_process_group(backend='gloo', init_method=init_method, world_size=self.n_device,
-                                    rank=self.rank)
-        except Exception as e:
-            print(e)
-            sys.exit(0)
-
-        if dist.is_initialized():
-            print(f'Succeed to initialize the process group with rank={self.rank}')
-        else:
-            raise Exception('Fail to initialize the process group')
+        # print('Initialize connection and process group...')
+        # try:
+        #     if distributed:
+        #         rank_is_0 = self.rank == 0
+        #         af = socket.AF_INET  # ipv4
+        #     else:
+        #         rank_is_0 = rank == 0
+        #         af = socket.AF_INET6
+        #
+        #     if rank_is_0:
+        #         self.rank = SERVER_RANK  # SERVER_RANK=0
+        #         self.server_socket = socket.create_server((server_ip, port_tcp), family=af)
+        #         self.connections = accept_n_connections(self.server_socket,
+        #                                                 self.n_device - 1)  # ensure n accepted connections
+        #         # allocate rank by the connections' order
+        #         send_rank_tasks = [async_send_data(self.connections[i - 1][0], i) for i in
+        #                            range(1, self.n_device)]  # only transmit rank
+        #
+        #         self.loop.run_until_complete(asyncio.gather(*send_rank_tasks))
+        #
+        #     else:  # helping worker
+        #         self.client_socket = socket.create_connection(self.server_addr)
+        #         # self.rank = recv_data(self.client_socket)
+        #         send_data(self.client_socket, self.rank)
+        #         # self.client_socket.close()  # 暂时先用自己的socket来传数据
+        # except Exception as e:
+        #     print(e)
+        #     sys.exit(0)
 
         """
         weights (split):
@@ -128,12 +113,14 @@ class Worker:
         lm_head:
             token embedding or independent weight (d_model, vocab_size)
         """
+        # initialize for split model
         self.cache_dir = 'split_weights'
         self.split_weights = None
         self.MLP_activation = transformers.activations.NewGELUActivation()
 
         self.tokenizer = None
         self.config = None
+        self.input_ids = None
 
         self.token_embedding = None
         self.position_embedding = None
@@ -151,8 +138,7 @@ class Worker:
         self.text = "在一个风和日丽的下午，小镇的街道上人来人往，孩子们在巷口追逐嬉戏。李阿姨拿着刚从市场买回来的菜篮子，步履轻盈地走回家。街边的老槐树下，几位老人正围坐在一起下象棋，不时传来欢声笑语。今天是不是一个好日子？"
         self.input_length = len(self.text)
         self.max_length = 200
-        # init inference mode
-        self.distributed_method = 'TP'
+
         # TP
         self.h_split = 0
         # inference parameters
@@ -160,6 +146,37 @@ class Worker:
         self.do_sample = False
         self.top_k = 20
         self.top_p = 0.6
+
+    def init_process_group(self):
+        # initial distributed group using torch.distributed
+        assert isinstance(self.rank, int) and self.rank != -1
+        log('Init', f'Rank={self.rank}')
+        init_method = gen_init_method(server_ip, port_torch)
+        log('Init', f'init_method="{init_method}"')
+
+        try:
+            dist.init_process_group(backend='gloo', init_method=init_method, world_size=self.n_device,
+                                    rank=self.rank)
+        except Exception:
+            import traceback
+            traceback.print_exc()
+            sys.exit(0)
+
+        if dist.is_initialized():
+            log('Notice', f'Process group init with rank={self.rank} done!')
+        else:
+            raise Exception('Fail to initialize the process group')
+
+    def load_weights(self, weights_dir):
+        config = load_obj(os.path.join(weights_dir, 'model_config.bin'))
+        embedding_weights = load_obj(os.path.join(weights_dir, 'embedding_weights.bin'))
+        layers_weights = [load_obj(os.path.join(weights_dir, f'layer{l}_weights.bin')) for l in tqdm(range(config.n_layer))]
+        nece_data = config, embedding_weights, layers_weights
+        if self.rank == 0:
+            tokenizer = load_obj(os.path.join(weights_dir, 'tokenizer.bin'))
+            ln_f_weights = load_obj(os.path.join(weights_dir, 'ln_f_weights.bin'))
+            nece_data = nece_data + (tokenizer, ln_f_weights)
+        return nece_data
 
     # @profile
     def recv_save_weights(self, master_conn: socket.socket, weights_dir):
@@ -191,18 +208,7 @@ class Worker:
             ln_f_weights, raw_data = recv_data(master_conn, return_bytes=True)
             save_obj(raw_data, os.path.join(weights_dir, f'ln_f_weights.bin'))
             nece_data = nece_data + (tokenizer, ln_f_weights)
-        return nece_data
 
-    def load_weights(self, weights_dir):
-
-        config = load_obj(os.path.join(weights_dir, 'model_config.bin'))
-        embedding_weights = load_obj(os.path.join(weights_dir, 'embedding_weights.bin'))
-        layers_weights = [load_obj(os.path.join(weights_dir, f'layer{l}_weights.bin')) for l in tqdm(range(config.n_layer))]
-        nece_data = config, embedding_weights, layers_weights
-        if self.rank == 0:
-            tokenizer = load_obj(os.path.join(weights_dir, 'tokenizer.bin'))
-            ln_f_weights = load_obj(os.path.join(weights_dir, 'ln_f_weights.bin'))
-            nece_data = nece_data + (tokenizer, ln_f_weights)
         return nece_data
 
     def init_weights(self, data: tuple):
@@ -220,14 +226,15 @@ class Worker:
         self.position_embedding = nn.Embedding.from_pretrained(position_embedding_weight)
 
     # @profile
-    def init(self, split_MLP=True, split_embedding=False):
+    def init(self, task='pg', split_MLP=True, split_embedding=False):
         """
-        Receive split_weight and config from master
+        Receive split_weight and config, also maybe KV-Cache from master
         """
+        # [begin] load necessary weights
         # file_name for the split_weights
         if not os.path.exists(self.cache_dir):
             os.makedirs(self.cache_dir)
-            log('Notice', 'Directory of split_weights not found, create the directory')
+            log('Notice', 'Directory of "split_weights" not found, create the directory')
 
         split_weights_dir = os.path.join(self.cache_dir, f'{model_name}-n={self.n_device}-r={self.rank}-se={1 if split_embedding else 0}')
         data = None  # split_weights
@@ -235,28 +242,28 @@ class Worker:
             log('Notice', f'Directory "{split_weights_dir}" not found, download from Master')
 
             with socket.create_connection((MASTER_IP, master_port)) as conn:
-                if self.rank == 0:  # main worker
-                    log('Notice', 'Send WORKER_NUM to master')
-                    request = f'WORKER_NUM {self.n_device}\n'
-                    conn.sendall(request.encode())
-                    reply = recv_data(conn)
-                    if reply != 'OK':
-                        raise Exception('Unknown reply from master')
-                    reply_tasks = [async_send_data(self.connections[rank - 1][0], 'OK') for rank in
-                                   range(1, self.n_device)]
-                    self.loop.run_until_complete(asyncio.gather(*reply_tasks))
-                else:
-                    reply = recv_data(self.client_socket)
-                    if reply != 'OK':
-                        raise Exception('Unknown reply from main worker')
+                # if self.rank == 0:  # main worker
+                #     log('Notice', 'Send WORKER_NUM to master')
+                #     request = f'WORKER_NUM {self.n_device}\n'
+                #     conn.sendall(request.encode())
+                #     reply = recv_data(conn)
+                #     if reply != 'OK':
+                #         raise Exception('Unknown reply from master')
+                #     reply_tasks = [async_send_data(self.connections[rank - 1][0], 'OK') for rank in
+                #                    range(1, self.n_device)]
+                #     self.loop.run_until_complete(asyncio.gather(*reply_tasks))
+                # else:
+                #     reply = recv_data(self.client_socket)
+                #     if reply != 'OK':
+                #         raise Exception('Unknown reply from main worker')
 
                 # ask necessary weights from master
                 log('Notice', 'Get necessary weights from master')
 
                 if split_embedding:
-                    request = f'SE_WEIGHT {self.rank}\n'
+                    request = f'SE_WEIGHT {self.rank} {self.n_device}\n'
                 else:
-                    request = f'TP_WEIGHT {self.rank} SPLIT_MLP {int(split_MLP)}\n'
+                    request = f'TP_WEIGHT {self.rank} {self.n_device} SPLIT_MLP {int(split_MLP)}\n'
 
                 conn.sendall(request.encode())
                 # data, raw_data = recv_data(conn, return_bytes=True)
@@ -272,9 +279,30 @@ class Worker:
             self.split_heads = self.rank * h_d, (self.rank + 1) * h_d  # default: equal split
             h_l, h_r = self.split_heads
             self.split_embedding_range = h_l * self.config.d_h, h_r * self.config.d_h  # default: equal split
-        log('Notice', 'TP Init Done!')
+        log('Notice', 'Split_weights Init Done!')
+        # [end] load weights
 
-    def init_inference(self, input_ids=None):
+        # [begin] load KV-cache and the first token
+        if task == 'd':  # only decoding
+            # [begin] load KV-cache
+            with socket.create_connection((MASTER_IP, master_port)) as conn:
+                request = f'TP_CACHE {self.rank} {self.n_device} {self.text[:prefill_length]}\n'
+                conn.sendall(request.encode())
+                split_layers_cache = ()
+                log('Notice', 'Start loading KV-Cache...')
+                for l in tqdm(range(self.config.n_layer)):
+                    layer_cache = recv_data(conn)  # recv KV_cache
+                    assert isinstance(layer_cache, tuple) and len(layer_cache) == 2 and isinstance(layer_cache[0], torch.Tensor) and isinstance(layer_cache[1], torch.Tensor)
+                    split_layers_cache = split_layers_cache + (layer_cache,)
+                self.split_KV_cache = split_layers_cache
+
+                log('Notice', 'Load first token')
+                self.input_ids = recv_data(conn)  # recv first token
+
+        self.init_process_group()
+
+    def init_inference(self, send_tokens=False):
+        # broadcast initial input from rank0 device to other
         # init cache
         if self.split_KV_cache is None:
             past_length = 0
@@ -285,9 +313,10 @@ class Worker:
         # init hidden_states
         # start_init = time.perf_counter()
         if self.rank == 0:  # main worker todo: choose to send tokens or hidden_states
-            token_embedding = self.token_embedding(input_ids)
-            position_ids = torch.arange(past_length, input_ids.shape[-1] + past_length, dtype=torch.long,
-                                        device=input_ids.device)
+            assert isinstance(self.input_ids, torch.Tensor)
+            token_embedding = self.token_embedding(self.input_ids)
+            position_ids = torch.arange(past_length, self.input_ids.shape[-1] + past_length, dtype=torch.long,
+                                        device=self.input_ids.device)
             position_ids = position_ids.unsqueeze(0)
             position_embedding = self.position_embedding(position_ids)
             hidden_states = token_embedding + position_embedding
@@ -306,9 +335,8 @@ class Worker:
         # print(f'{end_init - start_init}s for inference init')
         return hidden_states
 
-    def co_forward_tp(self, input_ids=None, use_cache=True, split_MLP=True):
+    def co_forward_tp(self, use_cache=True, split_MLP=True):
         """
-        :param input_ids: only the rank-0 device needs input
         :param use_cache: use KV-cache to reduce duplicated computation
         :return:
         """
@@ -330,7 +358,7 @@ class Worker:
             cache_present = ()
 
         # init inference: obtain hidden_states and broadcast across devices
-        hidden_states = self.init_inference(input_ids)
+        hidden_states = self.init_inference()
 
         # forward_layers
         for layer_idx in range(self.config.n_layer):
@@ -484,9 +512,8 @@ class Worker:
             hidden_states = F.layer_norm(hidden_states, (d_model,), *self.ln_f_weight, self.config.ln_eps)
             return hidden_states
 
-    def co_forward_se(self, input_ids=None, use_cache=True):
+    def co_forward_se(self, use_cache=True):
         """
-        :param input_ids: only the rank-0 device needs input
         :param use_cache: use KV-cache to reduce duplicated computation
         :return:
         """
@@ -507,7 +534,7 @@ class Worker:
             cache_present = ()
 
         # init inference: obtain hidden_states and broadcast across devices
-        hidden_states = self.init_inference(input_ids)
+        hidden_states = self.init_inference()
 
         # forward layers
         for layer_idx, (layer_weights, layer_cache) in enumerate(zip(self.split_weights, self.split_KV_cache)):
@@ -682,7 +709,7 @@ class Worker:
             recv_task = dist.irecv(from_tensor, src=from_index)
             send_task = dist.isend(xis_p[send_idx], dst=to_index)
 
-            # send_task.wait()
+            send_task.wait(timeout=timeout_max)
             recv_task.wait(timeout=timeout_max)
 
             xis_p[recv_idx].add_(from_tensor)
@@ -700,6 +727,7 @@ class Worker:
             recv_task = dist.irecv(to_gathers[recv_idx], src=from_index)
             send_task = dist.isend(to_gathers[send_idx], dst=to_index)
 
+            send_task.wait(timeout=timeout_max)
             recv_task.wait(timeout=timeout_max)
             send_idx = recv_idx
             recv_idx = self.get_ring_index(send_idx, -1)
@@ -743,13 +771,14 @@ class Worker:
     #         # recv result from others
     #         # comment the send_task.wait() for distributed=True
     #         if not distributed:
-    #             send_task.wait(timeout=timeout_max)
+    #         send_task.wait(timeout=timeout_max)
     #         recv_task.wait(timeout=timeout_max)
     #         yi.add_(from_tensor)  # reduce
     #     if bi is not None:
     #         yi.add_(bi)
     #     return yi
 
+    @profile
     def ring_reduce_scatter_comp_overlap(self, xi: torch.Tensor, Wi: torch.Tensor, bi=None):
         """
         overlap the ring reduce-scatter comm operation with the **previous** matrix-vector multiplication
@@ -889,20 +918,20 @@ class Worker:
         with torch.no_grad():  # no_grad() to release memory
             # prefill
             if self.rank == 0:
-                input_ids = torch.LongTensor([self.tokenizer.convert_tokens_to_ids(list(input_text))])
+                self.input_ids = torch.LongTensor([self.tokenizer.convert_tokens_to_ids(list(input_text))])
                 if self.batch_size > 1:
-                    input_ids = torch.concat([input_ids] * self.batch_size, dim=0)
+                    self.input_ids = torch.concat([self.input_ids] * self.batch_size, dim=0)
 
                 generated_ids = []
 
                 log('Task', 'Prefill')
                 start_prefill = time.perf_counter()
-                hidden_states = tp_forward(input_ids)
+                hidden_states = tp_forward()
 
                 start_lmhead = time.perf_counter()
                 logits = self.lm_head(hidden_states[:, -1, :])
                 next_token_ids = logits2token(logits)
-                input_ids = next_token_ids
+                self.input_ids = next_token_ids
 
                 end_prefill = time.perf_counter()
                 prefill_t = end_prefill - start_prefill
@@ -915,21 +944,24 @@ class Worker:
             else:  # other workers
                 log('Task', 'Prefill')
                 tp_forward()
+            generate_len -= 1 # one-token generated by prefill
 
-            if generate_len > 1:  # decoding
+            if g in
+
+            if generate_len > 0:  # decoding
                 log('Task', 'Decoding')
                 start_decoding = time.perf_counter()
-                for seq_len in tqdm(range(1, generate_len)):
+                for seq_len in tqdm(range(generate_len)):
                     if self.rank == 0:
                         # process = psutil.Process(os.getpid())
                         # log('Monitor', f'Current RSS: {process.memory_info().rss>>20:.2f} MiB')
 
-                        hidden_states = tp_forward(input_ids)
+                        hidden_states = tp_forward()
                         logits = self.lm_head(hidden_states[:, -1, :])
                         next_token_ids = logits2token(logits)
                         generated_ids.append(next_token_ids)
 
-                        input_ids = next_token_ids
+                        self.input_ids = next_token_ids
                     else:
                         tp_forward()
 
@@ -954,7 +986,9 @@ def sync_layer_norm(split_embeddings, split_LN_weights, d_model, eps):
     sync_sum = (split_embeddings * ratio).sum(dim=-1, keepdims=True)
     sync_square_sum = (split_embeddings.square() * ratio).sum(dim=-1, keepdims=True)
     sync_sums = torch.concat((sync_sum, sync_square_sum), dim=-1).contiguous()
+    # start_comm = time.perf_counter()
     dist.all_reduce(sync_sums, dist.ReduceOp.SUM)
+    # t_comm = time.perf_counter() - start_comm
 
     x_mean, x_var = sync_sums.split(1, dim=-1)
     # x_mean = x_sum / d_model
@@ -971,15 +1005,16 @@ def sync_layer_norm(split_embeddings, split_LN_weights, d_model, eps):
 def layer_norm_se(split_embeddings, split_LN_weights, d_model, eps):
     x_mean = split_embeddings.sum(dim=-1, keepdim=True).div(d_model)
     # obtain x.SUM
+    # start_comm = time.perf_counter()
     dist.all_reduce(x_mean, op=dist.ReduceOp.SUM)
-    split_embeddings = split_embeddings - x_mean  # attention: cannot modify the original split_embeddings
-    x_var = split_embeddings.square().sum(dim=-1, keepdim=True).div(d_model)
+    # split_embeddings = split_embeddings - x_mean  # attention: cannot modify the original split_embeddings
+    x_var = (split_embeddings - x_mean).square().sum(dim=-1, keepdim=True).div(d_model)
     # obtain x.SSD (Sum of Squared Deviations)
     dist.all_reduce(x_var, op=dist.ReduceOp.SUM)
-    x_var.add_(eps)
+    # t_comm = time.perf_counter() - start_comm
 
     # perform partial LayerNorm on split_embedding
-    split_embeddings.div_(torch.sqrt(x_var))
+    split_embeddings = (split_embeddings - x_mean) / (torch.sqrt(x_var + eps))
     if split_LN_weights is not None:
         split_w, split_b = split_LN_weights
         return torch.addcmul(split_b, split_embeddings, split_w)  # split_embedding * split_w + split_b
@@ -992,10 +1027,11 @@ if __name__ == '__main__':
     batch = 1
     # split_embedding = False
     return_latency = True
-    test = 'decoding'
+    task = f'pd'  # p: prefill, d: decoding
 
     params = {
         'split_embedding': split_embedding,
+        'task': task
     }
     worker.batch_size = batch
     worker.init(**params)
@@ -1005,9 +1041,9 @@ if __name__ == '__main__':
     print(f'- batch={batch}')
     print(f'- model_config={vars(worker.config)}')
 
-    if test == 'prefill':
+    if task == 'p':
         prefill_length_range = range(1, 30)
-    else:
+    else:  # d or pd
         prefill_length_range = [prefill_length]
 
     attempts_avg = []

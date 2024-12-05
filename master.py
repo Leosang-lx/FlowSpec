@@ -1,10 +1,14 @@
 import asyncio
+
+import torch
+
 from dist_comm.network_config import *
-from autoregressive_inference import model_path, load_local_pretrained_model
+from autoregressive_inference import model_path, load_local_pretrained_model, logits2token
 from types import SimpleNamespace
 from forward_use_weight import get_transformer_model_weight
 from distributedTP import split_weight_TP
 from comm import *
+from sampling import apply_sampling
 
 
 class Master:
@@ -41,6 +45,8 @@ class Master:
         self.split_heads = None
         self.split_embedding = None
         self.split_weights = None
+        self.asyncio_event = asyncio.Event()
+        self.done_workers = 0
 
         self.server = None
 
@@ -52,60 +58,69 @@ class Master:
                 request = request.decode().strip()
                 print(f'{client_addr}: {request}')
                 fields = request.split()
-                # if len(fields) == 2 and fields[1].isdigit():
-                if fields[0] == 'WORKER_NUM':
-                    n_workers = int(fields[1])
-                    assert 1 < n_workers < 11
-                    self.n_workers = n_workers
-                    self.split_weights = None
-                    self.split_heads = [self.model_config.h // self.n_workers] * self.n_workers
-                    writer.write(gen_bytes('OK'))
-                    await writer.drain()
-                else:
-                    if fields[0] == 'TP_WEIGHT':  # send model weights
-                        worker_rank = int(fields[1])
-                        assert self.n_workers > 0 and worker_rank < self.n_workers
 
-                        if len(fields) == 4 and fields[2] == 'SPLIT_MLP':
-                            split_mlp = bool(int(fields[3]))
-                        else:
-                            split_mlp = True
-
-                        if self.split_weights is None or self.split_embedding:
-                            self.split_weights = split_weight_TP(self.model_weights, self.n_workers, self.model_config,
-                                                                 split_MLP=split_mlp, return_view=True)  # default: equal split
-                            self.split_embedding = False
-
-                        # data_to_send = self.model_config, self.model_weights['embedding_weights'], self.split_weights[worker_rank]
-                        #
-                        # if worker_rank == 0:  # additional embedding weights and layer norm weights for central processing
-                        #     data_to_send = data_to_send + (self.tokenizer, self.model_weights['ln_f_weights'])
-
-
-                    elif fields[0] == 'SE_WEIGHT':  # send model weights: split_embedding=True
-                        worker_rank = int(fields[1])
-                        assert self.n_workers > 0 and worker_rank < self.n_workers
-                        if self.split_weights is None or not self.split_embedding:
-                            self.split_weights = split_weight_TP(self.model_weights, self.n_workers, self.model_config,
-                                                                 split_embedding=True, return_view=True)
-                            self.split_embedding = True
-
-                        # data_to_send = self.model_config, self.model_weights['embedding_weights'], self.split_weights[worker_rank]
-                        # if worker_rank == 0:
-                        #     # all_split_embeddings = [
-                        #     data_to_send = data_to_send + (
-                        #         self.tokenizer, self.model_weights['ln_f_weights'])
+                # if fields[0] == 'WORKER_NUM':
+                #     n_workers = int(fields[1])
+                #     assert 1 < n_workers < 11
+                #     self.n_workers = n_workers
+                #     self.split_weights = None
+                #     # self.split_heads = [self.model_config.h // self.n_workers] * self.n_workers
+                #     writer.write(gen_bytes('OK'))
+                #     await writer.drain()
+                if fields[0] in ('TP_WEIGHT', 'SE_WEIGHT', 'TP_CACHE'):
+                    worker_rank = int(fields[1])
+                    if worker_rank != 0:
+                        await self.asyncio_event.wait()
                     else:
-                        raise Exception(f'Unknown request: {request}')
+                        self.n_workers = int(fields[2])
 
-                    await self.send_split_weights(writer, worker_rank)
-                    break
+                    if fields[0] == 'TP_CACHE':
+                        input_text = fields[3]
+                        input_ids = torch.LongTensor([self.tokenizer.convert_tokens_to_ids(list(input_text))])
+                        output = self.model(input_ids)
+                        cache = output.past_key_values
+                        self.split_cache_n = split_cache_by_head(cache)
+                        writer.write(gen_bytes(cache))
+                        await writer.drain()
+                        hidden_states = output.last_hidden_states
+                        logits = self.model.lm_head(hidden_states)
+                        next_input_ids = logits2token(logits)
+                        writer.write(next_input_ids)
+                        await writer.drain()
+                    else:
+                        assert self.n_workers > 0 and worker_rank < self.n_workers
+                        if worker_rank == 0:  # ensure the split_weights
+                            if fields[0] == 'TP_WEIGHT':  # TP: Tensor Parallelism
+                                if len(fields) == 4 and fields[2] == 'SPLIT_MLP':
+                                    split_mlp = bool(int(fields[3]))
+                                else:
+                                    split_mlp = True
+
+                                if self.split_weights is None or self.split_embedding:
+                                    self.split_weights = split_weight_TP(self.model_weights, self.n_workers, self.model_config,
+                                                                         split_MLP=split_mlp,
+                                                                         return_view=True)  # default: equal split
+                                    self.split_embedding = False
+
+                            else:  # SE: split-embedding
+                                if self.split_weights is None or not self.split_embedding:
+                                    self.split_weights = split_weight_TP(self.model_weights, self.n_workers,
+                                                                         self.model_config,
+                                                                         split_embedding=True, return_view=True)
+                                    self.split_embedding = True
+
+                            self.asyncio_event.set()  # split weights have been ensured, go
+                        await self.send_split_weights(writer, worker_rank)  # send split weights
+
+                else:
+                    raise Exception(f'Unknown request: {request}')
 
         except asyncio.CancelledError or ConnectionResetError as e:
             print(f"Main connection closed to worker {client_addr}", e)
         finally:
             writer.close()
             await writer.wait_closed()
+            self.asyncio_event = asyncio.Event()
 
     async def send_split_weights(self, writer, rank):
         assert self.n_workers > 1
@@ -156,6 +171,7 @@ class Master:
 
     def start(self):
         asyncio.run(self.start_handling())
+
 
 
 if __name__ == '__main__':
