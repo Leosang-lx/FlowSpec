@@ -4,15 +4,13 @@ Worker.py: distributed autoregressive inference for transformer-based LM
 import argparse
 import sys
 import numpy as np
-import torch
 import torch.distributed as dist
 from datetime import datetime
-# from memory_profiler import profile
-from line_profiler import profile
 
 from cmd_util import get_ip_addr
 from comm import *
-from dist_comm.network_config import *
+from network_config import *
+# from network_config import *
 from forward_use_weight import *
 
 
@@ -20,34 +18,24 @@ def get_timestamp():
     return datetime.datetime.now().strftime('%H:%M:%S')
 
 
-# parse server ip (optional) and group size
-parser = argparse.ArgumentParser()
-parser.add_argument('-a', '--addr', type=str, required=False, default=MAIN_WORKER_IP)
-parser.add_argument('-i', '--rank', type=int, required=False, default=0)
-parser.add_argument('-w', '--world_size', type=int, required=False, default=DEFAULT_SIZE)
-parser.add_argument('-r', '--repeat', type=int, required=False, default=1)
-parser.add_argument('-s', '--se', type=int, required=False, default=1)
-parser.add_argument('-p', '--prefill_length', type=int, required=False, default=100)  # default: length of init input
-parser.add_argument('-g', '--generate_length', type=int, required=False, default=2)  # default: prefill:1 + decoding:1
-parser.add_argument('-t', '--task', type=str, required=False, default='pd')  # default: test prefill + decoding
-
-arguments = parser.parse_args()
-server_ip = arguments.addr
-rank = arguments.rank
-world_size = arguments.world_size
-repeat = arguments.repeat
-split_embedding = bool(arguments.se)
-prefill_length = arguments.prefill_length
-generate_length = arguments.generate_length  # generate_length=1 means only prefill
-task = arguments.task
-
-# Enable when using RaspberryPi
-if distributed:
-    os.environ['GLOO_SOCKET_IFNAME'] = 'eth0'
-
-
 def log(log_type: str, message: str, end=None):
     print(f'[{get_timestamp()} {log_type}]: {message}', end=end)
+
+
+def move_tensors_to_gpu(data):
+    # 将列表中的所有 torch.Tensor 移动到 GPU，并保持原有的数据结构。——by deepseek
+    if isinstance(data, torch.Tensor):
+        # 如果是 Tensor，移动到 GPU
+        return data.to('cuda')
+    elif isinstance(data, tuple):
+        # 如果是元组，递归处理每个元素
+        return tuple(move_tensors_to_gpu(item) for item in data)
+    elif isinstance(data, list):
+        # 如果是列表，递归处理每个元素
+        return [move_tensors_to_gpu(item) for item in data]
+    else:
+        # 如果是其他类型（如 int, float, str 等），直接返回
+        return data
 
 
 class Worker:
@@ -55,19 +43,20 @@ class Worker:
     Worker for distributed LLM decoding
     """
 
-    def __init__(self, main_worker_addr: tuple):
+    def __init__(self, network_config: SimpleNamespace):
+        self.network_config = network_config
         # initialization for communication
-        self.server_addr = main_worker_addr# server_ip, port = server_addr
+        # self.server_addr = main_worker_addr# server_ip, port = server_addr
         self.loop = asyncio.get_event_loop()
 
         # system initialization: share the n_device and allocate ranks to all devices
         if distributed:
-            self.ip = get_ip_addr(INTERFACE)
+            self.ip = get_ip_addr(network_config.interface)
         else:
             self.ip = '127.0.0.1'
         log('Init', f'Local ip: {self.ip}')
         # 0 means server, -1 means helping worker and uninitialized
-        self.rank = ip_to_rank[self.ip] if distributed else rank
+        self.rank = network_config.ip_rank_mapping[self.ip] if distributed else rank
         self.n_device = world_size
 
         # rank 0 device
@@ -114,7 +103,10 @@ class Worker:
             token embedding or independent weight (d_model, vocab_size)
         """
         # initialize for split model
-        self.cache_dir = 'split_weights'
+        if distributed:
+            self.cache_dir = 'split_weights'
+        else:
+            self.cache_dir = 'D:/LLM-Inference/split_weights'
         self.split_weights = None
         self.MLP_activation = transformers.activations.NewGELUActivation()
 
@@ -151,11 +143,12 @@ class Worker:
         # initial distributed group using torch.distributed
         assert isinstance(self.rank, int) and self.rank != -1
         log('Init', f'Rank={self.rank}')
-        init_method = gen_init_method(server_ip, port_torch)
+        init_method = gen_init_method(self.network_config.ip_rank_mapping[0], self.network_config.port_distributed)
+
         log('Init', f'init_method="{init_method}"')
 
         try:
-            dist.init_process_group(backend='gloo', init_method=init_method, world_size=self.n_device,
+            dist.init_process_group(backend=self.network_config.backend, init_method=init_method, world_size=self.n_device,
                                     rank=self.rank)
         except Exception:
             import traceback
@@ -167,16 +160,17 @@ class Worker:
         else:
             raise Exception('Fail to initialize the process group')
 
-    def load_weights(self, weights_dir):
+    def load_weights(self, weights_dir):  # load split model weights by layers
         config = load_obj(os.path.join(weights_dir, 'model_config.bin'))
         embedding_weights = load_obj(os.path.join(weights_dir, 'embedding_weights.bin'))
-        layers_weights = [load_obj(os.path.join(weights_dir, f'layer{l}_weights.bin')) for l in tqdm(range(config.n_layer))]
+        layers_weights = [load_obj(os.path.join(weights_dir, f'layer{l}_weights.bin')) for l in
+                          tqdm(range(config.n_layer))]
         nece_data = config, embedding_weights, layers_weights
         if self.rank == 0:
             tokenizer = load_obj(os.path.join(weights_dir, 'tokenizer.bin'))
             ln_f_weights = load_obj(os.path.join(weights_dir, 'ln_f_weights.bin'))
             nece_data = nece_data + (tokenizer, ln_f_weights)
-        return nece_data
+        return nece_data  # config, embedding_weights, layer_weights, (if rank 0 + tokenizer + ln_f_weights + nece_data)
 
     # @profile
     def recv_save_weights(self, master_conn: socket.socket, weights_dir):
@@ -214,12 +208,19 @@ class Worker:
     def init_weights(self, data: tuple):
         if self.rank == 0:
             self.config, embedding_weights, self.split_weights, self.tokenizer, self.ln_f_weight = data
+            if self.network_config.device == 'cuda':  # move to gpu is necessary
+                embedding_weights = move_tensors_to_gpu(embedding_weights)
+                self.split_weights = move_tensors_to_gpu(self.split_weights)
+                self.ln_f_weight = move_tensors_to_gpu(self.ln_f_weight)
 
             self.lm_head = nn.Linear(self.config.d_model, self.config.vocab_size, bias=False)
             self.lm_head.weight = nn.Parameter(embedding_weights[0])  # embedding_weights should be tuple
 
         else:  # other workers
             self.config, embedding_weights, self.split_weights = data
+            if self.network_config.device == 'cuda':  # move to gpu if necessary
+                embedding_weights = move_tensors_to_gpu(embedding_weights)
+                self.split_weights = move_tensors_to_gpu(self.split_weights)
 
         token_embedding_weight, position_embedding_weight = embedding_weights
         self.token_embedding = nn.Embedding.from_pretrained(token_embedding_weight)
@@ -236,12 +237,13 @@ class Worker:
             os.makedirs(self.cache_dir)
             log('Notice', 'Directory of "split_weights" not found, create the directory')
 
-        split_weights_dir = os.path.join(self.cache_dir, f'{model_name}-n={self.n_device}-r={self.rank}-se={1 if split_embedding else 0}')
+        split_weights_dir = os.path.join(self.cache_dir,
+                                         f'{model_name}-n={self.n_device}-r={self.rank}-se={1 if split_embedding else 0}')
         data = None  # split_weights
         if not os.path.exists(split_weights_dir):
             log('Notice', f'Directory "{split_weights_dir}" not found, download from Master')
 
-            with socket.create_connection((MASTER_IP, master_port)) as conn:
+            with socket.create_connection(self.network_config.master_addr) as conn:
                 # if self.rank == 0:  # main worker
                 #     log('Notice', 'Send WORKER_NUM to master')
                 #     request = f'WORKER_NUM {self.n_device}\n'
@@ -285,14 +287,16 @@ class Worker:
         # [begin] load KV-cache and the first token
         if task == 'd':  # only decoding
             # [begin] load KV-cache
-            with socket.create_connection((MASTER_IP, master_port)) as conn:
+            with socket.create_connection(self.network_config.master_addr) as conn:
                 request = f'TP_CACHE {self.rank} {self.n_device} {self.text[:prefill_length]}\n'
                 conn.sendall(request.encode())
                 split_layers_cache = ()
                 log('Notice', 'Start loading KV-Cache...')
                 for l in tqdm(range(self.config.n_layer)):
                     layer_cache = recv_data(conn)  # recv KV_cache
-                    assert isinstance(layer_cache, tuple) and len(layer_cache) == 2 and isinstance(layer_cache[0], torch.Tensor) and isinstance(layer_cache[1], torch.Tensor)
+                    assert isinstance(layer_cache, tuple) and len(layer_cache) == 2 and isinstance(layer_cache[0],
+                                                                                                   torch.Tensor) and isinstance(
+                        layer_cache[1], torch.Tensor)
                     split_layers_cache = split_layers_cache + (layer_cache,)
                 self.split_KV_cache = split_layers_cache
 
@@ -778,7 +782,7 @@ class Worker:
     #         yi.add_(bi)
     #     return yi
 
-    @profile
+    # @profile
     def ring_reduce_scatter_comp_overlap(self, xi: torch.Tensor, Wi: torch.Tensor, bi=None):
         """
         overlap the ring reduce-scatter comm operation with the **previous** matrix-vector multiplication
@@ -918,7 +922,7 @@ class Worker:
         with torch.no_grad():  # no_grad() to release memory
             # prefill
             if self.rank == 0:
-                self.input_ids = torch.LongTensor([self.tokenizer.convert_tokens_to_ids(list(input_text))])
+                self.input_ids = torch.LongTensor([self.tokenizer.convert_tokens_to_ids(list(input_text))]).to(device)
                 if self.batch_size > 1:
                     self.input_ids = torch.concat([self.input_ids] * self.batch_size, dim=0)
 
@@ -944,9 +948,9 @@ class Worker:
             else:  # other workers
                 log('Task', 'Prefill')
                 tp_forward()
-            generate_len -= 1 # one-token generated by prefill
+            generate_len -= 1  # one-token generated by prefill
 
-            if g in
+            # if g in  # 这里是干嘛的来着？
 
             if generate_len > 0:  # decoding
                 log('Task', 'Decoding')
@@ -1022,7 +1026,37 @@ def layer_norm_se(split_embeddings, split_LN_weights, d_model, eps):
 
 
 if __name__ == '__main__':
-    worker = Worker((MAIN_WORKER_IP, port_tcp))
+
+    # parse server ip (optional) and group size
+    parser = argparse.ArgumentParser()
+    # parser.add_argument('-a', '--addr', type=str, required=False, default=MAIN_WORKER_IP)
+    parser.add_argument('-i', '--rank', type=int, required=False, default=0)
+    parser.add_argument('-w', '--world_size', type=int, required=False, default=world_size)
+    parser.add_argument('-r', '--repeat', type=int, required=False, default=1)
+    parser.add_argument('-s', '--se', type=int, required=False, default=1)
+    parser.add_argument('-p', '--prefill_length', type=int, required=False,
+                        default=100)  # default: length of init input
+    parser.add_argument('-g', '--generate_length', type=int, required=False,
+                        default=2)  # default: prefill:1 + decoding:1
+    parser.add_argument('-t', '--task', type=str, required=False, default='pd')  # default: test prefill + decoding
+    parser.add_argument('-c', '--cuda', type=int, required=False, default=0)  # default: 0: use cpu (1: use cuda(gpu))
+
+    arguments = parser.parse_args()
+    # server_ip = arguments.addr
+    rank = arguments.rank
+    world_size = arguments.world_size
+    repeat = arguments.repeat
+    split_embedding = bool(arguments.se)
+    prefill_length = arguments.prefill_length
+    generate_length = arguments.generate_length  # generate_length=1 means only prefill
+    task = arguments.task
+    use_gpu = bool(arguments.cuda)
+
+    network_config = get_network_config(distributed, use_gpu)
+    log('Notice', 'Start Inference using {}'.format(network_config.device))
+    device = torch.device(network_config.device)
+
+    worker = Worker(network_config)
     show_latency = True
     batch = 1
     # split_embedding = False

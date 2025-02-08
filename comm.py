@@ -194,60 +194,60 @@ __format__ = 'IHHH'  # header: (data size, layer num, left range, right range]
 __size__ = struct.calcsize(__format__)
 
 
-def send_tensor(send_socket: socket, data: Tensor, layer_num: int, data_range: tuple[int, int]):
-    """
-    send the padding data of intermediate result of certain layer to other device
-    :param send_socket: the socket of UDP protocol to send data
-    :param data: the (Tensor type) data to send
-    :param layer_num: the intermediate result of which layer
-    :param data_range: the corresponding range of data to the layer output
-    :return: the sending status
-    """
-    serialized = pickle.dumps(data)
-    data_size = len(serialized)
-    header = struct.pack(__format__, data_size, layer_num, *data_range)
-    res = send_socket.sendall(header + serialized)
-    return res
-
-
-async def async_send_tensor(send_socket: socket, data: Tensor, layer_num: int, data_range: tuple[int, int]):
-    serialized = pickle.dumps(data)
-    data_size = len(serialized)
-    print(f'send output from layer {layer_num} of size {data_size / 1024}KB')
-    header = struct.pack(__format__, data_size, layer_num, *data_range)
-    res = send_socket.sendall(header + serialized)
-    return res
-
-
-def recv_tensor(recv_socket: socket):
-    data = b''
-    header_size = __size__
-    while header_size:
-        recv = recv_socket.recv(header_size)
-        data += recv
-        header_size -= len(recv)
-    header = struct.unpack(__format__, data)
-    data_size = header[0]
-    data = b''
-    while data_size:
-        recv = recv_socket.recv(min(4096, data_size))
-        data += recv
-        data_size -= len(recv)
-    return (header[1], (header[2], header[3])), pickle.loads(data)  # (layer_num, range) data
-
-
-async def async_recv_tensor(recv_socket: socket):
-    data = b''
-    header_size = __size__
-    while header_size:
-        recv = recv_socket.recv(header_size)
-        data += recv
-        header_size -= len(recv)
-    header = struct.unpack(__format__, data)
-    data_size = header[0]
-    data = b''
-    while data_size:
-        recv = recv_socket.recv(min(4096, data_size))
-        data += recv
-        data_size -= len(recv)
-    return (header[1], (header[2], header[3])), pickle.loads(data)  # (layer_num, range) data
+# def send_tensor(send_socket: socket, data: Tensor, layer_num: int, data_range: tuple[int, int]):
+#     """
+#     send the padding data of intermediate result of certain layer to other device
+#     :param send_socket: the socket of UDP protocol to send data
+#     :param data: the (Tensor type) data to send
+#     :param layer_num: the intermediate result of which layer
+#     :param data_range: the corresponding range of data to the layer output
+#     :return: the sending status
+#     """
+#     serialized = pickle.dumps(data)
+#     data_size = len(serialized)
+#     header = struct.pack(__format__, data_size, layer_num, *data_range)
+#     res = send_socket.sendall(header + serialized)
+#     return res
+#
+#
+# async def async_send_tensor(send_socket: socket, data: Tensor, layer_num: int, data_range: tuple[int, int]):
+#     serialized = pickle.dumps(data)
+#     data_size = len(serialized)
+#     print(f'send output from layer {layer_num} of size {data_size / 1024}KB')
+#     header = struct.pack(__format__, data_size, layer_num, *data_range)
+#     res = send_socket.sendall(header + serialized)
+#     return res
+#
+#
+# def recv_tensor(recv_socket: socket):
+#     data = b''
+#     header_size = __size__
+#     while header_size:
+#         recv = recv_socket.recv(header_size)
+#         data += recv
+#         header_size -= len(recv)
+#     header = struct.unpack(__format__, data)
+#     data_size = header[0]
+#     data = b''
+#     while data_size:
+#         recv = recv_socket.recv(min(4096, data_size))
+#         data += recv
+#         data_size -= len(recv)
+#     return (header[1], (header[2], header[3])), pickle.loads(data)  # (layer_num, range) data
+#
+#
+# async def async_recv_tensor(recv_socket: socket):
+#     data = b''
+#     header_size = __size__
+#     while header_size:
+#         recv = recv_socket.recv(header_size)
+#         data += recv
+#         header_size -= len(recv)
+#     header = struct.unpack(__format__, data)
+#     data_size = header[0]
+#     data = b''
+#     while data_size:
+#         recv = recv_socket.recv(min(4096, data_size))
+#         data += recv
+#         data_size -= len(recv)
+#     return (header[1], (header[2], header[3])), pickle.loads(data)  # (layer_num, range) data

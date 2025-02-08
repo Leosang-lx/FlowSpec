@@ -1,5 +1,3 @@
-import asyncio
-
 import torch
 
 from dist_comm.network_config import *
@@ -8,7 +6,6 @@ from types import SimpleNamespace
 from forward_use_weight import get_transformer_model_weight
 from distributedTP import split_weight_TP
 from comm import *
-from sampling import apply_sampling
 
 
 class Master:
@@ -79,7 +76,7 @@ class Master:
                         input_ids = torch.LongTensor([self.tokenizer.convert_tokens_to_ids(list(input_text))])
                         output = self.model(input_ids)
                         cache = output.past_key_values
-                        self.split_cache_n = split_cache_by_head(cache)
+                        self.split_cache_n = split_cache_by_head(cache)  # todo: start inference with cache
                         writer.write(gen_bytes(cache))
                         await writer.drain()
                         hidden_states = output.last_hidden_states
@@ -97,7 +94,8 @@ class Master:
                                     split_mlp = True
 
                                 if self.split_weights is None or self.split_embedding:
-                                    self.split_weights = split_weight_TP(self.model_weights, self.n_workers, self.model_config,
+                                    self.split_weights = split_weight_TP(self.model_weights, self.n_workers,
+                                                                         self.model_config,
                                                                          split_MLP=split_mlp,
                                                                          return_view=True)  # default: equal split
                                     self.split_embedding = False
@@ -171,7 +169,6 @@ class Master:
 
     def start(self):
         asyncio.run(self.start_handling())
-
 
 
 if __name__ == '__main__':

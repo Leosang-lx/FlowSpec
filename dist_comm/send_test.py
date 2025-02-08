@@ -1,11 +1,9 @@
-import socket
-
 import torch.distributed as dist
 import torch
 from dist_comm.network_config import *
 from comm import send_data, recv_data
 import time
-from worker import layer_norm_se, sync_layer_norm
+from worker import layer_norm_se
 
 
 # os.environ['USE_LIBUV'] = 'False'

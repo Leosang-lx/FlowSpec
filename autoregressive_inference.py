@@ -13,7 +13,8 @@ model_tag = 'uer/gpt2-large-chinese-cluecorpussmall'  # GPT2-large
 
 
 developer_name, model_name = tuple(model_tag.split('/'))
-cache_path = "model_file"
+cache_path = "D:/LLM-Inference/model_file"
+# cache_path = "model_file"
 
 
 def check_files_exist(model_directory):

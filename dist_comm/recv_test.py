@@ -2,11 +2,9 @@ import time
 
 import torch
 import torch.distributed as dist
-import socket
 
-from worker import layer_norm_se, sync_layer_norm
+from worker import layer_norm_se
 from comm import send_data, recv_data
-import os
 from dist_comm.network_config import *
 import argparse
 

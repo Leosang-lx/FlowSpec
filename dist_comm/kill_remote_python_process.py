@@ -1,11 +1,24 @@
 import paramiko
 
-remote_ip = '192.168.1.105'
-username = 'pi'
-password = '88888888'
+remote_ip = '192.168.1.164'
+username = 'nvidia'
+password = 'nvidia'
 
+# multiple_ip = [
+#     '192.168.1.161',
+#     '192.168.1.162',
+#     '192.168.1.163',
+#     '192.168.1.164'
+# ]
 
-def kill_remote_python_process():
+multiple_ip = [
+    '100.107.85.75',
+    '100.126.236.128',
+    '100.66.107.18',
+    '100.98.149.22'
+]
+
+def kill_remote_python_process(remote_ip):
     ssh = paramiko.SSHClient()
 
     # add to known_hosts
@@ -24,4 +37,9 @@ def kill_remote_python_process():
     ssh.close()
 
 
-kill_remote_python_process()
+def kill_multiple(multiple_ip):
+    for ri in multiple_ip:
+        kill_remote_python_process(ri)
+
+# kill_remote_python_process(remote_ip)
+kill_multiple(multiple_ip)
