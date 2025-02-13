@@ -1,1 +1,1 @@
-scp SUST@192.168.1.106:/D:/华为云盘/project/LLM-Inference/dist_comm ~/project/LLMInference
+scp SUST@192.168.1.106:/D:/华为云盘/project/LLM-Inference/autoregressive_inference.py ~/project/LLMInference

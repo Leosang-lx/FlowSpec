@@ -56,8 +56,8 @@ class Worker:
             self.ip = '127.0.0.1'
         log('Init', f'Local ip: {self.ip}')
         # 0 means server, -1 means helping worker and uninitialized
-        self.rank = network_config.ip_rank_mapping[self.ip] if distributed else rank
-        self.n_device = world_size
+        self.rank = network_config.rank_ip_mapping.index(self.ip) if distributed else rank
+        self.n_device = network_config.world_size
 
         # rank 0 device
         self.server_socket = None
@@ -143,7 +143,7 @@ class Worker:
         # initial distributed group using torch.distributed
         assert isinstance(self.rank, int) and self.rank != -1
         log('Init', f'Rank={self.rank}')
-        init_method = gen_init_method(self.network_config.ip_rank_mapping[0], self.network_config.port_distributed)
+        init_method = gen_init_method(self.network_config.rank_ip_mapping[0], self.network_config.port_distributed)
 
         log('Init', f'init_method="{init_method}"')
 
@@ -905,6 +905,9 @@ class Worker:
     # def co_forward_tsp(self, input_ids=None, use_cache=True):
 
     def tp_generate(self, input_text: str, generate_len=100, split_MLP=True, return_latency=False):
+        """
+        基于TP的自回归推理生成token
+        """
         if split_embedding:
             tp_forward = self.co_forward_se
         else:
@@ -981,6 +984,8 @@ class Worker:
             if return_latency:
                 output = output + (prefill_t, decoding_t)
             return output
+
+    # def tp_verify(self):
 
 
 def sync_layer_norm(split_embeddings, split_LN_weights, d_model, eps):

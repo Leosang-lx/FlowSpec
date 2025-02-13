@@ -46,13 +46,9 @@ def get_network_config(is_distributed=False, use_gpu=False):
     if is_distributed:
         device, backend = get_device_and_distributed_backend(use_gpu)
         # init ip_rank_mapping
-        no_s = [161, 162, 163, 164]
-        ip_rank_mapping = {}
-        for rank, no in enumerate(no_s):
-            ip_rank_mapping[f'{SUBNET}.{no}'] = rank
-        world_size = len(no_s)
-        network_config['world_size'] = world_size
-
+        rank_suffix = [161, 162, 163, 164]
+        rank_ip_mapping = [f'{SUBNET}.{suffix}' for suffix in rank_suffix]
+        world_size = len(rank_suffix)
         ipvx = AF_INET
         # Enable when using RaspberryPi
         if backend == 'gloo':
@@ -66,14 +62,16 @@ def get_network_config(is_distributed=False, use_gpu=False):
             raise RuntimeError('Unsupported backend for torch.distributed')
     else:
         device, backend = get_device_and_distributed_backend(False)  # use cpu by default for local distributed inference
-        ip_rank_mapping = ['::1']
+        rank_ip_mapping = ['::1']
         world_size = 2
         # MAIN_WORKER_IP = '::1'
         # ipvx = AF_INET6  # test with multi-process in Windows: fail to use ipv4
         pass
+
     network_config['device'] = device
     network_config['backend'] = backend
-    network_config['ip_rank_mapping'] = ip_rank_mapping
+    network_config['rank_ip_mapping'] = rank_ip_mapping
+    network_config['world_size'] = world_size
 
     return SimpleNamespace(**network_config)
 
