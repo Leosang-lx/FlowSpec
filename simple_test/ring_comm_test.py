@@ -1,6 +1,4 @@
-import torch
-
-from worker import *
+from DistributedTP.worker import *
 
 
 def test_overlap(w: Worker):

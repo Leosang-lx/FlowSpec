@@ -1,9 +1,9 @@
 import torch.distributed as dist
 import torch
 from dist_comm.network_config import *
-from comm import send_data, recv_data
+from DistributedTP.comm import send_data, recv_data
 import time
-from worker import layer_norm_se
+from DistributedTP.worker import layer_norm_se
 
 
 # os.environ['USE_LIBUV'] = 'False'

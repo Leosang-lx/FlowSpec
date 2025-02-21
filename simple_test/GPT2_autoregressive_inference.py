@@ -1,11 +1,10 @@
 import time
-import torch.nn as nn
 import torch
 # from memory_profiler import profile
 from tqdm import tqdm
 from transformers import GPT2LMHeadModel, BertTokenizer, GPT2Config
 from transformers import AutoModel, AutoTokenizer, AutoConfig
-from sampling import apply_sampling
+from DistributedTP.sampling import apply_sampling
 import os
 
 

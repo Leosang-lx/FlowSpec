@@ -3,8 +3,8 @@ import time
 import torch
 import torch.distributed as dist
 
-from worker import layer_norm_se
-from comm import send_data, recv_data
+from DistributedTP.worker import layer_norm_se
+from DistributedTP.comm import send_data, recv_data
 from dist_comm.network_config import *
 import argparse
 
