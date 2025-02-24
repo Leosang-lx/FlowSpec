@@ -1,5 +1,6 @@
 import json
 
+import torch
 import torch.nn as nn
 from huggingface_hub import hf_hub_download
 from transformers import AutoTokenizer, AutoConfig
@@ -186,18 +187,13 @@ class StageEaModel(nn.Module):
     ):
         if is_llama3:
             stop_token_id = self.tokenizer.convert_tokens_to_ids("<|eot_id|>")
-        max_length = max_length - self.ea_layer.total_tokens - 10
 
+        # [MODIFY]: only stage1 has the ea_layer and input_ids
         if temperature > 1e-5 and self.config.is_last_stage:
             logits_processor = prepare_logits_processor(temperature=temperature, top_p=top_p, top_k=top_k)
         else:
             logits_processor = None
 
-        assert input_ids.shape[0] == 1, "Only support batch size 1 for now!!"
-        # Avoid modifying the input_ids in-place
-        padding = (torch.zeros(1, 1, dtype=torch.long) - 1).to(input_ids.device)
-        input_ids = input_ids.clone()
-        self.ea_layer.reset_kv()
 
         # Initialize the past key and value states
         if hasattr(self, "past_key_values"):
@@ -211,28 +207,119 @@ class StageEaModel(nn.Module):
                 past_key_values,
                 past_key_values_data,
                 current_length_data,
-            ) = initialize_past_key_values(self.base_model)
+            ) = initialize_past_key_values(self.base_model)  # todo: init cache with split layer_num
             self.past_key_values = past_key_values
             self.past_key_values_data = past_key_values_data
             self.current_length_data = current_length_data
 
-        if self.config.is_first_stage:
+
+        if self.is_first_stage:
+            max_length = max_length - self.ea_layer.total_tokens - 10
+            assert input_ids.shape[0] == 1, "Only support batch size 1 for now!!"
+            # Avoid modifying the input_ids in-place
+            padding = (torch.zeros(1, 1, dtype=torch.long) - 1).to(input_ids.device)
+            input_ids = input_ids.clone()
+            self.ea_layer.reset_kv()
+
             input_len = input_ids.shape[1]
             reset_tree_mode(self)
             # make a draft token tree
+            # todo: pipelined prefill of base model
             draft_tokens, retrieve_indices, tree_mask, tree_position_ids, logits, hidden_state, sample_token = initialize_tree(
                 input_ids, self, past_key_values, logits_processor
             )
+            # split the tree for pipeline
+            seqs_split, tree_pos_ids_split, lens_split = tree_partition_pipeline(
+                draft_tokens,
+                tree_position_ids,
+                self.total_stage
+            )
+            # Tuple(subtree1=(draft_tokens, tree_position_ids, tree_attention_mask, retrieve_indices), ...)
             new_token = 0
 
         for idx in range(max_length):
-            # with Timer("all"):
             if self.config.is_first_stage:
+                # send mask to all stages
+                mask_shape = torch.tensor(tree_mask.shape, dtype=torch.int32)
                 self.base_model.model.tree_mask = tree_mask
-                draft_tokens = draft_tokens.to(input_ids.device)
+                dist.broadcast(mask_shape, src=0)
+                send_mask = dist.broadcast(tree_mask, src=0, async_op=True)
 
-            # todo: split token tree for pipelined verification
-            logits, hidden_state_new, outputs = stage_tree_decoding()
+            else:
+                mask_shape = torch.zeros(4, dtype=torch.int32)  # shape like (1, 1, seq_len, seq_len)
+                dist.broadcast(mask_shape, src=0)
+                tree_mask = torch.zeros(mask_shape, dtype=torch.float64)
+                dist.broadcast(tree_mask, src=0)
+
+            # [tree_decoding]
+            self.stage_base_model.tree_mask = tree_mask
+            if self.config.is_first_stage:
+                tree_decoding_params = (self, past_key_values, retrieve_indices, seqs_split, tree_pos_ids_split, lens_split, input_ids)
+            else:
+                tree_decoding_params = (self, past_key_values)
+
+            outputs = stage_tree_decoding(*tree_decoding_params)
+
+            # [evaluate_posterior]
+
+            if self.is_first_stage:
+                draft_tokens = torch.cat((draft_tokens, padding), dim=1)
+                candidates = draft_tokens[0, retrieve_indices]
+                logits, hidden_state = outputs  # get the outputs of tree decoding
+                best_candidate, accept_length, sample_p = evaluate_posterior(
+                    logits, candidates, logits_processor
+                )
+
+            # [update_inference_inputs]
+            """
+            OWNED
+            stage_1: input_ids, prev_len, candidates
+            middle_stage: 
+            stage_n-1: logits, candidates, retrieve_indices, best_candidates, accept_length, select_indices
+            NEED
+            
+            """
+            if self.is_first_stage:
+                update_inputs_params = (
+                    self,
+                    past_key_values_data,
+                    current_length_data,
+                    logits_processor,
+                    input_ids,
+                    candidates,
+                    best_candidate,
+                    accept_length,
+                    retrieve_indices,
+                    new_token,
+                    hidden_state,
+                    sample_p,
+                )
+            else:
+                update_inputs_params = (self, past_key_values_data, current_length_data, logits_processor)
+
+            outputs = update_stage_inference_inputs(*update_inputs_params)
+            if self.is_first_stage:
+                input_ids, draft_tokens, retrieve_indices, tree_mask, tree_position_ids, new_token, hidden_state, sample_token = outputs
+
+                # todo: how to stop the iterations for all stages
+                if is_llama3:
+                    if stop_token_id in input_ids[0, input_len:].tolist():
+                        break
+
+                if self.tokenizer.eos_token_id in input_ids[0, input_len:].tolist():
+                    break
+                if new_token > max_new_tokens:
+                    break
+                if input_ids.shape[1] > max_length:
+                    break
+            if not log:
+                return input_ids
+            else:
+                return input_ids, new_token, idx
+
+
+
+
 
 
 
