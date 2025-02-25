@@ -4,7 +4,6 @@ Worker.py: distributed autoregressive inference for transformer-based LM
 import argparse
 import sys
 import numpy as np
-import torch.distributed as dist
 from datetime import datetime
 
 from cmd_util import get_ip_addr

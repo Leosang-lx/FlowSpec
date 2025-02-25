@@ -6,27 +6,32 @@ from socket import AF_INET, AF_INET6
 import os
 import torch.cuda
 import torch.distributed as dist
+
 # from autoregressive_inference import config, model_config
 distributed = False
 world_size = 2
 
 timeout_max = datetime.timedelta(seconds=10)
 
+
 def get_device_and_distributed_backend(use_gpu=False):
     if not dist.is_available():
         raise RuntimeError("torch.distributed is not available")
+    backend = 'gloo'  # only use gloo for comm
     if torch.cuda.is_available() and use_gpu:  # GPU is available and choose GPU
-        device = 'cuda'
-        if dist.is_nccl_available():  # prefer NCCL if available
-            backend = 'nccl'
-        elif dist.is_mpi_available():
-            backend = 'mpi'
-        else:
-            raise RuntimeError('Not available distributed backend for GPU comm')
-    else:  # CPU
-        device = 'cpu'
-        backend = 'gloo'
-    return device, backend
+        return 'cuda', backend
+    return 'cpu', backend
+    #     device = 'cuda'
+    #     if dist.is_nccl_available():  # prefer NCCL if available
+    #         backend = 'nccl'
+    #     elif dist.is_mpi_available():
+    #         backend = 'mpi'
+    #     else:
+    #         raise RuntimeError('Not available distributed backend for GPU comm')
+    # else:  # CPU
+    #     device = 'cpu'
+    #     backend = 'gloo'
+    # return device, backend
 
 
 def get_network_config(is_distributed=False, use_gpu=False):
@@ -61,7 +66,8 @@ def get_network_config(is_distributed=False, use_gpu=False):
             # nccl暂时无法使用
             raise RuntimeError('Unsupported backend for torch.distributed')
     else:
-        device, backend = get_device_and_distributed_backend(False)  # use cpu by default for local distributed inference
+        device, backend = get_device_and_distributed_backend(
+            False)  # use cpu by default for local distributed inference
         rank_ip_mapping = ['::1']
         world_size = 2
         # MAIN_WORKER_IP = '::1'
@@ -102,7 +108,6 @@ def gen_init_method(rank0_ip: str, port: int, protocol='tcp'):
         raise Exception('Invalid IP Address')
 
     return init_method
-
 
 # def get_simple_model_config():
 #     return model_config

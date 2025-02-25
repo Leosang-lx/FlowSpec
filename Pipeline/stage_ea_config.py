@@ -1,4 +1,8 @@
 from transformers.configuration_utils import PretrainedConfig
+from cmd_util import get_ip_addr
+from network_config import *
+
+
 class StageEaConfig(PretrainedConfig):
     r"""
     This is the configuration class to store the configuration of a [`LlamaModel`]. It is used to instantiate an LLaMA
@@ -75,25 +79,25 @@ class StageEaConfig(PretrainedConfig):
     keys_to_ignore_at_inference = ["past_key_values"]
 
     def __init__(
-        self,
-        vocab_size=32000,
-        hidden_size=4096,
-        intermediate_size=11008,
-        num_hidden_layers=32,
-        num_attention_heads=32,
-        num_key_value_heads=None,
-        hidden_act="silu",
-        max_position_embeddings=2048,
-        initializer_range=0.02,
-        rms_norm_eps=1e-6,
-        use_cache=True,
-        pad_token_id=None,
-        bos_token_id=1,
-        eos_token_id=2,
-        pretraining_tp=1,
-        tie_word_embeddings=False,
-        rope_scaling=None,
-        **kwargs,
+            self,
+            vocab_size=32000,
+            hidden_size=4096,
+            intermediate_size=11008,
+            num_hidden_layers=32,
+            num_attention_heads=32,
+            num_key_value_heads=None,
+            hidden_act="silu",
+            max_position_embeddings=2048,
+            initializer_range=0.02,
+            rms_norm_eps=1e-6,
+            use_cache=True,
+            pad_token_id=None,
+            bos_token_id=1,
+            eos_token_id=2,
+            pretraining_tp=1,
+            tie_word_embeddings=False,
+            rope_scaling=None,
+            **kwargs,
     ):
         self.vocab_size = vocab_size
         self.max_position_embeddings = max_position_embeddings
@@ -123,10 +127,13 @@ class StageEaConfig(PretrainedConfig):
             **kwargs,
         )
 
-        # [modify] distributed pipeline configuration
-        # distributed configuration
+        # [MODIFIED] add network config
+        self.master_ip = None
+        self.ip = None
         self.init_method = None
-        self.distributed_backend = None
+        self.backend = None
+        self.device = None
+
         self.stage_num_hidden_layers_list = None
         self.stage = None
         self.total_stage = None
@@ -137,7 +144,7 @@ class StageEaConfig(PretrainedConfig):
         self.num_stage_hidden_layers = None
         self.layer_range = None  # [start_layer_idx, end_layer_idx)
 
-def _rope_scaling_validation(self):
+    def _rope_scaling_validation(self):
         """
         Validate the `rope_scaling` configuration.
         """
@@ -158,19 +165,28 @@ def _rope_scaling_validation(self):
         if rope_scaling_factor is None or not isinstance(rope_scaling_factor, float) or rope_scaling_factor <= 1.0:
             raise ValueError(f"`rope_scaling`'s factor field must be an float > 1, got {rope_scaling_factor}")
 
+    def update_stage_config(self, args):
+        is_distributed = args.distributed
+        network_config = get_network_config(is_distributed, args.use_gpu)
+        self.master_ip = network_config.master_ip
+        if is_distributed:
+            self.ip = get_ip_addr(network_config.interface)
+            rank0_ip = network_config.rank_ip_mapping[0]
+        else:
+            self.ip = '127.0.0.1'
+            rank0_ip = self.ip
+        self.init_method = gen_init_method(rank0_ip, network_config.port)
 
-def update_stage_config(self, ):
-    network_config = ...
-    self.stage = network_config.rank
-    self.total_stage = network_config.world_size
-    if self.total_stage == 1:
-        raise ValueError("total_stage cannot be 1")
-    assert self.stage < self.total_stage
-    assert sum(self.stage_num_hidden_layers_list) == self.num_hidden_layers
-    if self.total_stage != len(self.stage_num_hidden_layers_list):
-        raise ValueError("total_stage != len(stage_num_hidden_layers_list)")
-    self.num_stage_hidden_layers = self.stage_num_hidden_layers_list[self.stage]
-    self.last_rank = None if self.stage == 0 else self.stage - 1
-    self.next_rank = None if self.stage == self.total_stage - 1 else self.stage + 1
-    self.is_first_stage = (self.stage == 0)
-    self.is_last_stage = (self.stage == self.total_stage - 1)
+        self.stage = network_config.rank
+        self.total_stage = network_config.world_size
+        if self.total_stage == 1:
+            raise ValueError("total_stage cannot be 1")
+        assert self.stage < self.total_stage
+        assert sum(self.stage_num_hidden_layers_list) == self.num_hidden_layers
+        if self.total_stage != len(self.stage_num_hidden_layers_list):
+            raise ValueError("total_stage != len(stage_num_hidden_layers_list)")
+        self.num_stage_hidden_layers = self.stage_num_hidden_layers_list[self.stage]
+        self.last_rank = None if self.stage == 0 else self.stage - 1
+        self.next_rank = None if self.stage == self.total_stage - 1 else self.stage + 1
+        self.is_first_stage = (self.stage == 0)
+        self.is_last_stage = (self.stage == self.total_stage - 1)
