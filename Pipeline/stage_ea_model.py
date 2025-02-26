@@ -9,10 +9,10 @@ import os
 from eagle.utils import *
 from eagle.kv_cache import initialize_past_key_values
 from eagle.cnets import Model
-from eagle.configs import EConfig
-from .stage_modeling_llama import StageLlamaModelForCausalLM
-from .stage_ea_config import StageEaConfig
-from .pipeline_utils import *
+# from eagle.configs import EConfig
+from stage_modeling_llama import StageLlamaModelForCausalLM
+from stage_ea_config import StageEaConfig
+from pipeline_utils import *
 
 
 class StageEaModel(nn.Module):
@@ -21,14 +21,14 @@ class StageEaModel(nn.Module):
             self,
             stage_base_model,
             stage_base_model_or_path,
-            ea_model_path,
+            # ea_model_path,
             config,
-            # config for drafting
-            total_token,
-            depth,
-            top_k,
-            threshold,
-            ea_layer_state_dict=None  # draft model
+            # total_token,
+            # depth,
+            # top_k,
+            # threshold,
+            # ea_layer_state_dict=None,
+            ea_draft_model=None  # draft model
     ):
         super().__init__()
         self.stage_base_model = stage_base_model
@@ -46,31 +46,11 @@ class StageEaModel(nn.Module):
         self.is_last_stage = self.stage == self.total_stage - 1
 
 
-        with open(ea_model_path, "r") as f:
-            con = json.loads(f.read())
-        try:
-            bias = con['bias']
-        except:
-            bias = True
-
         # [modify] assume the draft ea_model is on the stage-0 device
-        if config.is_first_stage:
-            self.ea_layer = Model(config, bias=bias, total_tokens=total_token, depth=depth, top_k=top_k, threshold=threshold)
-            low_memory = False
-            assert isinstance(stage_base_model, StageLlamaModelForCausalLM)
-            device = stage_base_model.model.partial_layers[-1].self_attn.q_proj.weight.device
-            if device != stage_base_model.lm_head.weight.device:
-                self.ea_layer.diff_device = True
-                if not low_memory:
-                    self.ea_layer.headweight = stage_base_model.lm_head.weight.clone().to(device)
-                else:
-                    self.ea_layer.layer_device = device
-
-            else:
-                self.ea_layer.diff_device = False
-            self.ea_layer.load_state_dict(ea_layer_state_dict, strict=True)
-            self.ea_layer.to(self.stage_base_model.dtype).to(device)
-            self.ea_layer.init_tree()
+        if config.has_draft_model:
+            assert ea_draft_model is not None
+            assert isinstance(ea_draft_model, Model)
+            self.ea_layer = ea_draft_model
 
     def get_tokenizer(self):
         """Get the tokenizer of the base model.
@@ -92,10 +72,10 @@ class StageEaModel(nn.Module):
             threshold=1.0,
             **kwargs,
     ):
-        config = StageEaConfig.from_pretrained(ea_model_path)
+        model_config = StageEaConfig.from_pretrained(stage_base_model_path)
         assert Type == 'LLaMA'  # only support LLaMA for now
         stage_base_model = StageLlamaModelForCausalLM.from_pretrained(
-            stage_base_model_path, **kwargs
+            stage_base_model_path, config=model_config, **kwargs
         )
         # Type = AutoConfig.from_pretrained(stage_base_model_path).architectures[0]
 
@@ -115,15 +95,45 @@ class StageEaModel(nn.Module):
             if not os.path.exists(load_model_path):
                 load_model_path = hf_hub_download(ea_model_path, "model.safetensors")
             ea_layer_state_dict = load_file(load_model_path)
+
+
+        # [MODIFIED] load ea_draft_model in from_pretrained()
+        ea_config = AutoConfig.from_pretrained(config_path)
+        # load the draft model
+        with open(ea_model_path, "r") as f:
+            con = json.loads(f.read())
+        try:
+            bias = con['bias']
+        except:
+            bias = True
+        ea_layer = Model(ea_config, bias=bias, total_tokens=total_token, depth=depth, top_k=top_k,
+                            threshold=threshold)
+        low_memory = False
+        assert isinstance(stage_base_model, StageLlamaModelForCausalLM)
+        device = stage_base_model.model.partial_layers[-1].self_attn.q_proj.weight.device
+        # if device != stage_base_model.lm_head.weight.device:
+        #     self.ea_layer.diff_device = True
+        #     if not low_memory:
+        #         self.ea_layer.headweight = stage_base_model.lm_head.weight.clone().to(device)
+        #     else:
+        #         self.ea_layer.layer_device = device
+
+        # else:
+        #     self.ea_layer.diff_device = False
+        ea_layer.load_state_dict(ea_layer_state_dict, strict=True)
+        ea_layer.to(kwargs.stage_base_model.dtype).to(device)
+        ea_layer.init_tree()
+
         stage_model = cls(
             stage_base_model,
             stage_base_model_path,
-            config_path,
-            total_token,
-            depth,
-            top_k,
-            threshold,
-            ea_layer_state_dict
+            model_config,
+            ea_layer
+            # total_token,
+            # depth,
+            # top_k,
+            # threshold,
+            # ea_layer_state_dict
         )
 
         if total_token == -1:
@@ -173,7 +183,7 @@ class StageEaModel(nn.Module):
         else:
             return outputs, hidden_states
 
-    @torch.no_grad()
+    @torch.no_grad()  # collaborative function
     def eagenerate_pipeline(
             self,
             input_ids=None,
@@ -194,7 +204,6 @@ class StageEaModel(nn.Module):
         else:
             logits_processor = None
 
-
         # Initialize the past key and value states
         if hasattr(self, "past_key_values"):
             past_key_values = self.past_key_values
@@ -211,7 +220,6 @@ class StageEaModel(nn.Module):
             self.past_key_values = past_key_values
             self.past_key_values_data = past_key_values_data
             self.current_length_data = current_length_data
-
 
         if self.is_first_stage:
             max_length = max_length - self.ea_layer.total_tokens - 10
@@ -254,7 +262,8 @@ class StageEaModel(nn.Module):
             # [tree_decoding]
             self.stage_base_model.tree_mask = tree_mask
             if self.config.is_first_stage:
-                tree_decoding_params = (self, past_key_values, retrieve_indices, seqs_split, tree_pos_ids_split, lens_split, input_ids)
+                tree_decoding_params = (
+                self, past_key_values, retrieve_indices, seqs_split, tree_pos_ids_split, lens_split, input_ids)
             else:
                 tree_decoding_params = (self, past_key_values)
 
@@ -316,11 +325,3 @@ class StageEaModel(nn.Module):
                 return input_ids
             else:
                 return input_ids, new_token, idx
-
-
-
-
-
-
-
-

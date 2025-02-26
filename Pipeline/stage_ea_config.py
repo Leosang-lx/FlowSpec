@@ -1,6 +1,7 @@
 from transformers.configuration_utils import PretrainedConfig
 from cmd_util import get_ip_addr
 from network_config import *
+from typing import List
 
 
 class StageEaConfig(PretrainedConfig):
@@ -97,35 +98,102 @@ class StageEaConfig(PretrainedConfig):
             pretraining_tp=1,
             tie_word_embeddings=False,
             rope_scaling=None,
+            ea_config=None,
+            stage=-1,
+            stage_num_hidden_layers_list=[0],
+            base_model_name_or_path=None,
+            has_embedding=True,
+            has_draft_model=False,
+            has_lm_head=True,
             **kwargs,
     ):
-        self.vocab_size = vocab_size
-        self.max_position_embeddings = max_position_embeddings
-        self.hidden_size = hidden_size
-        self.intermediate_size = intermediate_size
-        self.num_hidden_layers = num_hidden_layers
-        self.num_attention_heads = num_attention_heads
+        if ea_config is not None:
+            self.vocab_size = ea_config.vocab_size
+            self.max_position_embeddings = ea_config.max_position_embeddings
+            self.hidden_size = ea_config.hidden_size
+            self.intermediate_size = ea_config.intermediate_size
+            self.num_hidden_layers = ea_config.num_hidden_layers
+            self.num_attention_heads = ea_config.num_attention_heads
 
-        # for backward compatibility
-        if num_key_value_heads is None:
-            num_key_value_heads = num_attention_heads
+            # for backward compatibility
+            # if num_key_value_heads is None:
+            #     num_key_value_heads = ea_config.num_attention_heads
 
-        self.num_key_value_heads = num_key_value_heads
-        self.hidden_act = hidden_act
-        self.initializer_range = initializer_range
-        self.rms_norm_eps = rms_norm_eps
-        self.pretraining_tp = pretraining_tp
-        self.use_cache = use_cache
-        self.rope_scaling = rope_scaling
-        self._rope_scaling_validation()
+            self.num_key_value_heads = ea_config.num_key_value_heads
+            self.hidden_act = ea_config.hidden_act
+            self.initializer_range = ea_config.initializer_range
+            self.rms_norm_eps = ea_config.rms_norm_eps
+            self.pretraining_tp = ea_config.pretraining_tp
+            self.use_cache = ea_config.use_cache
+            self.rope_scaling = ea_config.rope_scaling
+            # todo: where does the rope_theta comes from?
+            if hasattr(ea_config, 'rope_theta'):
+                self.rope_theta = ea_config.rope_theta
+            self._rope_scaling_validation()
 
-        super().__init__(
-            pad_token_id=pad_token_id,
-            bos_token_id=bos_token_id,
-            eos_token_id=eos_token_id,
-            tie_word_embeddings=tie_word_embeddings,
-            **kwargs,
-        )
+            super().__init__(
+                pad_token_id=ea_config.pad_token_id,
+                bos_token_id=ea_config.bos_token_id,
+                eos_token_id=ea_config.eos_token_id,
+                tie_word_embeddings=ea_config.tie_word_embeddings,
+                **kwargs,
+            )
+        else:
+            self.vocab_size = vocab_size
+            self.max_position_embeddings = max_position_embeddings
+            self.hidden_size = hidden_size
+            self.intermediate_size = intermediate_size
+            self.num_hidden_layers = num_hidden_layers
+            self.num_attention_heads = num_attention_heads
+
+            # for backward compatibility
+            if num_key_value_heads is None:
+                num_key_value_heads = num_attention_heads
+
+            self.num_key_value_heads = num_key_value_heads
+            self.hidden_act = hidden_act
+            self.initializer_range = initializer_range
+            self.rms_norm_eps = rms_norm_eps
+            self.pretraining_tp = pretraining_tp
+            self.use_cache = use_cache
+            self.rope_scaling = rope_scaling
+            self._rope_scaling_validation()
+
+            super().__init__(
+                pad_token_id=pad_token_id,
+                bos_token_id=bos_token_id,
+                eos_token_id=eos_token_id,
+                tie_word_embeddings=tie_word_embeddings,
+                **kwargs,
+            )
+
+        self.base_model_name_or_path = base_model_name_or_path
+        self.has_embedding = has_embedding,
+        self.has_draft_model = has_draft_model,
+        self.has_lm_head = has_lm_head,
+        # assert has_embedding == has_lm_head  # since the sharing weights
+
+        # assert isinstance(stage, int)
+        # assert stage >= -1, 'Stage must be non-negative'
+        self.stage = stage
+        # print(type(stage_num_hidden_layers_list))
+
+        # assert isinstance(stage_num_hidden_layers_list, list) and all(isinstance(n, int) for n in stage_num_hidden_layers_list)
+        # assert sum(stage_num_hidden_layers_list) == self.num_hidden_layers
+
+        self.total_stage = int(len(stage_num_hidden_layers_list))
+        # if self.total_stage == 1:
+        #     raise ValueError("total_stage cannot be 1")
+        # assert self.stage < self.total_stage
+
+        self.stage_num_hidden_layers_list = stage_num_hidden_layers_list
+        self.num_stage_hidden_layers = self.stage_num_hidden_layers_list[self.stage]
+        self.layer_range = (
+            sum(stage_num_hidden_layers_list[:self.stage]),
+            sum(stage_num_hidden_layers_list[:self.stage+1])
+            )  # [start_layer_idx, end_layer_idx)
+        self.is_first_stage = self.stage == 0
+        self.is_last_stage = self.stage == self.total_stage - 1
 
         # [MODIFIED] add network config
         self.master_ip = None
@@ -133,16 +201,9 @@ class StageEaConfig(PretrainedConfig):
         self.init_method = None
         self.backend = None
         self.device = None
-
-        self.stage_num_hidden_layers_list = None
-        self.stage = None
-        self.total_stage = None
+        
         self.last_rank = None
         self.next_rank = None
-        self.is_first_stage = None  # order of pipeline
-        self.is_last_stage = None
-        self.num_stage_hidden_layers = None
-        self.layer_range = None  # [start_layer_idx, end_layer_idx)
 
     def _rope_scaling_validation(self):
         """
@@ -165,7 +226,8 @@ class StageEaConfig(PretrainedConfig):
         if rope_scaling_factor is None or not isinstance(rope_scaling_factor, float) or rope_scaling_factor <= 1.0:
             raise ValueError(f"`rope_scaling`'s factor field must be an float > 1, got {rope_scaling_factor}")
 
-    def update_stage_config(self, args):
+    # only necessary for network
+    def update_network_config(self, args):
         is_distributed = args.distributed
         network_config = get_network_config(is_distributed, args.use_gpu)
         self.master_ip = network_config.master_ip
@@ -177,15 +239,9 @@ class StageEaConfig(PretrainedConfig):
             rank0_ip = self.ip
         self.init_method = gen_init_method(rank0_ip, network_config.port)
 
-        self.stage = network_config.rank
-        self.total_stage = network_config.world_size
-        if self.total_stage == 1:
-            raise ValueError("total_stage cannot be 1")
-        assert self.stage < self.total_stage
-        assert sum(self.stage_num_hidden_layers_list) == self.num_hidden_layers
-        if self.total_stage != len(self.stage_num_hidden_layers_list):
-            raise ValueError("total_stage != len(stage_num_hidden_layers_list)")
-        self.num_stage_hidden_layers = self.stage_num_hidden_layers_list[self.stage]
+        self.rank = self.stage  # stage idx as device rank
+        assert self.total_stage == network_config.world_size
+        
         self.last_rank = None if self.stage == 0 else self.stage - 1
         self.next_rank = None if self.stage == self.total_stage - 1 else self.stage + 1
         self.is_first_stage = (self.stage == 0)

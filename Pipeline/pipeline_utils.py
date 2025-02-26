@@ -7,7 +7,7 @@ import time
 import torch
 from typing import Union, Iterable, List
 import torch.distributed as dist
-from stage_ea_model import StageEaModel
+# from stage_ea_model import StageEaModel
 from transformers.generation.logits_process import (
     LogitsProcessorList,
     RepetitionPenaltyLogitsProcessor,
@@ -107,6 +107,16 @@ def reset_tree_mode(
 #             passed_key_values[i][j].current_length.fill_(0)
 #     return passed_key_values
 
+def split_close_equal(total_size, n):
+    assert total_size > n > 0
+    base_size = total_size // n
+    reminder = total_size % n
+    if reminder == 0:
+        return [base_size for _ in range(n)]
+    else:
+        # leave the smaller one on the front
+        return [base_size if i >= reminder else base_size+1 for i in range(n)]
+
 
 def split_sequence_close_equal_len(sequence: torch.Tensor, split_cnt: Union[int, Iterable[int], torch.Tensor]):
     if len(sequence.shape) <= 2:
@@ -115,9 +125,7 @@ def split_sequence_close_equal_len(sequence: torch.Tensor, split_cnt: Union[int,
         raise ValueError('Sequence for splitting can not have a batch_size larger than 2.')
 
     if isinstance(split_cnt, int):
-        base_length = seq_len // split_cnt
-        reminder = seq_len % split_cnt
-        split_lens = [base_length + 1 if i < reminder else base_length for i in range(split_cnt)]
+        split_lens = split_close_equal(seq_len, split_cnt)
     else:
         split_lens = split_cnt
     split_lens = torch.tensor(split_lens, dtype=torch.int32)
@@ -219,7 +227,7 @@ def tree_partition_pipeline(draft_tokens, tree_position_ids, total_stage: int):
 
 # [MODIFIED] from tree_decoding()
 def stage_tree_decoding(
-        stage_model: StageEaModel,
+        stage_model,
         stage_past_key_values=None,
         retrieve_indices=None,
         draft_seqs_split=None,

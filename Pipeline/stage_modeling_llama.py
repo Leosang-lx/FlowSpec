@@ -16,9 +16,9 @@ from transformers.utils import (
 )
 from transformers import LlamaConfig
 from transformers import AutoTokenizer
-from Pipeline.eagle.modeling_llama_kv_eagle import LlamaPreTrainedModel, LlamaRMSNorm  # LlamaDecoderLayer
-from transformers.models.llama.modeling_llama import LlamaDecoderLayer
-from Pipeline.eagle.modeling_llama_kv_eagle import _expand_mask, _make_causal_mask
+from eagle.modeling_llama_kv import LlamaPreTrainedModel, LlamaRMSNorm  # LlamaDecoderLayer
+# from transformers.models.llama.modeling_llama import LlamaDecoderLayer
+from eagle.modeling_llama_kv import _expand_mask, _make_causal_mask, LlamaDecoderLayer
 
 logger = logging.get_logger(__name__)
 
@@ -26,23 +26,30 @@ _CONFIG_FOR_DOC = "LlamaConfig"
 
 
 class StageLlamaModel(LlamaPreTrainedModel):
-    def __init__(self, config: LlamaConfig):
+    def __init__(self, config: LlamaConfig, embed_tokens=None, hidden_layers=None, post_init=False):
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
         # [modify] is_first_stage and is_last_stage in config is identified by the stage number
-        if config.is_first_stage:
-            self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
+        if config.has_embedding:
+            if embed_tokens is not None:
+                self.embed_tokens = embed_tokens
+            else:
+                self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
         # [modify] the stage model only have partial layers, defined by layer_range = [start_idx, end_idx)
-        self.partial_layers = nn.ModuleList(
-            [LlamaDecoderLayer(config, layer_idx=layer_idx) for layer_idx in range(*config.layer_range)]
-        )
+        if hidden_layers is not None:
+            self.layers = hidden_layers
+        else:
+            self.layers = nn.ModuleList(
+                [LlamaDecoderLayer(config) for layer_idx in range(*config.layer_range)]
+            )
         if config.is_last_stage:
             self.norm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
         # Initialize weights adn apply final processing
-        self.post_init()
+        if post_init:
+            self.post_init()
 
     def get_input_embeddings(self):
         # [modified]
@@ -253,9 +260,12 @@ class StageLlamaModel(LlamaPreTrainedModel):
 class StageLlamaModelForCausalLM(StageLlamaModel):
     _tied_weights_keys = ["lm_head.weight"]
 
-    def __init__(self, config):
+    def __init__(self, config, stage_model=None):
         super().__init__(config)
-        self.model = StageLlamaModel(config)
+        if stage_model is not None and isinstance(stage_model, StageLlamaModel):
+            self.model = stage_model
+        else:
+            self.model = StageLlamaModel(config)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         self.tokenizer = AutoTokenizer.from_pretrained(config.base_model_name_or_path)
@@ -310,7 +320,32 @@ class StageLlamaModelForCausalLM(StageLlamaModel):
                 output_hidden_states: Optional[bool] = None,
                 return_dict: Optional[bool] = None,
         ) -> Union[Tuple, CausalLMOutputWithPast]:
+            r"""
+            Args:
+                labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
+                    Labels for computing the masked language modeling loss. Indices should either be in `[0, ...,
+                    config.vocab_size]` or -100 (see `input_ids` docstring). Tokens with indices set to `-100` are ignored
+                    (masked), the loss is only computed for the tokens with labels in `[0, ..., config.vocab_size]`.
 
+            Returns:
+
+            Example:
+
+            ```python
+            >>> from transformers import AutoTokenizer, LlamaForCausalLM
+
+            >>> model = LlamaForCausalLM.from_pretrained(PATH_TO_CONVERTED_WEIGHTS)
+            >>> tokenizer = AutoTokenizer.from_pretrained(PATH_TO_CONVERTED_TOKENIZER)
+
+            >>> prompt = "Hey, are you conscious? Can you talk to me?"
+            >>> inputs = tokenizer(prompt, return_tensors="pt")
+
+            >>> # Generate
+            >>> generate_ids = model.generate(inputs.input_ids, max_length=30)
+            >>> tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
+            "Hey, are you conscious? Can you talk to me?\nI'm not conscious, but I can talk to you."
+            ```"""
+            
             output_attentions = (
                 output_attentions
                 if output_attentions is not None
