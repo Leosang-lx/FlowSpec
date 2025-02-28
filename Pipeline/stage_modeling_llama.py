@@ -15,7 +15,6 @@ from transformers.utils import (
     replace_return_docstrings,
 )
 from transformers import LlamaConfig
-from transformers import AutoTokenizer
 from eagle.modeling_llama_kv import LlamaPreTrainedModel, LlamaRMSNorm  # LlamaDecoderLayer
 # from transformers.models.llama.modeling_llama import LlamaDecoderLayer
 from eagle.modeling_llama_kv import _expand_mask, _make_causal_mask, LlamaDecoderLayer
@@ -257,18 +256,19 @@ class StageLlamaModel(LlamaPreTrainedModel):
         )
 
 
-class StageLlamaModelForCausalLM(StageLlamaModel):
+class StageLlamaModelForCausalLM(LlamaPreTrainedModel):
     _tied_weights_keys = ["lm_head.weight"]
 
     def __init__(self, config, stage_model=None):
         super().__init__(config)
+
+        self.vocab_size = config.vocab_size
         if stage_model is not None and isinstance(stage_model, StageLlamaModel):
             self.model = stage_model
         else:
             self.model = StageLlamaModel(config)
-        self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
-        self.tokenizer = AutoTokenizer.from_pretrained(config.base_model_name_or_path)
+        self.lm_head.weight = self.model.embed_tokens.weight  # tie weights manually
 
         # Initialize weights and apply final processing
         self.post_init()

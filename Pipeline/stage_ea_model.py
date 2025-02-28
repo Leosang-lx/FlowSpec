@@ -36,21 +36,24 @@ class StageEaModel(nn.Module):
         self.hidden_size = stage_base_model.lm_head.weight.shape[-1]
         self.vocab_size = stage_base_model.lm_head.weight.shape[0]
         self.base_model_name_or_path = stage_base_model_or_path
-        self.tokenizer = AutoTokenizer.from_pretrained(self.base_model_name_or_path, use_fast=False)
+        if config.has_embedding:  # has embedding and lm_head
+            self.tokenizer = AutoTokenizer.from_pretrained(self.base_model_name_or_path, use_fast=False)
+        else:
+            self.tokenizer = None
         # config = StageEaConfig.from_pretrained(ea_model_path)
 
-        # [modify] model stage for tree decoding
+        # [MODIFIED] stage model for pipelined tree decoding
         self.stage = self.config.stage
         self.total_stage = self.config.total_stage
         self.is_first_stage = self.stage == 0
         self.is_last_stage = self.stage == self.total_stage - 1
 
-
-        # [modify] assume the draft ea_model is on the stage-0 device
+        # [MODIFIED] assume the draft ea_model is on the stage-0 device
         if config.has_draft_model:
             assert ea_draft_model is not None
             assert isinstance(ea_draft_model, Model)
             self.ea_layer = ea_draft_model
+            self.ea_layer.init_tree()
 
     def get_tokenizer(self):
         """Get the tokenizer of the base model.
@@ -58,7 +61,7 @@ class StageEaModel(nn.Module):
         Returns:
             Tokenizer: The tokenizer of the base model.
         """
-        return self.tokenizer  # maybe only the last stage need a tokenizer
+        return self.tokenizer  # maybe only the first stage need a tokenizer
 
     @classmethod
     def from_pretrained(
@@ -75,54 +78,58 @@ class StageEaModel(nn.Module):
         model_config = StageEaConfig.from_pretrained(stage_base_model_path)
         assert Type == 'LLaMA'  # only support LLaMA for now
         stage_base_model = StageLlamaModelForCausalLM.from_pretrained(
-            stage_base_model_path, config=model_config, **kwargs
+            stage_base_model_path, **kwargs
         )
         # Type = AutoConfig.from_pretrained(stage_base_model_path).architectures[0]
 
-        config_path = os.path.join(ea_model_path, 'config.json')
-        if not os.path.exists(config_path):
-            config_path = hf_hub_download(ea_model_path, "config.json")
+        # [MODIFIED] load draft model when config.has_draft_model==True
+        if model_config.has_draft_model:
+            assert ea_model_path is not None
+            config_path = os.path.join(ea_model_path, 'config.json')
+            if not os.path.exists(config_path):
+                config_path = hf_hub_download(ea_model_path, "config.json")
+            try:
+                load_model_path = os.path.join(ea_model_path, "pytorch_model.bin")
+                if not os.path.exists(load_model_path):
+                    load_model_path = hf_hub_download(ea_model_path, "pytorch_model.bin")
+                ea_layer_state_dict = torch.load(load_model_path,
+                                                 map_location=stage_base_model.device)
+            except:
+                from safetensors.torch import load_file
+                load_model_path = os.path.join(ea_model_path, "model.safetensors")
+                if not os.path.exists(load_model_path):
+                    load_model_path = hf_hub_download(ea_model_path, "model.safetensors")
+                ea_layer_state_dict = load_file(load_model_path)
 
-        try:
-            load_model_path = os.path.join(ea_model_path, "pytorch_model.bin")
-            if not os.path.exists(load_model_path):
-                load_model_path = hf_hub_download(ea_model_path, "pytorch_model.bin")
-            ea_layer_state_dict = torch.load(load_model_path,
-                                             map_location=stage_base_model.device)
-        except:
-            from safetensors.torch import load_file
-            load_model_path = os.path.join(ea_model_path, "model.safetensors")
-            if not os.path.exists(load_model_path):
-                load_model_path = hf_hub_download(ea_model_path, "model.safetensors")
-            ea_layer_state_dict = load_file(load_model_path)
+            # [MODIFIED] load ea_draft_model in from_pretrained()
+            ea_config = StageEaConfig.from_pretrained(config_path)
+            # load the draft model
+            with open(config_path, "r") as f:
+                con = json.loads(f.read())
+            try:
+                bias = con['bias']
+            except:
+                bias = True
 
+            ea_layer = Model(ea_config, bias=bias, total_tokens=total_token, depth=depth, top_k=top_k,
+                                threshold=threshold)
+            low_memory = False
 
-        # [MODIFIED] load ea_draft_model in from_pretrained()
-        ea_config = AutoConfig.from_pretrained(config_path)
-        # load the draft model
-        with open(ea_model_path, "r") as f:
-            con = json.loads(f.read())
-        try:
-            bias = con['bias']
-        except:
-            bias = True
-        ea_layer = Model(ea_config, bias=bias, total_tokens=total_token, depth=depth, top_k=top_k,
-                            threshold=threshold)
-        low_memory = False
-        assert isinstance(stage_base_model, StageLlamaModelForCausalLM)
-        device = stage_base_model.model.partial_layers[-1].self_attn.q_proj.weight.device
-        # if device != stage_base_model.lm_head.weight.device:
-        #     self.ea_layer.diff_device = True
-        #     if not low_memory:
-        #         self.ea_layer.headweight = stage_base_model.lm_head.weight.clone().to(device)
-        #     else:
-        #         self.ea_layer.layer_device = device
+            device = stage_base_model.model.layers[-1].self_attn.q_proj.weight.device
+            if device != stage_base_model.lm_head.weight.device:
+                ea_layer.diff_device = True
+                if not low_memory:
+                    ea_layer.headweight = stage_base_model.lm_head.weight.clone().to(device)
+                else:
+                    ea_layer.layer_device = device
 
-        # else:
-        #     self.ea_layer.diff_device = False
-        ea_layer.load_state_dict(ea_layer_state_dict, strict=True)
-        ea_layer.to(kwargs.stage_base_model.dtype).to(device)
-        ea_layer.init_tree()
+            else:
+                ea_layer.diff_device = False
+            ea_layer.load_state_dict(ea_layer_state_dict, strict=True)
+            ea_layer.to(stage_base_model.dtype).to(device)
+
+        else:
+            ea_layer = None
 
         stage_model = cls(
             stage_base_model,
@@ -198,7 +205,7 @@ class StageEaModel(nn.Module):
         if is_llama3:
             stop_token_id = self.tokenizer.convert_tokens_to_ids("<|eot_id|>")
 
-        # [MODIFY]: only stage1 has the ea_layer and input_ids
+        # [MODIFIED]: only stage1 has the ea_layer and input_ids
         if temperature > 1e-5 and self.config.is_last_stage:
             logits_processor = prepare_logits_processor(temperature=temperature, top_p=top_p, top_k=top_k)
         else:
@@ -254,6 +261,7 @@ class StageEaModel(nn.Module):
                 send_mask = dist.broadcast(tree_mask, src=0, async_op=True)
 
             else:
+                # todo: maybe end the iterations in here for other stages?
                 mask_shape = torch.zeros(4, dtype=torch.int32)  # shape like (1, 1, seq_len, seq_len)
                 dist.broadcast(mask_shape, src=0)
                 tree_mask = torch.zeros(mask_shape, dtype=torch.float64)
@@ -270,7 +278,6 @@ class StageEaModel(nn.Module):
             outputs = stage_tree_decoding(*tree_decoding_params)
 
             # [evaluate_posterior]
-
             if self.is_first_stage:
                 draft_tokens = torch.cat((draft_tokens, padding), dim=1)
                 candidates = draft_tokens[0, retrieve_indices]
@@ -311,16 +318,18 @@ class StageEaModel(nn.Module):
                 input_ids, draft_tokens, retrieve_indices, tree_mask, tree_position_ids, new_token, hidden_state, sample_token = outputs
 
                 # todo: how to stop the iterations for all stages
-                if is_llama3:
-                    if stop_token_id in input_ids[0, input_len:].tolist():
-                        break
 
-                if self.tokenizer.eos_token_id in input_ids[0, input_len:].tolist():
-                    break
-                if new_token > max_new_tokens:
-                    break
-                if input_ids.shape[1] > max_length:
-                    break
+                if input_ids is not None and self.tokenizer is not None:
+                    if is_llama3:
+                        if stop_token_id in input_ids[0, input_len:].tolist():
+                            break
+
+                    if self.tokenizer.eos_token_id in input_ids[0, input_len:].tolist():
+                        break
+                    if new_token > max_new_tokens:
+                        break
+                    if input_ids.shape[1] > max_length:
+                        break
             if not log:
                 return input_ids
             else:
