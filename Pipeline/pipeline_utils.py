@@ -18,6 +18,7 @@ from transformers.generation.logits_process import (
 
 TOPK = 10  # topk for sparse tree
 
+
 # EAGLE
 class Timer:
     def __init__(self, name):
@@ -31,6 +32,7 @@ class Timer:
         torch.cuda.synchronize()
         elapsed = time.perf_counter() - self.start
         print(f'{self.name} took {elapsed} seconds')
+
 
 # EAGLE
 def prepare_logits_processor(
@@ -50,6 +52,7 @@ def prepare_logits_processor(
         if top_k > 0:
             processor_list.append(TopKLogitsWarper(top_k))
     return processor_list
+
 
 # EAGLE
 def pad_path(path: List[int], length: int, pad_value: int = -2) -> List[int]:
@@ -107,6 +110,7 @@ def reset_tree_mode(
 #             passed_key_values[i][j].current_length.fill_(0)
 #     return passed_key_values
 
+
 def split_close_equal(total_size, n):
     assert total_size > n > 0
     base_size = total_size // n
@@ -115,7 +119,7 @@ def split_close_equal(total_size, n):
         return [base_size for _ in range(n)]
     else:
         # leave the smaller one on the front
-        return [base_size if i >= reminder else base_size+1 for i in range(n)]
+        return [base_size if i >= reminder else base_size + 1 for i in range(n)]
 
 
 def split_sequence_close_equal_len(sequence: torch.Tensor, split_cnt: Union[int, Iterable[int], torch.Tensor]):
@@ -128,7 +132,7 @@ def split_sequence_close_equal_len(sequence: torch.Tensor, split_cnt: Union[int,
         split_lens = split_close_equal(seq_len, split_cnt)
     else:
         split_lens = split_cnt
-    split_lens = torch.tensor(split_lens, dtype=torch.int32)
+    split_lens = torch.tensor(split_lens, dtype=torch.long)
 
     assert sum(split_lens) == seq_len
     split_seqs = sequence.split(split_lens, dim=-1)
@@ -136,32 +140,38 @@ def split_sequence_close_equal_len(sequence: torch.Tensor, split_cnt: Union[int,
 
 
 # [ADD] for pipeline
-def pipeline_prefill(stage_model, input_ids, stage_past_key_values=None, logits_processor=None, tree_mask=None):
+# collaborative function
+def pipeline_prefill(
+        stage_model,
+        input_ids=None,
+        stage_past_key_values=None,
+        logits_processor=None,
+        tree_mask=None
+):
     config = stage_model.config
+    stage_base_model = stage_model.stage_base_model
     total_stage = config.total_stage
     if config.is_first_stage:
-        hidden_state_split = ()
-        recv_tasks = []
+        hidden_state_splits = ()  # save the hidden_state for later transmission
+        # recv_tasks = []
     isend_task = None
-    if input_ids.size(-1) > 20:  # pipelined prefill
+    if input_ids.size(-1) > 20:  # pipelined prefill, split the sequence when long enough
         seq_splits, lens_split = split_sequence_close_equal_len(input_ids, total_stage)
         for subseq_len in lens_split:
             if config.is_first_stage:
-                sub_hidden_state = stage_model(
+                sub_hidden_state = stage_base_model(
                     input_ids=subseq_len,
                     past_key_values=stage_past_key_values,
                 )
-                hidden_state_split = hidden_state_split + (sub_hidden_state,)
+                hidden_state_splits = hidden_state_splits + (sub_hidden_state,)
                 if isend_task is not None:
                     isend_task.wait()
                 isend_task = dist.isend(sub_hidden_state, dst=config.next_rank)
-                irecv_task = dist.irecv(sub_hidden_state)
-                recv_tasks.append(irecv_task)
+
             else:
                 last_hidden_state = torch.zeros((1, subseq_len, config.d_model), dtype=torch.float16)
                 dist.recv(last_hidden_state, src=config.last_rank)
 
-                # if not stage_model.is_last_stage:
                 # middle stage
                 sub_hidden_state = stage_model(
                     last_hidden_state=last_hidden_state,
@@ -172,47 +182,68 @@ def pipeline_prefill(stage_model, input_ids, stage_past_key_values=None, logits_
                 isend_task = dist.isend(sub_hidden_state, dst=config.next_rank)
 
         if stage_model.is_first_stage:
-            for i, recv_task in enumerate(recv_tasks):
+            origs = ()
+
+            for i, hidden_state_split in enumerate(hidden_state_splits):
+                recv_task = dist.irecv(hidden_state_split, src=config.last_rank)
+                if i > 0:
+                    origs = origs + (stage_base_model.lm_head(hidden_state_splits[i - 1]),)
                 recv_task.wait()
-                hidden_state_split = hidden_state_split + (hidden_state_split[i],)
 
-            hidden_state = torch.concat(hidden_state_split, dim=-2)
-            return hidden_state
+            hidden_state = torch.concat(hidden_state_splits, dim=-2)
+            orig = torch.concat(origs, dim=-2)
 
+            # if logits_processor is not None:
+            #     logits = orig[:, -1]
+            #     logits = logits_processor(None, logits)
+            #     probabilities = torch.nn.functional.softmax(logits, dim=1)
+            #     token = torch.multinomial(probabilities, 1)
+            # else:
+            #     token = torch.argmax(orig[:, -1])
+            #     token = token[None, None]
+            # token_for_draft = torch.cat((input_ids, token.to(input_ids.device)), dim=1)
+
+            return orig, hidden_state
 
 
 # [MODIFIED] from initialize_tree()
-def initialize_tree_pipeline(stage_model, past_key_values, logits_processor, input_ids):
+# collaborative function
+def initialize_tree_pipeline(stage_model, input_ids=None, past_key_values=None, logits_processor=None):
     config = stage_model.config
     if config.is_first_stage:
-        outputs, orig, hidden_states = stage_model(
-            input_ids, past_key_values=past_key_values, output_orig=True
-        )
-
-    if logits_processor is not None:
-        logits = orig[:, -1]
-        logits = logits_processor(None, logits)
-        probabilities = torch.nn.functional.softmax(logits, dim=1)
-        token = torch.multinomial(probabilities, 1)
-    else:
-        token = torch.argmax(orig[:, -1])
-        token = token[None, None]
-    input_ids = torch.cat((input_ids, token.to(input_ids.device)), dim=1)
-    # Clone the output hidden states
-
-    draft_tokens, retrieve_indices, tree_mask, tree_position_ids = stage_model.ea_layer.topK_genrate(
-        hidden_states,
-        input_ids,
-        stage_model.base_model.lm_head,
-        logits_processor
+        assert input_ids is not None
+    output = pipeline_prefill(
+        stage_model, input_ids=input_ids, stage_past_key_values=past_key_values, output_orig=True
     )
-    return draft_tokens, retrieve_indices, tree_mask, tree_position_ids, orig, hidden_states, token
+
+    if config.is_first_stage:
+        orig, hidden_states = output
+
+        if logits_processor is not None:
+            logits = orig[:, -1]
+            logits = logits_processor(None, logits)
+            probabilities = torch.nn.functional.softmax(logits, dim=1)
+            token = torch.multinomial(probabilities, 1)
+        else:
+            token = torch.argmax(orig[:, -1])
+            token = token[None, None]
+        input_ids = torch.cat((input_ids, token.to(input_ids.device)), dim=1)
+        # Clone the output hidden states
+
+        draft_tokens, retrieve_indices, tree_mask, tree_position_ids = stage_model.ea_layer.topK_genrate(
+            hidden_states,
+            input_ids,
+            stage_model.base_model.lm_head,
+            logits_processor
+        )
+        # only return the draft token tree for on the first stage
+        return draft_tokens, retrieve_indices, tree_mask, tree_position_ids, orig, hidden_states, token
 
 
 # [ADD] for pipeline
 def tree_partition_pipeline(draft_tokens, tree_position_ids, total_stage: int):
     """
-    split the input tree into multiple subtrees
+    split the input sequence into multiple subsequences
     :param total_stage:
     :param draft_tokens: flattened tree token sequence following the causal rule
     :param tree_position_ids:
@@ -252,7 +283,7 @@ def stage_tree_decoding(
     if stage_model.is_first_stage:
         assert None not in (draft_seqs_split, tree_pos_ids_split, input_ids, retrieve_indices)
         dist.broadcast(lens_split)
-        # ri_shape = torch.tensor(retrieve_indices.shape, dtype=torch.int32)
+        # ri_shape = torch.tensor(retrieve_indices.shape, dtype=torch.long)
         # dist.send(ri_shape, dst=config.last_rank)
         # dist.send(retrieve_indices, dst=config.last_rank)
         recv_tasks = []
@@ -260,7 +291,7 @@ def stage_tree_decoding(
         hidden_state_split = ()
 
     else:
-        lens_split = torch.zeros(stage_model.total_stage, dtype=torch.int32)
+        lens_split = torch.zeros(stage_model.total_stage, dtype=torch.long)
         dist.broadcast(lens_split, src=0)
 
     cum_lens_split = torch.cumsum(lens_split, dim=-1)
@@ -333,7 +364,7 @@ def update_stage_inference_inputs(
         prev_input_len = torch.tensor(input_ids.shape[1], dtype=torch.int64)
         dist.broadcast(prev_input_len, src=0)
 
-        select_indices = (retrieve_indices[best_candidate, :accept_length+1] + prev_input_len)
+        select_indices = (retrieve_indices[best_candidate, :accept_length + 1] + prev_input_len)
         select_indices_shape = torch.tensor(select_indices.shape, dtype=torch.int64)
         dist.broadcast(select_indices_shape, src=0)
         dist.broadcast(select_indices, src=0)
@@ -381,6 +412,107 @@ def update_stage_inference_inputs(
         new_token += accept_length + 1
 
         return input_ids, draft_tokens, retrieve_indices, tree_mask, tree_position_ids, new_token, None, token
+
+
+# [ADD] for continuous speculation
+def token_tree_partition(draft_tokens, retrieve_indices, tree_position_ids, total_stage):
+    """
+    split the token tree into multiple subtrees: initial partition to start pipelined tree decoding
+    :param draft_tokens:
+    :param retrieve_indices:
+    :param tree_position_ids:
+    :param total_stage:
+    :return:
+    """
+    # if sort in other order, process the whole input token tree here:
+    # for example: dfs order (lexicographical order)
+    # rows = [row.tolist() for row in retrieve_indices]
+    # sorted_retrieve_indices = torch.tensor(sorted(rows))  # sort in lexicographical order
+
+    tokens_split, lens_split = split_sequence_close_equal_len(draft_tokens, total_stage)
+    tree_position_ids_split = tree_position_ids.split(lens_split)
+
+    cum_seq_lens = torch.cumsum(lens_split, dim=-1)
+    # tree_mask_cum = [tree_mask[..., :cum_len, :] for cum_len in cum_seq_lens]
+
+    ri_depth_cum = torch.zeros(retrieve_indices.size(-1), dtype=torch.long)
+    subseq_ri_cum_depths = []
+
+    for i, cum_seq_len in enumerate(cum_seq_lens):
+        for j in range(0 if i == 0 else cum_seq_lens[i - 1], cum_seq_len):
+            cum_ri_leaves = retrieve_indices[:, ri_depth_cum]
+            ri_depth_cum[cum_ri_leaves == j] += 1
+
+        subseq_ri_cum_depths.append(ri_depth_cum.clone())
+
+    return tokens_split, lens_split, tree_position_ids_split, torch.stack(subseq_ri_cum_depths, dim=0)
+
+
+# generated by Qwen2.5Max
+def get_subtree_retrieve_indices(retrieve_indices, cum_depth):
+    """
+    Get the retrieve_indices of a subtree according to the cumulate depth of each path
+    :param retrieve_indices: (path * max_tree_depth)
+    :param cum_depth: (path,) < max_tree_depth each
+    :return:
+    """
+    paths, depth = retrieve_indices.shape
+    max_cum_depth = cum_depth.max().item()
+
+    # mark the padding
+    mask = torch.arange(max_cum_depth).unsqueeze(0) < cum_depth.unsqueeze(1)  # (paths, max_cum_depth)
+    # initialize with "-1"
+    result = torch.full((paths, max_cum_depth), -1, dtype=retrieve_indices.dtype)
+    # fill with data
+    result[mask] = retrieve_indices[:, :max_cum_depth][mask[:, :depth]]
+    return result
+
+
+def find_prefix_match(retrieve_indices, accept_indices):
+    prefixes = retrieve_indices[:, :accept_indices.size(0)]
+
+    matches = torch.all(prefixes == accept_indices.unsqueeze(0), dim=1)
+
+    match_paths = torch.nonzero(matches).squeeze()
+
+    return match_paths
+
+
+def pruning(draft_tokens, retrieve_indices, best_candidate, accept_len, new_token):
+    """
+    Pruning the token tree on the retrieve_indices
+    :param retrieve_indices:
+    :param best_candidate:
+    :param accept_len:
+    :return:
+    """
+    accepted_indices = retrieve_indices[best_candidate, :accept_len]
+    # judge whether the global leaf node is reached
+    if accept_len == retrieve_indices.size(-1) or retrieve_indices[best_candidate, accept_len + 1] == -1:
+        # reach the global leaf
+        return None
+
+    # judge whether the new token follows the tree
+    matched_candidates = find_prefix_match(retrieve_indices, accepted_indices)
+    next_indices_draft = retrieve_indices[matched_candidates, accept_len+1]
+    next_tokens_draft = draft_tokens[0, next_indices_draft]
+    if not torch.isin(torch.tensor(new_token), next_tokens_draft):
+        # the tree is wrong
+        return None
+
+    # todo: pruning
+    pass
+
+
+
+
+# verification: use evaluate_posterior() from EAGLE
+# collaborative function
+def update_token_tree():
+    """
+    update the token tree across all pipeline stages
+    :return:
+    """
 
 
 # EAGLE
@@ -465,7 +597,7 @@ def evaluate_posterior(
 
 
 if __name__ == '__main__':
-    sequence = torch.randint(0, 10000, (1, 209), dtype=torch.int32)
+    sequence = torch.randint(0, 10000, (1, 209), dtype=torch.long)
     res = split_sequence_close_equal_len(sequence, 6)
     for i in res:
         print(i)
