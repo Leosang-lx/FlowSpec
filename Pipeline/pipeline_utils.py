@@ -155,11 +155,12 @@ def pipeline_prefill(
         hidden_state_splits = ()  # save the hidden_state for later transmission
         # recv_tasks = []
     isend_task = None
+    subseq_kv_cache = ()
     if input_ids.size(-1) > 20:  # pipelined prefill, split the sequence when long enough
         seq_splits, lens_split = split_sequence_close_equal_len(input_ids, total_stage)
         for subseq_len in lens_split:
             if config.is_first_stage:
-                sub_hidden_state = stage_base_model(
+                sub_hidden_state, stage_past_key_values = stage_base_model(
                     input_ids=subseq_len,
                     past_key_values=stage_past_key_values,
                 )
@@ -173,13 +174,17 @@ def pipeline_prefill(
                 dist.recv(last_hidden_state, src=config.last_rank)
 
                 # middle stage
-                sub_hidden_state = stage_model(
+                sub_hidden_state, stage_past_key_values = stage_model(
                     last_hidden_state=last_hidden_state,
                     past_key_values=stage_past_key_values,
                 )
                 if isend_task is not None:
                     isend_task.wait()
                 isend_task = dist.isend(sub_hidden_state, dst=config.next_rank)
+
+            subseq_kv_cache = subseq_kv_cache + (stage_past_key_values,)
+
+        stage_past_key_values = torch.cat(subseq_kv_cache, dim=-2)
 
         if stage_model.is_first_stage:
             origs = ()
@@ -193,17 +198,10 @@ def pipeline_prefill(
             hidden_state = torch.concat(hidden_state_splits, dim=-2)
             orig = torch.concat(origs, dim=-2)
 
-            # if logits_processor is not None:
-            #     logits = orig[:, -1]
-            #     logits = logits_processor(None, logits)
-            #     probabilities = torch.nn.functional.softmax(logits, dim=1)
-            #     token = torch.multinomial(probabilities, 1)
-            # else:
-            #     token = torch.argmax(orig[:, -1])
-            #     token = token[None, None]
-            # token_for_draft = torch.cat((input_ids, token.to(input_ids.device)), dim=1)
+            return orig, hidden_state, stage_past_key_values
 
-            return orig, hidden_state
+        else:
+            return stage_past_key_values
 
 
 # [MODIFIED] from initialize_tree()
@@ -478,7 +476,31 @@ def find_prefix_match(retrieve_indices, accept_indices):
     return match_paths
 
 
-def pruning(draft_tokens, retrieve_indices, best_candidate, accept_len, new_token):
+def process_retrieve_indices(retrieve_indices):
+    flattened = retrieve_indices.view(-1)
+    mask = flattened != -1
+    filtered = flattened[mask]
+
+    unique_values = torch.unique(filtered)
+    sorted_values = torch.sort(unique_values).values
+
+    return sorted_values
+
+
+def map_retrieve_indices(retrieve_indices, a, b):
+    # consider a is sorted, transform elements in retrieve_indices by mapping a->b
+    flat = retrieve_indices.view(-1)
+    mask = flat != -1
+    if not mask.any():
+        return torch.full_like(retrieve_indices, -1)
+    indices = torch.searchsorted(a, flat[mask])
+    valid_mask = indices < len(a)
+    result = torch.full_like(flat, -1)
+    result[mask] = b[indices[valid_mask]]
+    return result.view(retrieve_indices.shape)
+
+
+def pruning(draft_tokens, retrieve_indices, best_candidate, accept_len, new_token, subseq_ri_cum_depths):
     """
     Pruning the token tree on the retrieve_indices
     :param retrieve_indices:
@@ -496,12 +518,39 @@ def pruning(draft_tokens, retrieve_indices, best_candidate, accept_len, new_toke
     matched_candidates = find_prefix_match(retrieve_indices, accepted_indices)
     next_indices_draft = retrieve_indices[matched_candidates, accept_len+1]
     next_tokens_draft = draft_tokens[0, next_indices_draft]
-    if not torch.isin(torch.tensor(new_token), next_tokens_draft):
-        # the tree is wrong
+    # found the paths with prefix of "accept_tokens + new_token"
+    same_indices = torch.nonzero(next_tokens_draft == new_token).squeeze()
+    if same_indices.numel() == 0:
+        # no match token found in the tree
         return None
 
-    # todo: pruning
-    pass
+    # pruning
+    left_candidates = matched_candidates[same_indices]
+    left_retrieve_indices = retrieve_indices[left_candidates, accept_len:]  # todo: left_retrieve_indices all -1
+    max_depth = (left_retrieve_indices != -1).sum(dim=1).max().item()
+    left_retrieve_indices = left_retrieve_indices[:, :max_depth]  # drop the all -1 parts
+    left_indices = process_retrieve_indices(left_retrieve_indices)  # for pruning for other stages
+    left_indices_from_zero = torch.arange(left_indices.size(-1), dtype=torch.long)
+
+    # cut the subseq_ri_cum_depths
+    left_ri_cum_depths = subseq_ri_cum_depths[1:, left_candidates] - accept_len  # if two same cum_depths, mean the latter is cut completely
+    # todo: what happen when only one path is left? Or is it possible?
+
+    # map the left_retrieve_indices to left_indices_from_zero
+    transformed_ri = map_retrieve_indices(left_retrieve_indices, left_indices, left_indices_from_zero)
+
+    return transformed_ri, left_indices, left_ri_cum_depths
+
+
+def token_pruning(past_key_values, tree_mask, hidden_state, left_indices, global_accept_len, accept_len):
+    draft_kv_cache = past_key_values[..., global_accept_len:, :]
+    cur_kv_len = past_key_values[0][0].size(-2)
+    cur_hs_len = hidden_state.size(-2)
+
+    left_indices_in_cache = left_indices[left_indices < cur_kv_len]
+    left_kv_cache = draft_kv_cache[..., left_indices_in_cache, :]
+    # 对应复制过去，并且修改
+    global_accept_len += accept_len
 
 
 

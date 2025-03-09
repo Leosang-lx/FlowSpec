@@ -398,7 +398,11 @@ class StageEaModel(nn.Module):
             self, input_ids=input_ids, stage_past_key_values=past_key_values
         )
         if config.is_first_stage:
-            orig, hidden_state = output
+            orig, hidden_state, past_key_values = output
+        else:
+            past_key_values = output
+
+        global_accept_len = past_key_values[0][0].size(-2)
 
         # [continuous speculation] outer loop: start from a new draft tree
         for idx_spec in range(max_length):
@@ -463,7 +467,8 @@ class StageEaModel(nn.Module):
                     subseq_pos_ids = tree_position_ids_split[i]
                     # cum_len += subseq_ids.size(-1)
 
-                    sub_hidden_state = self.stage_base_model(
+                    # todo: return the past_key_values from the base model
+                    sub_hidden_state, past_key_values = self.stage_base_model(
                         input_ids=subseq_ids,
                         past_key_values=past_key_values,
                         position_ids=subseq_pos_ids,
@@ -473,7 +478,7 @@ class StageEaModel(nn.Module):
                     last_hidden_state = torch.zeros((1, lens_split[i], config.d_model),
                                                     dtype=torch.float16)  # todo: d_model?
                     dist.recv(last_hidden_state, src=config.last_rank)
-                    sub_hidden_state = self.stage_base_model(
+                    sub_hidden_state, past_key_values = self.stage_base_model(
                         last_hidden_state=last_hidden_state,
                         past_key_values=past_key_values,
                         tree_mask_range=cum_lens[i]
@@ -500,7 +505,35 @@ class StageEaModel(nn.Module):
                     token = torch.argmax(sample_p)
                     token = token[None, None]
 
-                # [pruning]
+                # [local pruning]
+                output = pruning(
+                    draft_tokens, retrieve_indices, best_candidate, accept_length, token, subseq_ri_cum_depths
+                )
+
+                if output is None:  # start new speculation round
+                    pass  # todo: tell all stages to start new round
+                    break
+
+                retrieve_indices, left_indices, subseq_ri_cum_depths = output
+                dist.broadcast(left_indices.shape, src=config.stage)
+                pruning_info = torch.cat((accept_length, left_indices), dim=0).contiguous()
+                dist.broadcast(pruning_info, src=config.stage)  # maybe use dist.send() instead
+
+            else:
+                # todo: receive info from the last stage to check whether continue the continuous speculation
+
+                # if continue
+                left_size = torch.zeros(1, dtype=torch.long)
+                dist.broadcast(left_size, src=config.total_stage-1)
+                pruning_info = torch.zeros(left_size+1, dtype=torch.long)
+                dist.broadcast(pruning_info, src=config.total_stage-1)
+                accept_length = pruning_info[0].item()
+                left_indices = pruning_info[1:]
+                left_indices_from_zero = torch.arange(left_indices.size(-1), dtype=torch.long)
+
+            # [global pruning] prune the tokens (kv_cache and hidden_state)
+            # - according to the global_accept_len and the hidden_state_len
+            ... = prune_tokens()
 
 
 
