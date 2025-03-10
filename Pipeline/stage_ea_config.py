@@ -168,9 +168,9 @@ class StageEaConfig(PretrainedConfig):
             )
 
         self.base_model_name_or_path = base_model_name_or_path
-        self.has_embedding = has_embedding,
-        self.has_draft_model = has_draft_model,
-        self.has_lm_head = has_lm_head,
+        self.has_embedding = has_embedding
+        self.has_draft_model = has_draft_model
+        self.has_lm_head = has_lm_head
         # assert has_embedding == has_lm_head  # since the sharing weights
 
         # assert isinstance(stage, int)

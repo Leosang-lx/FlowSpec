@@ -33,10 +33,11 @@ class StageEaModel(nn.Module):
         super().__init__()
         self.stage_base_model = stage_base_model
         self.config = stage_base_model.config
-        self.hidden_size = stage_base_model.lm_head.weight.shape[-1]
-        self.vocab_size = stage_base_model.lm_head.weight.shape[0]
+        if config.has_lm_head:
+            self.hidden_size = stage_base_model.lm_head.weight.shape[-1]
+            self.vocab_size = stage_base_model.lm_head.weight.shape[0]
         self.base_model_name_or_path = stage_base_model_or_path
-        if config.has_embedding:  # has embedding and lm_head
+        if config.is_first_stage:  # has embedding and lm_head
             self.tokenizer = AutoTokenizer.from_pretrained(self.base_model_name_or_path, use_fast=False)
         else:
             self.tokenizer = None
@@ -80,6 +81,8 @@ class StageEaModel(nn.Module):
         stage_base_model = StageLlamaModelForCausalLM.from_pretrained(
             stage_base_model_path, **kwargs
         )
+        # if model_config.has_lm_head:
+        #     print(f"stage_base_model.lm_head.weight.device={stage_base_model.lm_head.weight.device}")
         # Type = AutoConfig.from_pretrained(stage_base_model_path).architectures[0]
 
         # [MODIFIED] load draft model when config.has_draft_model==True
@@ -116,6 +119,8 @@ class StageEaModel(nn.Module):
             low_memory = False
 
             device = stage_base_model.model.layers[-1].self_attn.q_proj.weight.device
+            # print(f"stage_base_model.lm_head.weight.device={stage_base_model.lm_head.weight.device}")
+            # print(f"device={device}")
             if device != stage_base_model.lm_head.weight.device:
                 ea_layer.diff_device = True
                 if not low_memory:
@@ -127,7 +132,7 @@ class StageEaModel(nn.Module):
                 ea_layer.diff_device = False
             ea_layer.load_state_dict(ea_layer_state_dict, strict=True)
             ea_layer.to(stage_base_model.dtype).to(device)
-
+            # print(f"ea_layer.embed_tokens.weight.device={ea_layer.embed_tokens.weight.device}")
         else:
             ea_layer = None
 
@@ -144,7 +149,8 @@ class StageEaModel(nn.Module):
         )
 
         if total_token == -1:
-            device = stage_model.base_model.model.layers[0].self_attn.q_proj.weight.device
+            raise NotImplementedError("total_token == -1 is not implemented")
+            device = stage_model.stage_base_model.model.layers[0].self_attn.q_proj.weight.device
             cans = [40, 48, 50, 56, 60]
             x = [1, 1.05, 1.07, 1.1, 1.13]
             times = []
@@ -157,7 +163,8 @@ class StageEaModel(nn.Module):
                 for _ in range(20):  # warm up
                     torch.cuda.synchronize()
                     with torch.no_grad():
-                        outputs = stage_model.base_model(input_ids)
+                        # TODO: set the pipeline frame here
+                        outputs = stage_model.stage_base_model(input_ids)
                     torch.cuda.synchronize()
                 torch.cuda.synchronize()
                 end_time = time.time()
@@ -172,23 +179,34 @@ class StageEaModel(nn.Module):
     def forward(
             self,
             input_ids=None,
+            inputs_embeds=None,
             attention_mask=None,
             past_key_values=None,
             output_orig=False,
             position_ids=None,
-    ):
-        outputs = self.stage_base_model.model(
+    ):  
+            
+        if self.is_first_stage:
+            outputs = self.stage_base_model.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
             past_key_values=past_key_values,
-            position_ids=position_ids,
-        )
+            position_ids=position_ids
+            )
+        else:
+            outputs = self.stage_base_model.model(
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask,
+                past_key_values=past_key_values
+            )
+            
         hidden_states = outputs[0]
-        if self.config.is_last_stage and output_orig:
+        
+        if self.is_last_stage and output_orig:
             orig = self.stage_base_model.lm_head(hidden_states)
             return outputs, orig, hidden_states
         else:
-            return outputs, hidden_states
+            return outputs, hidden_states   
 
     @torch.no_grad()  # collaborative function
     def eagenerate_pipeline(
@@ -204,9 +222,10 @@ class StageEaModel(nn.Module):
     ):
         if is_llama3:
             stop_token_id = self.tokenizer.convert_tokens_to_ids("<|eot_id|>")
-
-        # [MODIFIED]: only stage1 has the ea_layer and input_ids
-        if temperature > 1e-5 and self.config.is_last_stage:
+        if self.is_first_stage:
+            max_length=max_length-self.ea_layer.total_tokens-10
+        # [MODIFIED]: only first stage and last stage has the ea_layer, embedding, lm_head and input_ids
+        if temperature > 1e-5 and (self.is_first_stage or self.is_last_stage):
             logits_processor = prepare_logits_processor(temperature=temperature, top_p=top_p, top_k=top_k)
         else:
             logits_processor = None
@@ -223,68 +242,104 @@ class StageEaModel(nn.Module):
                 past_key_values,
                 past_key_values_data,
                 current_length_data,
-            ) = initialize_past_key_values(self.base_model)  # todo: init cache with split layer_num
+            ) = initialize_past_key_values(self.stage_base_model)  # todo: init cache with split layer_num
             self.past_key_values = past_key_values
             self.past_key_values_data = past_key_values_data
             self.current_length_data = current_length_data
-
+        
+        # to determine the stop of the pipeline
+        should_stop = torch.tensor(0, dtype=torch.int32, device=self.stage_base_model.device)
+        
+        # print(f"stage {self.stage} barrier")
+        # dist.barrier()
+        
         if self.is_first_stage:
             max_length = max_length - self.ea_layer.total_tokens - 10
             assert input_ids.shape[0] == 1, "Only support batch size 1 for now!!"
             # Avoid modifying the input_ids in-place
-            padding = (torch.zeros(1, 1, dtype=torch.long) - 1).to(input_ids.device)
+            # padding = (torch.zeros(1, 1, dtype=torch.long) - 1).to(input_ids.device)
             input_ids = input_ids.clone()
             self.ea_layer.reset_kv()
 
             input_len = input_ids.shape[1]
             reset_tree_mode(self)
             # make a draft token tree
-            # todo: pipelined prefill of base model
-            draft_tokens, retrieve_indices, tree_mask, tree_position_ids, logits, hidden_state, sample_token = initialize_tree(
-                input_ids, self, past_key_values, logits_processor
+            # print(f"rank={self.stage}, self.ea_layer.embed_tokens.weight.device={self.ea_layer.embed_tokens.weight.device}")
+            draft_tokens, retrieve_indices, tree_mask, tree_position_ids, logits, hidden_state, sample_token = initialize_tree_pipeline(
+                self, past_key_values, logits_processor, input_ids
             )
+            retrieve_indices = retrieve_indices.to(self.stage_base_model.device)
             # split the tree for pipeline
-            seqs_split, tree_pos_ids_split, lens_split = tree_partition_pipeline(
+            seqs_split, tree_pos_ids_split, tree_mask_split, lens_split = tree_partition_pipeline(
                 draft_tokens,
                 tree_position_ids,
+                tree_mask, 
                 self.total_stage
             )
             # Tuple(subtree1=(draft_tokens, tree_position_ids, tree_attention_mask, retrieve_indices), ...)
             new_token = 0
-
+        else:
+            initialize_tree_pipeline(self, past_key_values)
+        
+        # print(f"stage {self.stage} barrier")
+        # dist.barrier()
         for idx in range(max_length):
-            if self.config.is_first_stage:
-                # send mask to all stages
-                mask_shape = torch.tensor(tree_mask.shape, dtype=torch.int32)
-                self.base_model.model.tree_mask = tree_mask
-                dist.broadcast(mask_shape, src=0)
-                send_mask = dist.broadcast(tree_mask, src=0, async_op=True)
-
-            else:
-                # todo: maybe end the iterations in here for other stages?
-                mask_shape = torch.zeros(4, dtype=torch.int32)  # shape like (1, 1, seq_len, seq_len)
-                dist.broadcast(mask_shape, src=0)
-                tree_mask = torch.zeros(mask_shape, dtype=torch.float64)
-                dist.broadcast(tree_mask, src=0)
-
+            # if self.is_first_stage:
+            #     # send mask to all stages
+            #     mask_shape = torch.tensor(tree_mask.shape, dtype=torch.int32)
+            #     self.base_model.model.tree_mask = tree_mask
+            #     dist.broadcast(mask_shape, src=0)
+            #     dist.broadcast(tree_mask, src=0)
+            
+            # else:
+            #     # todo: maybe end the iterations in here for other stages?
+            #     mask_shape = torch.zeros(4, dtype=torch.int32)  # shape like (1, 1, seq_len, seq_len)
+            #     dist.broadcast(mask_shape, src=0)
+            #     tree_mask = torch.zeros(mask_shape, dtype=torch.float64)
+            #     dist.broadcast(tree_mask, src=0)
+            
             # [tree_decoding]
-            self.stage_base_model.tree_mask = tree_mask
-            if self.config.is_first_stage:
+            
+            if self.is_first_stage:
+                # config tree mask for each stage in stage_tree_decoding()
+                # self.stage_base_model.model.tree_mask = tree_mask
                 tree_decoding_params = (
-                self, past_key_values, retrieve_indices, seqs_split, tree_pos_ids_split, lens_split, input_ids)
+                self, past_key_values, retrieve_indices, seqs_split, tree_pos_ids_split, lens_split, input_ids, tree_mask_split)
             else:
                 tree_decoding_params = (self, past_key_values)
 
             outputs = stage_tree_decoding(*tree_decoding_params)
 
-            # [evaluate_posterior]
+            # print(f"stage {self.stage} barrier waiting for tree decoding")
+            # dist.barrier()
             if self.is_first_stage:
+                send(draft_tokens, dst=self.total_stage-1)
+                send(retrieve_indices, dst=self.total_stage-1)
+            # [evaluate_posterior]
+            if self.is_last_stage:
+                draft_tokens = recv(src=0, data_type=torch.int64, shape_length=2).to(self.stage_base_model.device)
+                retrieve_indices = recv(src=0, data_type=torch.int64, shape_length=2).to(self.stage_base_model.device)
+                
+                padding = (torch.zeros(1, 1, dtype=torch.long) - 1).to(self.stage_base_model.device)
                 draft_tokens = torch.cat((draft_tokens, padding), dim=1)
                 candidates = draft_tokens[0, retrieve_indices]
                 logits, hidden_state = outputs  # get the outputs of tree decoding
                 best_candidate, accept_length, sample_p = evaluate_posterior(
                     logits, candidates, logits_processor
                 )
+                # should be optimized
+                send(hidden_state, dst=0)
+                send(best_candidate, dst=0)
+                accept_length = torch.tensor(accept_length, dtype=torch.int64)
+                send(accept_length, dst=0)
+                send(sample_p, dst=0)
+                
+            if self.is_first_stage:
+                hidden_state = recv(src=self.total_stage-1, data_type=torch.float16, shape_length=3).to(self.stage_base_model.device)
+                # should be optimized
+                best_candidate = recv(src=self.total_stage-1, data_type=torch.int64, shape_length=0).to(self.stage_base_model.device)
+                accept_length = recv(src=self.total_stage-1, data_type=torch.int64, shape_length=0).to(self.stage_base_model.device)
+                sample_p = recv(src=self.total_stage-1, data_type=torch.float16, shape_length=1).to(self.stage_base_model.device)
 
             # [update_inference_inputs]
             """
@@ -295,7 +350,10 @@ class StageEaModel(nn.Module):
             NEED
             
             """
+            # print(f"stage {self.stage} barrier waiting for update_inference_inputs")
+            # dist.barrier()
             if self.is_first_stage:
+                candidates = draft_tokens[0, retrieve_indices]
                 update_inputs_params = (
                     self,
                     past_key_values_data,
@@ -311,25 +369,33 @@ class StageEaModel(nn.Module):
                     sample_p,
                 )
             else:
-                update_inputs_params = (self, past_key_values_data, current_length_data, logits_processor)
+                update_inputs_params = (self, past_key_values_data, current_length_data)
 
             outputs = update_stage_inference_inputs(*update_inputs_params)
+            
+            # print(f"stage {self.stage} barrier waiting for check stop")
+            # dist.barrier()
             if self.is_first_stage:
                 input_ids, draft_tokens, retrieve_indices, tree_mask, tree_position_ids, new_token, hidden_state, sample_token = outputs
 
-                # todo: how to stop the iterations for all stages
-
                 if input_ids is not None and self.tokenizer is not None:
-                    if is_llama3:
-                        if stop_token_id in input_ids[0, input_len:].tolist():
-                            break
-
-                    if self.tokenizer.eos_token_id in input_ids[0, input_len:].tolist():
+                    if is_llama3 and stop_token_id in input_ids[0, input_len:].tolist():
+                        should_stop = torch.tensor(1, dtype=torch.int32, device=self.stage_base_model.device)
+                    elif self.tokenizer.eos_token_id in input_ids[0, input_len:].tolist():
+                        should_stop = torch.tensor(1, dtype=torch.int32, device=self.stage_base_model.device)
+                    elif new_token > max_new_tokens:
+                        should_stop = torch.tensor(1, dtype=torch.int32, device=self.stage_base_model.device)
+                    elif input_ids.shape[1] > max_length:
+                        should_stop = torch.tensor(1, dtype=torch.int32, device=self.stage_base_model.device)
+                    
+                    dist.broadcast(should_stop, src=0)
+                    if should_stop.item() == 1:
                         break
-                    if new_token > max_new_tokens:
-                        break
-                    if input_ids.shape[1] > max_length:
-                        break
+            else:
+                dist.broadcast(should_stop, src=0)
+                if should_stop.item():
+                    break
+        if self.is_first_stage:
             if not log:
                 return input_ids
             else:

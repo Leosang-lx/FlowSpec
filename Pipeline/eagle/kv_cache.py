@@ -29,10 +29,10 @@ class KVCache:
     def shape(self):
         """Return the shape of the data tensor with updated length."""
         return (
-            self.data.shape[0],
-            self.data.shape[1],
-            self.current_length.item(),
-            self.data.shape[3],
+            self.data.shape[0],  # batch_size
+            self.data.shape[1],  # num_key_value_heads
+            self.current_length.item(),  # current sequence length
+            self.data.shape[3],  # head_dim (hidden_size // num_attention_heads)
         )
 
     def copy(self, indices: torch.Tensor, prev_length: int, dim: int = 2):
@@ -89,11 +89,13 @@ def initialize_past_key_values(model):
     # Initializing a tensor to store past keys and values for all layers
 
     devices=[]
-    for i in range(config.num_hidden_layers):
-        try:
-            device = model.model.layers[i].self_attn.q_proj.weight.device
-        except:
-            device=model.layers[i].self_attn.q_proj.weight.device
+    for i in range(config.num_stage_hidden_layers):
+        # try:
+        #     device = model.model.layers[i].self_attn.q_proj.weight.device
+        # except:
+        #     device=model.layers[i].self_attn.q_proj.weight.device
+        device = model.model.layers[i].self_attn.q_proj.weight.device
+        # except:
         devices.append(device)
     past_key_values_data_list=[]
     startnum=0
@@ -133,7 +135,7 @@ def initialize_past_key_values(model):
 
     bias=0
     start_data_m=devices[0].index
-    for i in range(config.num_hidden_layers):
+    for i in range(config.num_stage_hidden_layers):
         data_m=devices[i].index
         if data_m!=start_data_m:
             bias=0

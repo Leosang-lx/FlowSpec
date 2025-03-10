@@ -485,8 +485,8 @@ class Model(nn.Module):
                     index_json = json.loads(f.read())
                     emb_path = index_json["weight_map"]["model.embed_tokens.weight"]
                 with safe_open(os.path.join(path, emb_path),
-                               framework="pt",
-                               device="cpu") as f:
+                               framework="pt",) as f:
+                            #    device="cpu") as f:
                     tensor_slice = f.get_slice("model.embed_tokens.weight")
                     vocab_size, hidden_dim = tensor_slice.get_shape()
                     tensor = tensor_slice[:, :hidden_dim].float()
@@ -697,9 +697,10 @@ class Model(nn.Module):
         ss_token.append(topk_index)
         input_ids = topk_index
         input_hidden = last_hidden[None].repeat(1, top_k, 1)
+        self.tree_mask_init = self.tree_mask_init.to(self.embed_tokens.weight.device)
         tree_mask = self.tree_mask_init
         topk_cs_index = torch.arange(top_k, device=self.embed_tokens.weight.device)
-
+        # print(f"topk_cs_index.device={topk_cs_index.device}")
         # 4
         for i in range(depth):
             self.tree_mask = tree_mask
@@ -729,6 +730,7 @@ class Model(nn.Module):
             scores = topk_cs_p
 
             out_ids = topk_cs_index // top_k
+            # print(f"out_ids.device={out_ids.device}")
             input_hidden = out_hidden[:, out_ids]
             # with Timer("2index"):
             #     in_ids = topk_cs_index % top_k
@@ -739,6 +741,8 @@ class Model(nn.Module):
 
             ss_token.append(topk_index)
             scores_list.append(cu_scores)
+            # print(f"tree_mask.device={tree_mask.device}, self.tree_mask_init.device={self.tree_mask_init.device}")
+            # print(f"out_ids.device={out_ids.device}, input_ids.device={input_ids.device}")
             tree_mask = torch.cat((tree_mask[:, :, out_ids], self.tree_mask_init), dim=3)
 
             # if self.threshold < 0 and cu_scores.max() < self.threshold:
