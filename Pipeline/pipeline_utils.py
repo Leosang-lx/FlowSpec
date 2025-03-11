@@ -139,6 +139,22 @@ def split_sequence_close_equal_len(sequence: torch.Tensor, split_cnt: Union[int,
     return split_seqs, split_lens
 
 
+# [ADD] logits processor
+def process_logits(prob, logits_processor=None):
+    if logits_processor is not None:
+        token = torch.multinomial(prob, 1)
+        token = token[None]
+    else:
+        token = torch.argmax(prob)
+        token = token[None, None]
+
+    return token
+
+
+# [ADD] for tensor communication
+# def send_tensor
+
+
 # [ADD] for pipeline
 # collaborative function
 def pipeline_prefill(
@@ -508,6 +524,7 @@ def pruning(draft_tokens, retrieve_indices, best_candidate, accept_len, new_toke
     :param accept_len:
     :return:
     """
+    # todo: what happens when accept_len==0?
     accepted_indices = retrieve_indices[best_candidate, :accept_len]
     # judge whether the global leaf node is reached
     if accept_len == retrieve_indices.size(-1) or retrieve_indices[best_candidate, accept_len + 1] == -1:
@@ -542,26 +559,82 @@ def pruning(draft_tokens, retrieve_indices, best_candidate, accept_len, new_toke
     return transformed_ri, left_indices, left_ri_cum_depths
 
 
-def token_pruning(past_key_values, tree_mask, hidden_state, left_indices, global_accept_len, accept_len):
-    draft_kv_cache = past_key_values[..., global_accept_len:, :]
-    cur_kv_len = past_key_values[0][0].size(-2)
-    cur_hs_len = hidden_state.size(-2)
+def stage1_pruning(left_indices, accept_len, draft_tokens, retrieve_indices, tree_pos_ids):
+    left_draft_indices = left_indices[accept_len:]
+    # prune draft_tokens
+    left_draft_tokens = draft_tokens[left_draft_indices]
+    prefix_indices = left_indices[:accept_len+1]  # including the new token
+    prefix_tokens = draft_tokens[prefix_indices]  # [accepted tokens + new token]
 
-    left_indices_in_cache = left_indices[left_indices < cur_kv_len]
-    left_kv_cache = draft_kv_cache[..., left_indices_in_cache, :]
+    # prune tree_pos_ids
+    left_tree_pos_ids = tree_pos_ids[left_draft_indices]
+    # prune retrieve_indices
+    matched_candidates = find_prefix_match(retrieve_indices, prefix_indices)
+    left_retrieve_indices = retrieve_indices[matched_candidates, :]
+    max_depth = (left_retrieve_indices != -1).sum(dim=1).max().item()
+    left_retrieve_indices = left_retrieve_indices[:, :max_depth]  # drop the all -1 layers
+    left_indices_from_zero = torch.arange(left_indices.size(-1), dtype=torch.long)
+    transformed_ri = map_retrieve_indices(left_retrieve_indices, left_indices, left_indices_from_zero)
+
+    return left_draft_tokens, left_tree_pos_ids, transformed_ri, prefix_tokens[:, :-1], prefix_tokens[:, -1]
+
+
+def token_pruning(
+        past_key_values_data_list,
+        current_length_data,
+        tree_mask,
+        hidden_state,
+        left_indices,
+        global_accept_len,
+        accept_len
+):
+    """
+    prune the tokens related ones: kv-cache, hidden_state, tree_mask
+    """
+    cur_kv_len = current_length_data[0].item()
+    cur_hs_len = hidden_state.size(-2).item()
+    cache_device = past_key_values_data_list[0][0].device
+
+    # prune cache
+    left_indices_in_cache = (left_indices[left_indices < cur_kv_len]).to(cache_device)
     # 对应复制过去，并且修改
-    global_accept_len += accept_len
+    left_draft_size = left_indices.size(-1).to(past_key_values_data_list[0][0].device)
+    for past_key_values_data in past_key_values_data_list:
+        left_kv_cache = past_key_values_data[..., left_indices_in_cache+global_accept_len, :]
+        cache_dst = past_key_values_data[..., global_accept_len:global_accept_len+left_draft_size, :]
+        cache_dst.copy_(left_kv_cache, non_blocking=True)
+    current_length_data.fill_(global_accept_len, left_draft_size)
+
+    # prune hidden_state
+    # here the tokens are related to both past_key_values and hidden_state(done?
+    hs_indices_start = cur_kv_len - cur_hs_len - global_accept_len
+    left_indices_in_hs = left_indices_in_cache[left_indices_in_cache >= hs_indices_start]
+    hidden_state = hidden_state[..., left_indices_in_hs, :]
+
+    # prune tree_mask
+    tree_mask_left_indices = left_indices[accept_len:]
+    left_tree_mask = tree_mask[..., tree_mask_left_indices, tree_mask_left_indices]
+
+    return past_key_values_data_list, current_length_data, hidden_state, left_tree_mask
 
 
-
-
-# verification: use evaluate_posterior() from EAGLE
-# collaborative function
-def update_token_tree():
-    """
-    update the token tree across all pipeline stages
-    :return:
-    """
+def grow_token_tree(
+        stage_model,
+        input_ids_for_draft,
+        left_hidden_state,
+        left_draft_tokens,
+        left_retrieve_indices,
+        left_tree_mask,
+        left_tree_pos_ids,
+        accept_len,
+        logits_processor
+):
+    draft_tokens, retrieve_indices, tree_mask, tree_position_ids = stage_model.ea_layer.topK_genrate(
+        left_hidden_state,
+        input_ids=input_ids_for_draft,
+        head=stage_model.base_model.lm_head,
+        logits_processor=logits_processor
+    )
 
 
 # EAGLE
