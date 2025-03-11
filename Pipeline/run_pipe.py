@@ -31,7 +31,7 @@ def main(args):
             ea_model_path=EAGLE_model_path,
             torch_dtype=torch.float16,
             # low_cpu_mem_usage=True,
-            # device_map=f"auto",
+            device_map=f"cuda:{device}",
             # # total_token=-1,
             total_token=16,
             depth=2,
@@ -41,7 +41,7 @@ def main(args):
             stage_base_model_path=base_model_path,
             torch_dtype=torch.float16,
             # low_cpu_mem_usage=True,
-            # device_map=f"auto",
+            device_map=f"cuda:{device}",
             total_token=16,
             depth=2,
         )

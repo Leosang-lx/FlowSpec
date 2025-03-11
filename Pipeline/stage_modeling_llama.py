@@ -167,9 +167,7 @@ class StageLlamaModel(LlamaPreTrainedModel):
 
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
-            if self.a == 0:
-                print(f"inputs_embeds: {inputs_embeds}")
-                self.a = 1
+            
         # embed positions
         if attention_mask is None:
             attention_mask = torch.ones(
