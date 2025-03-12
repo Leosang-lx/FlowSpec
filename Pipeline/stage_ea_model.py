@@ -115,7 +115,7 @@ class StageEaModel(nn.Module):
                 bias = True
 
             ea_layer = Model(ea_config, bias=bias, total_tokens=total_token, depth=depth, top_k=top_k,
-                                threshold=threshold)
+                             threshold=threshold)
             low_memory = False
 
             device = stage_base_model.model.layers[-1].self_attn.q_proj.weight.device
@@ -221,6 +221,9 @@ class StageEaModel(nn.Module):
             log=False,
             is_llama3=False,
     ):
+        """
+        pipelined tree decoding
+        """
         if is_llama3:
             stop_token_id = self.tokenizer.convert_tokens_to_ids("<|eot_id|>")
         if self.is_first_stage:
@@ -425,3 +428,482 @@ class StageEaModel(nn.Module):
                 return input_ids
             else:
                 return input_ids, new_token, idx
+
+    @torch.no_grad()  # collaborative function
+    def eagenerate_pruned_pipeline(
+            self,
+            input_ids=None,
+            temperature=0.0,
+            top_p=0.0,
+            top_k=0.0,
+            max_new_tokens=512,
+            max_length=2048,
+            log=False,
+            is_llama3=False,
+    ):
+        if is_llama3:
+            stop_token_id = self.tokenizer.convert_tokens_to_ids("<|eot_id|>")
+
+        # [MODIFIED]: only stage1 has the ea_layer and input_ids
+        if temperature > 1e-5 and self.config.is_last_stage:
+            logits_processor = prepare_logits_processor(temperature=temperature, top_p=top_p, top_k=top_k)
+        else:
+            logits_processor = None
+
+        # Initialize the past key and value states
+        if hasattr(self, "past_key_values"):
+            past_key_values = self.past_key_values
+            past_key_values_data = self.past_key_values_data
+            current_length_data = self.current_length_data
+            # Reset the past key and value states
+            current_length_data.zero_()
+        else:
+            (
+                past_key_values,
+                past_key_values_data,
+                current_length_data,
+            ) = initialize_past_key_values(self.base_model)  # todo: init cache with split layer_num
+            self.past_key_values = past_key_values
+            self.past_key_values_data = past_key_values_data
+            self.current_length_data = current_length_data
+
+        # [initialization]
+        config = self.config
+        if config.is_first_stage or config.is_last_stage:
+            padding = torch.zeros(1, 1, dtype=torch.long) - 1  # padding -1 to the draft token sequence
+
+        # [initialization] model
+        if config.is_first_stage:
+            max_length = max_length - self.ea_layer.total_tokens - 10
+            assert input_ids is not None, '"input_ids" cannot be None for stage1'
+            assert input_ids.shape[0] == 1, "Only support batch size 1 for now!!"
+            # Avoiding modifying the input_ids in-place
+            padding = padding.to(input_ids.device)
+            input_ids = input_ids.clone()
+            self.ea_layer.reset_kv()
+
+            input_len = input_ids.shape[1]
+            reset_tree_mode(self)
+
+        # [initialization] prefill of base model
+        if config.is_first_stage:
+            assert input_ids is not None
+        output = prefill_pipeline(
+            self, input_ids=input_ids, stage_past_key_values=past_key_values
+        )
+        if config.is_first_stage:
+            orig, hidden_state, past_key_values = output
+        else:
+            past_key_values = output
+
+        # get the global accept length (for later pruning)
+        global_accept_len = past_key_values[0][0].size(-2)
+
+        for idx_spec in range(max_length):
+
+            if config.is_first_stage:
+                token = process_logits(orig[:, -1], logits_processor)
+                input_ids_ea = torch.cat((input_ids, token.to(input_ids.device)), dim=1)
+
+                # make a draft token tree based on the hidden_state and input_ids
+                draft_tokens, retrieve_indices, tree_mask, tree_position_ids = self.ea_layer.topK_genrate(
+                    hidden_state, input_ids_ea, self.base_model.lm_head,
+                    logits_processor)  # todo: stage_model1 has no lm_head
+
+                # split the tree
+                draft_tokens_split, lens_split, tree_position_ids_split, subseq_ri_cum_depths = token_tree_partition(
+                    draft_tokens, retrieve_indices, tree_position_ids, config.total_stage)
+
+            else:
+                lens_split = torch.zeros(config.total_stage, dtype=torch.long)
+            dist.broadcast(lens_split, src=0)
+            # n_subseq = lens_split.size(-1)  # todo: may unequal to config.total_stage
+            draft_len = torch.sum(lens_split, dim=0)
+
+            # tree synchronization
+            if not config.is_first_stage:
+                mask_shape = draft_len.repeat(0)
+                tree_mask = torch.zeros(mask_shape, dtype=torch.long)[None, None]
+            # send tree_mask to all stages
+            dist.broadcast(tree_mask, src=0)
+            self.stage_base_model.model.tree_mask = tree_mask
+            # send draft token sequence and retrieve_indices
+            if config.is_first_stage:
+                dist.send(draft_tokens, dst=config.last_rank)
+                ri_shape = torch.tensor(retrieve_indices.shape, dtype=torch.long)
+
+                dist.send(ri_shape, dst=config.last_rank)
+                dist.send(retrieve_indices, dst=config.last_rank)
+                dist.send(subseq_ri_cum_depths, dst=config.last_rank)
+            if config.is_last_stage:
+                # draft_tokens
+                draft_tokens = torch.zeros(1, draft_len, dtype=torch.long)
+                dist.recv(draft_tokens, src=0)
+                # retrieve_indices
+                ri_shape = torch.zeros(2, dtype=torch.long)
+                dist.recv(ri_shape, src=0)
+                retrieve_indices = torch.zeros(ri_shape, dtype=torch.long)
+                dist.recv(retrieve_indices)
+                subseq_ri_cum_depths = torch.zeros(ri_shape[0].item(), config.total_stage, dtype=torch.long)
+
+            # fill the pipeline stages
+            # - stage1 do not need to recv anything in this step
+            cum_lens = torch.cumsum(lens_split)
+            isend_task = None
+            for i in range(config.total_stage - config.stage):
+                if config.is_first_stage:
+                    subseq_ids = draft_tokens_split[i]
+                    subseq_pos_ids = tree_position_ids_split[i]
+                    # cum_len += subseq_ids.size(-1)
+
+                    sub_hidden_state, past_key_values = self.stage_base_model(
+                        input_ids=subseq_ids,
+                        past_key_values=past_key_values,
+                        position_ids=subseq_pos_ids,
+                        tree_mask_range=cum_lens[i]
+                    )
+                else:
+                    last_hidden_state = torch.zeros((1, lens_split[i], config.hidden_size),
+                                                    dtype=torch.float16)  # todo: d_model?
+                    dist.recv(last_hidden_state, src=config.last_rank)
+                    sub_hidden_state, past_key_values = self.stage_base_model.model(
+                        last_hidden_state=last_hidden_state,
+                        past_key_values=past_key_values,
+                        tree_mask_range=cum_lens[i]
+                    )
+                if isend_task is not None:
+                    isend_task.wait()
+                # keep the last hidden_state after all pipeline stages are filled
+                if i < config.total_stage - config.stage - 1:
+                    isend_task = dist.isend(sub_hidden_state, dst=config.next_rank)
+
+            if self.is_first_stage:
+                accept_hidden_states = []
+
+            # continuous verification and pruning
+            # 从stage4计算完他的hidden_state开始inner loop
+            for i in range(config.total_stage):
+                # pruning
+                if config.is_last_stage:
+                    # [verification]
+                    subtree_logits = self.stage_base_model.lm_head(sub_hidden_state)
+                    draft_tokens = torch.cat((draft_tokens, padding), dim=1)
+                    sub_retrieve_indices = get_subtree_retrieve_indices(retrieve_indices, subseq_ri_cum_depths[0])
+                    candidates = draft_tokens[0, sub_retrieve_indices]
+                    best_candidate, accept_length, sample_p = evaluate_posterior(
+                        subtree_logits, candidates, logits_processor
+                    )
+                    global_accept_len += accept_length
+                    new_token = process_logits(sample_p, logits_processor)
+
+                    # [local pruning]
+                    output = pruning(draft_tokens, retrieve_indices, best_candidate, accept_length, new_token,
+                                     subseq_ri_cum_depths)
+                    if output is None:  # start new speculation round
+                        dist.broadcast(torch.zeros(1, dtype=torch.long))
+                        break
+
+                    retrieve_indices, left_indices, subseq_ri_cum_depths = output
+                    left_hs_indices = left_indices[left_indices < sub_hidden_state.size(-2)]
+                    left_hidden_state = sub_hidden_state[..., left_hs_indices, :]
+                    dist.broadcast(left_indices.shape, src=config.stage)
+
+                    pruning_info = torch.cat((accept_length, left_indices), dim=0).contiguous()
+                    dist.broadcast(pruning_info, src=config.stage)  # maybe use dist.send() instead
+                    dist.send(left_hidden_state, dst=config.next_rank)
+
+                else:
+                    # if continue
+                    pruning_info_shape = torch.zeros(1, dtype=torch.long)
+                    dist.broadcast(pruning_info_shape, src=config.total_stage - 1)
+                    if pruning_info_shape == 0:  # 0 means new round of speculative decoding
+                        break
+                    pruning_info = torch.zeros(pruning_info_shape, dtype=torch.long)
+                    dist.broadcast(pruning_info, dsrc=config.total_stage - 1)
+                    accept_length = pruning_info[0].item()
+                    left_indices = pruning_info[1:]
+                    global_accept_len += accept_length
+
+                    if config.is_first_stage:
+                        left_hidden_state = torch.zeros(1, accept_length, config.d_model, dtype=torch.float16)
+                        irecv_task = dist.irecv(left_hidden_state, src=config.last_rank)
+                        left_draft_tokens, left_tree_pos_ids, transformed_ri, accepted_tokens, new_token = stage1_pruning(
+                            left_indices, accept_length, draft_tokens, retrieve_indices, tree_position_ids
+                        )
+                        input_ids = torch.cat((input_ids, accepted_tokens), dim=-1)
+                        irecv_task.wait()
+                        accept_hidden_states.append(left_hidden_state)
+
+                # [global pruning] prune the tokens (kv_cache and hidden_state)
+                # - according to the global_accept_len and the hidden_state_len
+                past_key_values_data, current_length_data, sub_hidden_state, tree_mask = token_pruning(
+                    past_key_values_data,
+                    current_length_data,
+                    self.stage_base_model.model.tree_mask,
+                    sub_hidden_state,
+                    left_indices,
+                    global_accept_len,
+                    accept_length
+                )
+                # 这么写总感觉哪里怪怪的
+                if i < config.total_stage:
+                    if isend_task is not None:
+                        isend_task.wait()
+                    isend_task = dist.isend(sub_hidden_state, dst=config.next_rank)
+                    dist.recv(last_hidden_state, src=config.last_rank)
+                    sub_hidden_state, past_key_values = self.stage_base_model.model(
+                        last_hidden_state=last_hidden_state,
+                        past_key_values=past_key_values,
+                        tree_mask_range=cum_lens[i]
+                    )
+
+            if config.is_first_stage:
+                # stop criteria
+                if input_ids is not None and self.tokenizer is not None:
+                    if is_llama3 and stop_token_id in input_ids[0, input_len:].tolist():
+                        should_stop = torch.tensor(1, dtype=torch.int32, device=self.stage_base_model.device)
+                    elif self.tokenizer.eos_token_id in input_ids[0, input_len:].tolist():
+                        should_stop = torch.tensor(1, dtype=torch.int32, device=self.stage_base_model.device)
+                    elif new_token > max_new_tokens:
+                        should_stop = torch.tensor(1, dtype=torch.int32, device=self.stage_base_model.device)
+                    elif input_ids.shape[1] > max_length:
+                        should_stop = torch.tensor(1, dtype=torch.int32, device=self.stage_base_model.device)
+
+                    dist.broadcast(should_stop, src=0)
+                    if should_stop.item() == 1:
+                        break
+                else:
+                    dist.broadcast(should_stop, src=0)
+                    if should_stop.item():
+                        break
+                hidden_state = torch.cat(accept_hidden_states, dim=-2)  # for draft generation next round
+        if self.is_first_stage:
+            if not log:
+                return input_ids
+            else:
+                return input_ids, new_token, idx_spec
+
+    @torch.no_grad()  # collaborative function
+    def eagenerate_continuous(
+            self,
+            input_ids=None,
+            temperature=0.0,
+            top_p=0.0,
+            top_k=0.0,
+            max_new_tokens=512,
+            max_length=2048,
+            log=False,
+            is_llama3=False,
+    ):
+        if is_llama3:
+            stop_token_id = self.tokenizer.convert_tokens_to_ids("<|eot_id|>")
+
+        # [MODIFIED]: only stage1 has the ea_layer and input_ids
+        if temperature > 1e-5 and self.config.is_last_stage:
+            logits_processor = prepare_logits_processor(temperature=temperature, top_p=top_p, top_k=top_k)
+        else:
+            logits_processor = None
+
+        # initialize hte past key and value states
+        if hasattr(self, "past_key_values"):
+            past_key_values = self.past_key_values
+            past_key_values_data = self.past_key_values_data
+            current_length_data = self.current_length_data
+            # Reset the past key and value states
+            current_length_data.zero_()
+        else:
+            (
+                past_key_values,
+                past_key_values_data,
+                current_length_data,
+            ) = initialize_past_key_values(self.base_model)  # todo: init cache with split layer_num
+            self.past_key_values = past_key_values
+            self.past_key_values_data = past_key_values_data
+            self.current_length_data = current_length_data
+
+        # [initialization]
+        config = self.config
+        if config.is_first_stage or config.is_last_stage:
+            padding = torch.zeros(1, 1, dtype=torch.long) - 1  # padding -1 to the draft token sequence
+
+        # [initialization] model
+        if config.is_first_stage:
+            max_length = max_length - self.ea_layer.total_tokens - 10
+            assert input_ids is not None, '"input_ids" cannot be None for stage1'
+            assert input_ids.shape[0] == 1, "Only support batch size 1 for now!!"
+            # Avoiding modifying the input_ids in-place
+            padding = padding.to(input_ids.device)
+            input_ids = input_ids.clone()
+            self.ea_layer.reset_kv()
+
+            input_len = input_ids.shape[1]
+            reset_tree_mode(self)
+
+        # [initialization] prefill of base model
+        if config.is_first_stage:
+            assert input_ids is not None
+        output = prefill_pipeline(
+            self, input_ids=input_ids, stage_past_key_values=past_key_values
+        )
+        if config.is_first_stage:
+            orig, hidden_state, past_key_values = output
+        else:
+            past_key_values = output
+
+        global_accept_len = past_key_values[0][0].size(-2)
+
+        # [continuous speculation] outer loop: start from a new draft tree
+        for idx_spec in range(max_length):
+
+            if config.is_first_stage:
+                token = process_logits(orig[:, -1], logits_processor)
+                input_ids_ea = torch.cat((input_ids, token.to(input_ids.device)), dim=1)
+
+                # make a draft token tree based on the hidden_state and input_ids
+                draft_tokens, retrieve_indices, tree_mask, tree_position_ids = self.ea_layer.topK_genrate(
+                    hidden_state, input_ids_ea, self.base_model.lm_head,
+                    logits_processor)  # todo: stage_model1 has no lm_head
+
+                # split the tree
+                draft_tokens_split, lens_split, tree_position_ids_split, subseq_ri_cum_depths = token_tree_partition(
+                    draft_tokens, retrieve_indices, tree_position_ids, config.total_stage)
+
+            else:
+                lens_split = torch.zeros(config.total_stage, dtype=torch.long)
+            dist.broadcast(lens_split, src=0)
+
+            draft_len = int(torch.sum(lens_split, dim=0))
+            # tree synchronization
+            if not config.is_first_stage:
+                mask_shape = draft_len.repeat(0)
+                tree_mask = torch.zeros(mask_shape, dtype=torch.long)[None, None]
+            # send tree_mask to all stages
+            dist.broadcast(tree_mask, src=0)
+            self.stage_base_model.model.tree_mask = tree_mask
+            # send draft token sequence and retrieve_indices
+            if config.is_first_stage:
+                dist.send(draft_tokens, dst=config.last_rank)
+                ri_shape = torch.tensor(retrieve_indices.shape, dtype=torch.long)
+
+                dist.send(ri_shape, dst=config.last_rank)
+                dist.send(retrieve_indices, dst=config.last_rank)
+                dist.send(subseq_ri_cum_depths, dst=config.last_rank)
+            if config.is_last_stage:
+                # draft_tokens
+                draft_tokens = torch.zeros(1, draft_len, dtype=torch.long)
+                dist.recv(draft_tokens, src=0)
+                # retrieve_indices
+                ri_shape = torch.zeros(2, dtype=torch.long)
+                dist.recv(ri_shape, src=0)
+                retrieve_indices = torch.zeros(ri_shape, dtype=torch.long)
+                dist.recv(retrieve_indices)
+                subseq_ri_cum_depths = torch.zeros(ri_shape[0].item(), config.total_stage, dtype=torch.long)
+
+            # fill the pipeline stages
+            # - stage1 do not need to recv anything in this step
+            cum_lens = torch.cumsum(lens_split)
+            for i in range(config.total_stage - config.stage):
+                isend_task = None
+                if config.is_first_stage:
+                    subseq_ids = draft_tokens_split[i]
+                    subseq_pos_ids = tree_position_ids_split[i]
+                    # cum_len += subseq_ids.size(-1)
+
+                    # todo: return the past_key_values from the base model
+                    sub_hidden_state, past_key_values = self.stage_base_model(
+                        input_ids=subseq_ids,
+                        past_key_values=past_key_values,
+                        position_ids=subseq_pos_ids,
+                        tree_mask_range=cum_lens[i]
+                    )
+                else:
+                    last_hidden_state = torch.zeros((1, lens_split[i], config.d_model),
+                                                    dtype=torch.float16)  # todo: d_model?
+                    dist.recv(last_hidden_state, src=config.last_rank)
+                    sub_hidden_state, past_key_values = self.stage_base_model.model(
+                        last_hidden_state=last_hidden_state,
+                        past_key_values=past_key_values,
+                        tree_mask_range=cum_lens[i]
+                    )
+                if isend_task is not None:
+                    isend_task.wait()
+                # keep the last hidden_state after all pipeline stages are filled
+                if i != config.total_stage - config.stage:
+                    isend_task = dist.isend(sub_hidden_state, dst=config.next_rank)
+
+            # [continuous pipeline speculation]
+            while True:
+                if config.is_last_stage:
+                    # [verification]
+                    subtree_logits = self.stage_base_model.lm_head(sub_hidden_state)
+                    draft_tokens = torch.cat((draft_tokens, padding), dim=1)
+                    sub_retrieve_indices = get_subtree_retrieve_indices(retrieve_indices, subseq_ri_cum_depths[0])
+                    candidates = draft_tokens[0, sub_retrieve_indices]
+                    best_candidate, accept_length, sample_p = evaluate_posterior(
+                        subtree_logits, candidates, logits_processor
+                    )
+                    token = process_logits(sample_p, logits_processor)
+
+                    # [local pruning]
+                    output = pruning(
+                        draft_tokens, retrieve_indices, best_candidate, accept_length, token, subseq_ri_cum_depths
+                    )
+                    if output is None:  # start new speculation round
+                        pass  # todo: tell all stages to start new round
+                        break
+
+                    retrieve_indices, left_indices, subseq_ri_cum_depths = output
+                    left_hs_indices = left_indices[left_indices < sub_hidden_state.size(-2)]
+                    left_hidden_state = sub_hidden_state[..., left_hs_indices, :]
+                    dist.broadcast(left_indices.shape, src=config.stage)
+                    pruning_info = torch.cat((accept_length, left_indices), dim=0).contiguous()
+                    dist.broadcast(pruning_info, src=config.stage)  # maybe use dist.send() instead
+                    # todo: send the accepted_hidden_state to stage1 for draft generation
+                    dist.send(left_hidden_state, dst=config.next_rank)
+
+                else:
+                    # todo: receive info from the last stage to check whether continue the continuous speculation
+                    # if continue
+                    left_size = torch.zeros(1, dtype=torch.long)
+                    dist.broadcast(left_size, src=config.total_stage - 1)
+                    pruning_info = torch.zeros(left_size + 1, dtype=torch.long)
+                    dist.broadcast(pruning_info, src=config.total_stage - 1)
+                    accept_length = pruning_info[0].item()
+                    left_indices = pruning_info[1:]
+                    if config.is_first_stage:
+                        left_hidden_state = torch.zeros(1, accept_length, config.d_model, dtype=torch.float16)
+                        irecv_task = dist.irecv(left_hidden_state, src=config.last_rank)
+                        left_draft_tokens, left_tree_pos_ids, transformed_ri, accepted_tokens, new_token = stage1_pruning(
+                            left_indices, accept_length, draft_tokens, retrieve_indices, tree_position_ids
+                        )
+                        input_ids = torch.cat((input_ids, accepted_tokens), dim=-1)
+                        irecv_task.wait()
+
+                # [global pruning] prune the tokens (kv_cache and hidden_state)
+                # - according to the global_accept_len and the hidden_state_len
+                past_key_values_data, current_length_data, hidden_state, tree_mask = token_pruning(
+                    past_key_values_data, current_length_data, tree_mask, hidden_state, left_indices, global_accept_len,
+                    accept_length
+                )
+                global_accept_len += accept_length
+
+                if not config.is_last_stage:
+                    if isend_task is not None:
+                        isend_task.wait()
+                    isend_task = dist.isend(hidden_state, dst=config.next_rank)
+                if not config.is_first_stage:
+                    dist.recv(hidden_state, src=config.last_rank)
+                    cum_hs_len = current_length_data[0] + hidden_state.size(-2)
+                    sub_hidden_state, past_key_values = self.stage_base_model.model(
+                        last_hidden_state=last_hidden_state,
+                        past_key_values=past_key_values,
+                        tree_mask_range=cum_hs_len
+                    )
+                else:  # the draft tree expand in the first stage
+                    grow_token_tree(
+                        self,
+                        torch.cat((input_ids, new_token), dim=-1),
+                        left_hidden_state,
+                        left_draft_tokens,
+
+                    )
