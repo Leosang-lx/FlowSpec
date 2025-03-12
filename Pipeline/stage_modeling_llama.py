@@ -30,12 +30,12 @@ class StageLlamaModel(LlamaPreTrainedModel):
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
         self.gradient_checkpointing = False
-        self.a = 0
+        # self.a = 0
         # [modify] is_first_stage and is_last_stage in config is identified by the stage number
         self.config = config
         if config.has_embedding:
             if embed_tokens is not None and isinstance(embed_tokens, nn.Embedding):
-                print(f"embed_tokens: {embed_tokens}")
+                # print(f"embed_tokens: {embed_tokens}")
                 self.embed_tokens = embed_tokens
             else:
                 self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
@@ -231,16 +231,16 @@ class StageLlamaModel(LlamaPreTrainedModel):
                     None,
                 )
             else:
-                if idx == 0:
-                    if self.a == 0 or self.a == 1:
-                        print(f"stage {self.config.stage} hidden_states.shape: {hidden_states.shape}")
-                        print(f"stage {self.config.stage} hidden_states: {hidden_states}")
-                        print(f"stage {self.config.stage} attention_mask={attention_mask}")
-                        print(f"stage {self.config.stage} position_ids={position_ids}")
-                        print(f"stage {self.config.stage} past_key_value={past_key_value}")
-                        print(f"stage {self.config.stage} output_attentions={output_attentions}")
-                        print(f"stage {self.config.stage} use_cache={use_cache}")
-                        self.a += 1
+                # if idx == 0:
+                #     if self.a == 0 or self.a == 1:
+                #         print(f"stage {self.config.stage} hidden_states.shape: {hidden_states.shape}")
+                #         print(f"stage {self.config.stage} hidden_states: {hidden_states}")
+                #         print(f"stage {self.config.stage} attention_mask={attention_mask}")
+                #         print(f"stage {self.config.stage} position_ids={position_ids}")
+                #         print(f"stage {self.config.stage} past_key_value={past_key_value}")
+                #         print(f"stage {self.config.stage} output_attentions={output_attentions}")
+                #         print(f"stage {self.config.stage} use_cache={use_cache}")
+                #         self.a += 1
                 
                 layer_outputs = decoder_layer(
                     hidden_states,

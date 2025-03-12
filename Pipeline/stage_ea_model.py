@@ -362,10 +362,10 @@ class StageEaModel(nn.Module):
                 accept_length = recv(src=self.total_stage-1, data_type=torch.int64, shape_length=0).to(self.stage_base_model.device)
                 sample_p = recv(src=self.total_stage-1, data_type=torch.float16, shape_length=1).to(self.stage_base_model.device)
                 
-                print(f"hidden_state: {hidden_state}")
-                print(f"best_candidate: {best_candidate}")
-                print(f"accept_length: {accept_length}")
-                print(f"sample_p: {sample_p}")
+                # print(f"hidden_state: {hidden_state}")
+                # print(f"best_candidate: {best_candidate}")
+                # print(f"accept_length: {accept_length}")
+                # print(f"sample_p: {sample_p}")
             # [update_inference_inputs]
             """
             OWNED
@@ -413,11 +413,11 @@ class StageEaModel(nn.Module):
                     elif input_ids.shape[1] > max_length:
                         should_stop = torch.tensor(1, dtype=torch.int32, device=self.stage_base_model.device)
                     
-                    dist.broadcast(should_stop, src=0)
+                    broadcast(should_stop, src=0)
                     if should_stop.item() == 1:
                         break
             else:
-                dist.broadcast(should_stop, src=0)
+                should_stop = broadcast(src=0, data_type=torch.int32, shape_length=0)
                 if should_stop.item():
                     break
         if self.is_first_stage:

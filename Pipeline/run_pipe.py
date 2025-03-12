@@ -62,7 +62,7 @@ def main(args):
     if rank == 0:
         input_ids=stage_model.tokenizer([prompt]).input_ids
         input_ids = torch.as_tensor(input_ids).cuda()
-        print(f"input_ids: {input_ids}")
+        # print(f"input_ids: {input_ids}")
         output_ids=stage_model.eagenerate_pipeline(input_ids,temperature=0.5,max_new_tokens=512)
         output=stage_model.tokenizer.decode(output_ids[0])
         print(output)

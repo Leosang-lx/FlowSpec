@@ -183,7 +183,7 @@ def split_sequence_close_equal_len(sequence: torch.Tensor, split_cnt: Union[int,
 #             return hidden_state
 
 def prefill_pipeline(stage_model, stage_past_key_values=None, input_ids = None):
-    print(f"stage_model.stage: {stage_model.stage}, layer_range: {stage_model.stage_base_model.model.config.layer_range}")
+    # print(f"stage_model.stage: {stage_model.stage}, layer_range: {stage_model.stage_base_model.model.config.layer_range}")
     if stage_model.is_first_stage:
         outputs, hidden_states = stage_model(
             input_ids=input_ids,
@@ -217,8 +217,8 @@ def prefill_pipeline(stage_model, stage_past_key_values=None, input_ids = None):
     if stage_model.is_first_stage:
         orig = recv(src=stage_model.total_stage - 1, data_type=torch.float16, shape_length=3).to(stage_model.stage_base_model.device)
         hidden_states = recv(src=stage_model.total_stage - 1, data_type=torch.float16, shape_length=3).to(stage_model.stage_base_model.device)
-        print(f"orig: {orig}")
-        print(f"hidden_states: {hidden_states}")
+        # print(f"orig: {orig}")
+        # print(f"hidden_states: {hidden_states}")
         return orig, hidden_states
 
 # [MODIFIED] from initialize_tree()
@@ -231,13 +231,13 @@ def initialize_tree_pipeline(stage_model, past_key_values, logits_processor = No
             logits = logits_processor(None, logits)
             # print(f"stage {stage_model.stage} logits shape: {logits.shape} logits dtype: {logits.dtype}")
             probabilities = torch.nn.functional.softmax(logits, dim=1)
-            print(f"probabilities: {probabilities}")
+            # print(f"probabilities: {probabilities}")
             token = torch.multinomial(probabilities, 1)
         else:
             token = torch.argmax(orig[:, -1])
             token = token[None, None]
         input_ids = torch.cat((input_ids, token.to(input_ids.device)), dim=1)
-        print(f"prefill token: {token}")
+        # print(f"prefill token: {token}")
         # Clone the output hidden states
         
         draft_tokens, retrieve_indices, tree_mask, tree_position_ids = stage_model.ea_layer.topK_genrate(
@@ -246,7 +246,7 @@ def initialize_tree_pipeline(stage_model, past_key_values, logits_processor = No
             stage_model.stage_base_model.lm_head,
             logits_processor
         )
-        print(token, draft_tokens[0, 0:1])
+        # print(token, draft_tokens[0, 0:1])
         return draft_tokens, retrieve_indices, tree_mask, tree_position_ids, orig, hidden_states, token
     else:
         prefill_pipeline(stage_model = stage_model, stage_past_key_values = past_key_values)
@@ -464,7 +464,8 @@ def update_stage_inference_inputs(
 ):
     if model.is_first_stage:
         prev_input_len = torch.tensor(input_ids.shape[1], dtype=torch.int64, device=model.stage_base_model.device)
-        dist.broadcast(prev_input_len, src=0)
+        # dist.broadcast(prev_input_len, src=0)
+        broadcast(prev_input_len, src=0)
         # print(f"best_candidate device: {best_candidate.device}")
         # print(f"accept_length device: {accept_length.device}")
         # print(f"prev_input_len device: {prev_input_len.device}")
@@ -472,9 +473,10 @@ def update_stage_inference_inputs(
         # print(f"retrieve_indices device: {retrieve_indices.device}")
         
         select_indices = (retrieve_indices[best_candidate, :accept_length+1] + prev_input_len)
-        select_indices_shape = torch.tensor(select_indices.shape, dtype=torch.int64, device=model.stage_base_model.device)
-        dist.broadcast(select_indices_shape, src=0)
-        dist.broadcast(select_indices, src=0)
+        # select_indices_shape = torch.tensor(select_indices.shape, dtype=torch.int64, device=model.stage_base_model.device)
+        # dist.broadcast(select_indices_shape, src=0)
+        # dist.broadcast(select_indices, src=0)
+        broadcast(select_indices, src=0)
     
 
         # Append the tokens from the best candidate to the input sequence
@@ -483,12 +485,14 @@ def update_stage_inference_inputs(
         )
     else:
         prev_input_len = torch.empty((), dtype=torch.int64, device=model.stage_base_model.device)
-        dist.broadcast(prev_input_len, src=0)
-
-        select_indices_shape = torch.zeros(1, dtype=torch.int64, device=model.stage_base_model.device)
-        dist.broadcast(select_indices_shape, src=0)
-        select_indices = torch.zeros(select_indices_shape, dtype=torch.int64, device=model.stage_base_model.device)
-        dist.broadcast(select_indices, src=0)
+        # dist.broadcast(prev_input_len, src=0)
+        prev_input_len = broadcast(src=0, data_type=torch.int64, shape_length=0)
+        
+        # select_indices_shape = torch.zeros(1, dtype=torch.int64, device=model.stage_base_model.device)
+        # dist.broadcast(select_indices_shape, src=0)
+        # select_indices = torch.zeros(select_indices_shape, dtype=torch.int64, device=model.stage_base_model.device)
+        # dist.broadcast(select_indices, src=0)
+        select_indices = broadcast(src=0, data_type=torch.int64, shape_length=1)
 
     # Update the past key values based on the selected tokens
     for past_key_values_data in past_key_values_data_list:
@@ -512,16 +516,16 @@ def update_stage_inference_inputs(
         else:
             token = torch.argmax(prob)
             token = token[None, None]
-        print(f"stage {model.stage} token: {token}")
+        # print(f"stage {model.stage} token: {token}")
         draft_tokens, retrieve_indices, tree_mask, tree_position_ids = model.ea_layer.topK_genrate(
             accept_hidden_state_new,
             input_ids=torch.cat((input_ids, token.to(input_ids.device)), dim=1),
             head=model.stage_base_model.lm_head, logits_processor=logits_processor
         )
         new_token += accept_length + 1
-        print(f"stage {model.stage} draft_tokens: {draft_tokens}")
-        print(f"stage {model.stage} input_ids: {input_ids}")
-        print(f"-------------------------------------\n -------------------------------------")
+        # print(f"stage {model.stage} draft_tokens: {draft_tokens}")
+        # print(f"stage {model.stage} input_ids: {input_ids}")
+        # print(f"-------------------------------------\n -------------------------------------")
         return input_ids, draft_tokens, retrieve_indices, tree_mask, tree_position_ids, new_token, None, token
 
 

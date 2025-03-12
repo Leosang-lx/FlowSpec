@@ -61,8 +61,8 @@ def recv(src: int, data_type, shape_length) -> object:
     # print(f"data_tensor: {data_tensor}")
     return data_tensor
 
-def broadcast(data, src: int, tag=0, shape_length=0, data_type = None) -> None:
-    if data_type is None:
+def broadcast(data = None, src: int = 0, tag=0, shape_length=0, data_type = None) -> None:
+    if data is not None:
         data_size = torch.tensor(list(data.shape),
                              dtype=torch.int64).to(torch.device('cpu'))
         dist.broadcast(data_size, src=src)
@@ -71,7 +71,10 @@ def broadcast(data, src: int, tag=0, shape_length=0, data_type = None) -> None:
     else:
         data_size = torch.zeros(shape_length, dtype=torch.int64).to(torch.device('cpu'))
         dist.broadcast(data_size, src=src)
-        data_tensor = torch.empty(*data_size.tolist(),
+        if shape_length == 0:
+            data_tensor = torch.empty((), dtype=data_type).to(torch.device('cpu'))
+        else:
+            data_tensor = torch.empty(*data_size.tolist(),
                               dtype=data_type).to(torch.device('cpu'))
         dist.broadcast(data_tensor, src=src)
         return data_tensor
