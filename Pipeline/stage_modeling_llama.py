@@ -25,7 +25,7 @@ _CONFIG_FOR_DOC = "LlamaConfig"
 
 
 class StageLlamaModel(LlamaPreTrainedModel):
-    def __init__(self, config: LlamaConfig, embed_tokens=None, hidden_layers=None, post_init=False):
+    def __init__(self, config: LlamaConfig, embed_tokens=None, hidden_layers=None, post_init=True):
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
@@ -100,7 +100,10 @@ class StageLlamaModel(LlamaPreTrainedModel):
             combined_attention_mask[:, :, -tree_tgt_len:, -tree_src_len:][
                 tree_mask == 0
                 ] = combined_attention_mask.min()
-
+            # if self.config.is_first_stage:
+            #     if self.a == 0 or self.a == 1:
+            #         print(f"combined_attention_mask: {combined_attention_mask}")
+            #         self.a += 1
         return combined_attention_mask
 
     @torch.no_grad()
@@ -195,7 +198,12 @@ class StageLlamaModel(LlamaPreTrainedModel):
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
         next_decoder_cache = () if use_cache else None
-
+        # if self.config.is_first_stage:  
+        #     if self.a == 0 or self.a == 1 or self.a == 2 or self.a == 3 or self.a == 4 or self.a == 5:
+        #         print(f"len_past_key_values: {len(past_key_values)}")
+        #         print(f"len_past_key_values[0]: {len(past_key_values[0])}")
+        #         print(f"past_key_values[0][0].shape: {past_key_values[0][0].shape}")
+        #         self.a += 1
         for idx, decoder_layer in enumerate(self.layers):
             # if idx==16:
             #     print(idx)
@@ -223,6 +231,17 @@ class StageLlamaModel(LlamaPreTrainedModel):
                     None,
                 )
             else:
+                if idx == 0:
+                    if self.a == 0 or self.a == 1:
+                        print(f"stage {self.config.stage} hidden_states.shape: {hidden_states.shape}")
+                        print(f"stage {self.config.stage} hidden_states: {hidden_states}")
+                        print(f"stage {self.config.stage} attention_mask={attention_mask}")
+                        print(f"stage {self.config.stage} position_ids={position_ids}")
+                        print(f"stage {self.config.stage} past_key_value={past_key_value}")
+                        print(f"stage {self.config.stage} output_attentions={output_attentions}")
+                        print(f"stage {self.config.stage} use_cache={use_cache}")
+                        self.a += 1
+                
                 layer_outputs = decoder_layer(
                     hidden_states,
                     attention_mask=attention_mask,

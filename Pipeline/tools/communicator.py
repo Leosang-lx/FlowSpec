@@ -61,18 +61,34 @@ def recv(src: int, data_type, shape_length) -> object:
     # print(f"data_tensor: {data_tensor}")
     return data_tensor
 
-def broadcast(data, dsts: list, tag=0, enable_async=True) -> None:
-    '''
-    Broadcast data to all the destination processes.
-    data: the data to be broadcasted.
-    dsts: A list of destination processes.
-    tag: the tag of the message.
-    enable_async: whether to use async communication.
-    '''
-    if enable_async:
-        with ThreadPoolExecutor() as executor:
-            for dst in dsts:
-                executor.submit(send, data, dst, tag)
+def broadcast(data, src: int, tag=0, shape_length=0, data_type = None) -> None:
+    if data_type is None:
+        data_size = torch.tensor(list(data.shape),
+                             dtype=torch.int64).to(torch.device('cpu'))
+        dist.broadcast(data_size, src=src)
+        data_tensor = data.to(torch.device('cpu'))
+        dist.broadcast(data_tensor, src=src)
     else:
-        for dst in dsts:
-            send(data, dst, tag)
+        data_size = torch.zeros(shape_length, dtype=torch.int64).to(torch.device('cpu'))
+        dist.broadcast(data_size, src=src)
+        data_tensor = torch.empty(*data_size.tolist(),
+                              dtype=data_type).to(torch.device('cpu'))
+        dist.broadcast(data_tensor, src=src)
+        return data_tensor
+    
+    
+# def broadcast(data, dsts: list, tag=0, enable_async=True) -> None:
+#     '''
+#     Broadcast data to all the destination processes.
+#     data: the data to be broadcasted.
+#     dsts: A list of destination processes.
+#     tag: the tag of the message.
+#     enable_async: whether to use async communication.
+#     '''
+#     if enable_async:
+#         with ThreadPoolExecutor() as executor:
+#             for dst in dsts:
+#                 executor.submit(send, data, dst, tag)
+#     else:
+#         for dst in dsts:
+#             send(data, dst, tag)

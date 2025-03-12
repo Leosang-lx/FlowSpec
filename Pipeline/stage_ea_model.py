@@ -197,7 +197,8 @@ class StageEaModel(nn.Module):
             outputs = self.stage_base_model.model(
                 inputs_embeds=inputs_embeds,
                 attention_mask=attention_mask,
-                past_key_values=past_key_values
+                past_key_values=past_key_values,
+                position_ids=position_ids
             )
             
         hidden_states = outputs[0]
@@ -270,12 +271,14 @@ class StageEaModel(nn.Module):
             )
             retrieve_indices = retrieve_indices.to(self.stage_base_model.device)
             # split the tree for pipeline
-            seqs_split, tree_pos_ids_split, tree_mask_split, lens_split = tree_partition_pipeline(
-                draft_tokens,
-                tree_position_ids,
-                tree_mask, 
-                self.total_stage
-            )
+            
+            # print(f"tree_mask: {tree_mask}")
+            # print(f"tree_mask_split: {tree_mask_split}")
+            # print(f"draft_tokens: {draft_tokens}")
+            # print(f"seqs_split: {seqs_split}")
+            # print(f"tree_position_ids: {tree_position_ids}")
+            # print(f"tree_position_ids.dtype: {tree_position_ids.dtype}")
+            # print(f"tree_pos_ids_split: {tree_pos_ids_split}")
             # Tuple(subtree1=(draft_tokens, tree_position_ids, tree_attention_mask, retrieve_indices), ...)
             new_token = 0
         else:
@@ -284,6 +287,8 @@ class StageEaModel(nn.Module):
         # print(f"stage {self.stage} barrier")
         # dist.barrier()
         for idx in range(max_length):
+            
+            
             # if self.is_first_stage:
             #     # send mask to all stages
             #     mask_shape = torch.tensor(tree_mask.shape, dtype=torch.int32)
@@ -301,6 +306,12 @@ class StageEaModel(nn.Module):
             # [tree_decoding]
             
             if self.is_first_stage:
+                seqs_split, tree_pos_ids_split, tree_mask_split, lens_split = tree_partition_pipeline(
+                    draft_tokens,
+                    tree_position_ids,
+                    tree_mask, 
+                    self.total_stage
+                )
                 # config tree mask for each stage in stage_tree_decoding()
                 # self.stage_base_model.model.tree_mask = tree_mask
                 tree_decoding_params = (
@@ -313,6 +324,8 @@ class StageEaModel(nn.Module):
             # print(f"stage {self.stage} barrier waiting for tree decoding")
             # dist.barrier()
             if self.is_first_stage:
+                padding = (torch.zeros(1, 1, dtype=torch.long) - 1).to(self.stage_base_model.device)
+                draft_tokens = torch.cat((draft_tokens, padding), dim=1)
                 send(draft_tokens, dst=self.total_stage-1)
                 send(retrieve_indices, dst=self.total_stage-1)
             # [evaluate_posterior]
@@ -320,14 +333,22 @@ class StageEaModel(nn.Module):
                 draft_tokens = recv(src=0, data_type=torch.int64, shape_length=2).to(self.stage_base_model.device)
                 retrieve_indices = recv(src=0, data_type=torch.int64, shape_length=2).to(self.stage_base_model.device)
                 
-                padding = (torch.zeros(1, 1, dtype=torch.long) - 1).to(self.stage_base_model.device)
-                draft_tokens = torch.cat((draft_tokens, padding), dim=1)
+                # padding = (torch.zeros(1, 1, dtype=torch.long) - 1).to(self.stage_base_model.device)
+                # draft_tokens = torch.cat((draft_tokens, padding), dim=1)
                 candidates = draft_tokens[0, retrieve_indices]
                 logits, hidden_state = outputs  # get the outputs of tree decoding
+                # if idx == 0:    
+                #     print(f"logits: {logits}")
+                #     print(f"candidates: {candidates}")
+                #     print(f"hidden_state: {hidden_state}")
                 best_candidate, accept_length, sample_p = evaluate_posterior(
                     logits, candidates, logits_processor
                 )
-                # should be optimized
+                # if idx == 0:
+                #     print(f"best_candidate: {best_candidate}")
+                #     print(f"accept_length: {accept_length}")
+                #     print(f"sample_p: {sample_p}")
+                # # should be optimized
                 send(hidden_state, dst=0)
                 send(best_candidate, dst=0)
                 accept_length = torch.tensor(accept_length, dtype=torch.int64)
@@ -340,7 +361,11 @@ class StageEaModel(nn.Module):
                 best_candidate = recv(src=self.total_stage-1, data_type=torch.int64, shape_length=0).to(self.stage_base_model.device)
                 accept_length = recv(src=self.total_stage-1, data_type=torch.int64, shape_length=0).to(self.stage_base_model.device)
                 sample_p = recv(src=self.total_stage-1, data_type=torch.float16, shape_length=1).to(self.stage_base_model.device)
-
+                
+                print(f"hidden_state: {hidden_state}")
+                print(f"best_candidate: {best_candidate}")
+                print(f"accept_length: {accept_length}")
+                print(f"sample_p: {sample_p}")
             # [update_inference_inputs]
             """
             OWNED

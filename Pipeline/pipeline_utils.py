@@ -362,7 +362,6 @@ def tree_partition_pipeline(draft_tokens, tree_position_ids, tree_mask, total_st
 #         logits = tree_logits[0, retrieve_indices]
 #         hidden_state = torch.concat(hidden_state_split, dim=-2)
 #         return logits, hidden_state
-    
 def stage_tree_decoding(
         stage_model,
         stage_past_key_values=None,
@@ -388,7 +387,6 @@ def stage_tree_decoding(
     # todo: overlap with the computation of the 1st subseq on the 1st stage
     # print(f"stage {stage_model.stage} barrier")
     # dist.barrier()
-   
     config = stage_model.config
     if stage_model.is_first_stage:
         send(retrieve_indices, dst=stage_model.total_stage-1)
@@ -401,25 +399,28 @@ def stage_tree_decoding(
         if stage_model.is_first_stage:
             tree_mask = tree_mask_split[i]
             stage_model.stage_base_model.model.tree_mask = tree_mask
+            position_ids = tree_pos_ids_split[i] + input_ids.shape[1]
             outputs, hidden_states = stage_model(
                 input_ids=draft_seqs_split[i],
                 past_key_values=stage_past_key_values,
-                position_ids=tree_pos_ids_split[i]
+                position_ids=position_ids
             )
             send(tree_mask, dst=1)
             send(hidden_states, dst=1)
+            send(position_ids, dst=1)
             
         elif stage_model.is_last_stage:
             tree_mask = recv(src=stage_model.stage - 1, data_type=torch.float32, shape_length=4).to(stage_model.stage_base_model.device)
             stage_model.stage_base_model.model.tree_mask = tree_mask
             inputs_embeds = recv(src=stage_model.stage - 1, data_type=torch.float16, shape_length=3).to(stage_model.stage_base_model.device)
+            position_ids = recv(src=stage_model.stage - 1, data_type=torch.int64, shape_length=1).to(stage_model.stage_base_model.device)
             
             outputs, orig, hidden_states = stage_model(
                 inputs_embeds=inputs_embeds,
                 past_key_values=stage_past_key_values,
+                position_ids=position_ids,
                 output_orig=True,
             )
-            
             hidden_states_split.append(hidden_states)
             orig_split.append(orig)
             
@@ -427,13 +428,16 @@ def stage_tree_decoding(
             tree_mask = recv(src=stage_model.stage - 1, data_type=torch.float32, shape_length=4).to(stage_model.stage_base_model.device)
             stage_model.stage_base_model.model.tree_mask = tree_mask
             inputs_embeds = recv(src=stage_model.stage - 1, data_type=torch.float16, shape_length=3).to(stage_model.stage_base_model.device)
+            position_ids = recv(src=stage_model.stage - 1, data_type=torch.int64, shape_length=1).to(stage_model.stage_base_model.device)
             
             outputs, hidden_states = stage_model(
                 inputs_embeds=inputs_embeds,
-                past_key_values=stage_past_key_values
+                past_key_values=stage_past_key_values,
+                position_ids=position_ids
             )
             send(tree_mask, dst=stage_model.stage + 1)
             send(hidden_states, dst=stage_model.stage + 1)
+            send(position_ids, dst=stage_model.stage + 1)
             
     if stage_model.is_last_stage:
         orig = torch.cat(orig_split, dim=-2)
@@ -471,6 +475,7 @@ def update_stage_inference_inputs(
         select_indices_shape = torch.tensor(select_indices.shape, dtype=torch.int64, device=model.stage_base_model.device)
         dist.broadcast(select_indices_shape, src=0)
         dist.broadcast(select_indices, src=0)
+    
 
         # Append the tokens from the best candidate to the input sequence
         input_ids = torch.cat(
@@ -507,14 +512,16 @@ def update_stage_inference_inputs(
         else:
             token = torch.argmax(prob)
             token = token[None, None]
-
+        print(f"stage {model.stage} token: {token}")
         draft_tokens, retrieve_indices, tree_mask, tree_position_ids = model.ea_layer.topK_genrate(
             accept_hidden_state_new,
             input_ids=torch.cat((input_ids, token.to(input_ids.device)), dim=1),
             head=model.stage_base_model.lm_head, logits_processor=logits_processor
         )
         new_token += accept_length + 1
-
+        print(f"stage {model.stage} draft_tokens: {draft_tokens}")
+        print(f"stage {model.stage} input_ids: {input_ids}")
+        print(f"-------------------------------------\n -------------------------------------")
         return input_ids, draft_tokens, retrieve_indices, tree_mask, tree_position_ids, new_token, None, token
 
 
