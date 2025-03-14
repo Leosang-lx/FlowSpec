@@ -7,6 +7,7 @@ import time
 import torch
 from typing import Union, Iterable, List
 import torch.distributed as dist
+from memory_profiler import profile
 # from stage_ea_model import StageEaModel
 from transformers.generation.logits_process import (
     LogitsProcessorList,
@@ -19,6 +20,15 @@ from tools.communicator import*
 
 TOPK = 10  # topk for sparse tree
 
+def calculate_model_size_with_buffers(model):
+    total_memory = 0
+    
+    for tensor in model.state_dict().values():
+        total_memory += tensor.element_size() * tensor.numel()
+    
+    # transform to MB
+    memory_size_mb = total_memory / (1024 ** 2)
+    return memory_size_mb
 
 # EAGLE
 class Timer:
@@ -137,7 +147,7 @@ def split_sequence_close_equal_len(sequence: torch.Tensor, split_cnt: Union[int,
 
     assert sum(split_lens) == seq_len
     split_seqs = sequence.split(tuple(split_lens), dim=-1)
-    split_lens = torch.tensor(split_lens, dtype=torch.int32)
+    split_lens = torch.tensor(split_lens, dtype=torch.long)
     return split_seqs, split_lens
 
 
@@ -157,49 +167,77 @@ def process_logits(prob, logits_processor=None):
 # def send_tensor
 
 
-# [ADD] for pipeline
-# def pipeline_prefill(stage_model, input_ids, stage_past_key_values=None, logits_processor=None, tree_mask=None):
-#     config = stage_model.config
-#     total_stage = config.total_stage
-#     if stage_model.is_first_stage:
-#         hidden_state_split = ()
-#         recv_tasks = []
-#     isend_task = None
-#     if input_ids.size(-1) > 20:  # pipelined prefill
-#         seq_splits, lens_split = split_sequence_close_equal_len(input_ids, total_stage)
-#         for subseq_len in lens_split:
-#             if stage_model.is_first_stage:
-#                 sub_hidden_state = stage_model(
-#                     input_ids=subseq_len,
-#                     past_key_values=stage_past_key_values,
-#                 )
-#                 hidden_state_split = hidden_state_split + (sub_hidden_state,)
-#                 if isend_task is not None:
-#                     isend_task.wait()
-#                 isend_task = dist.isend(sub_hidden_state, dst=config.next_rank)
-#                 irecv_task = dist.irecv(sub_hidden_state)
-#                 recv_tasks.append(irecv_task)
-#             else:
-#                 last_hidden_state = torch.zeros((1, subseq_len, config.d_model), dtype=torch.float16)
-#                 dist.recv(last_hidden_state, src=config.last_rank)
+def pipeline_prefill(
+        stage_model,
+        input_ids=None,
+        stage_past_key_values=None,
+        # logits_processor=None,
+        # tree_mask=None
+):
+    config = stage_model.config
+    stage_base_model = stage_model.stage_base_model
+    device = stage_base_model.device
+    total_stage = config.total_stage
+    if config.is_first_stage:
+        if input_ids.size(-1) > 50:  # pipelined prefill, split the input_ids when long enough
+            seq_splits, lens_split = split_sequence_close_equal_len(input_ids, total_stage)
+            hidden_state_splits = []  # save the hidden_state for later transmission
+        else:
+            lens_split = torch.zeros(total_stage, dtype=torch.long)
+            lens_split[0] = input_ids.size(-1)
+            seq_splits = (input_ids,)
+    else:
+        lens_split = torch.zeros(total_stage, dtype=torch.long)
+    dist.broadcast(lens_split, src=0)
+    lens_split = lens_split[lens_split > 0]
+    isend_task = None
 
-#                 # if not stage_model.is_last_stage:
-#                 # middle stage
-#                 sub_hidden_state = stage_model(
-#                     last_hidden_state=last_hidden_state,
-#                     past_key_values=stage_past_key_values,
-#                 )
-#                 if isend_task is not None:
-#                     isend_task.wait()
-#                 isend_task = dist.isend(sub_hidden_state, dst=config.next_rank)
+    for i in range(lens_split.size(-1)):
+        if config.is_first_stage:
+            outputs, sub_hidden_state = stage_model(
+                input_ids=seq_splits[i],
+                past_key_values=stage_past_key_values,
+            )
+            sub_hidden_state = sub_hidden_state.cpu()
+            hidden_state_splits.append(sub_hidden_state)
+            if isend_task is not None:
+                isend_task.wait()
 
-#         if stage_model.is_first_stage:
-#             for i, recv_task in enumerate(recv_tasks):
-#                 recv_task.wait()
-#                 hidden_state_split = hidden_state_split + (hidden_state_split[i],)
+            isend_task = dist.isend(sub_hidden_state, dst=config.next_rank)
 
-#             hidden_state = torch.concat(hidden_state_split, dim=-2)
-#             return hidden_state
+        else:
+            # print((1, lens_split[i], config.hidden_size))
+            last_hidden_state = torch.zeros((1, lens_split[i], config.hidden_size), dtype=torch.float16)
+            dist.recv(last_hidden_state, src=config.last_rank)
+            last_hidden_state = last_hidden_state.to(device)
+
+            # middle stage
+            outputs = stage_base_model.model(
+                inputs_embeds=last_hidden_state,
+                past_key_values=stage_past_key_values,
+            )
+            sub_hidden_state = outputs[0]
+            if isend_task is not None:
+                isend_task.wait()
+            sub_hidden_state = sub_hidden_state.cpu()
+            isend_task = dist.isend(sub_hidden_state, dst=config.next_rank)
+
+    if isend_task is not None:
+        isend_task.wait()
+
+    if stage_model.is_first_stage:
+        orig = ()
+
+        for i, hidden_state_split in enumerate(hidden_state_splits):
+            dist.recv(hidden_state_split, src=config.last_rank)
+            hidden_state_splits[i] = hidden_state_split.to(device)
+            orig = orig + (stage_base_model.lm_head(hidden_state_splits[i]),)
+
+        hidden_state = torch.concat(hidden_state_splits, dim=-2)
+        orig = torch.concat(orig, dim=-2)
+
+        return orig, hidden_state
+    
 
 def prefill_pipeline(stage_model, stage_past_key_values=None, input_ids = None):
     # print(f"stage_model.stage: {stage_model.stage}, layer_range: {stage_model.stage_base_model.model.config.layer_range}")
@@ -243,7 +281,9 @@ def prefill_pipeline(stage_model, stage_past_key_values=None, input_ids = None):
 # [MODIFIED] from initialize_tree()
 def initialize_tree_pipeline(stage_model, past_key_values, logits_processor = None, input_ids = None):
     if stage_model.is_first_stage:
-        orig, hidden_states = prefill_pipeline(stage_model, past_key_values, input_ids)
+        # orig, hidden_states = prefill_pipeline(stage_model, past_key_values, input_ids)
+        orig, hidden_states = pipeline_prefill(stage_model, input_ids, past_key_values)
+
         
         if logits_processor is not None:
             logits = orig[:, -1]
@@ -268,10 +308,10 @@ def initialize_tree_pipeline(stage_model, past_key_values, logits_processor = No
         # print(token, draft_tokens[0, 0:1])
         return draft_tokens, retrieve_indices, tree_mask, tree_position_ids, orig, hidden_states, token
     else:
-        prefill_pipeline(stage_model = stage_model, stage_past_key_values = past_key_values)
+        pipeline_prefill(stage_model, stage_past_key_values=past_key_values)
 
 # [ADD] for pipeline
-def tree_partition_pipeline(draft_tokens, tree_position_ids, tree_mask, total_stage: int):
+def tree_partition_pipeline(draft_tokens, tree_position_ids, total_stage: int):
     """
     split the input sequence into multiple subsequences
     :param total_stage:
@@ -282,105 +322,136 @@ def tree_partition_pipeline(draft_tokens, tree_position_ids, tree_mask, total_st
     seqs_split, lens_split = split_sequence_close_equal_len(draft_tokens, total_stage)
     tree_pos_ids_split = tree_position_ids.split(tuple(lens_split))
     # print(f"lens_split={lens_split}")
-    cum_seq_lens = torch.cumsum(lens_split, dim=-1)
+    # cum_seq_lens = torch.cumsum(lens_split, dim=-1)
     
-    # split tree mask for seqs_split respectively
-    tree_mask_split = []
-    for i in range(len(lens_split)):
-        if i > 0: # make sure the tree mask is contiguous, could be optimized
-            tree_mask_split.append(tree_mask[..., cum_seq_lens[i-1]:cum_seq_lens[i], :cum_seq_lens[i]].contiguous())
-        else:
-            tree_mask_split.append(tree_mask[..., :cum_seq_lens[i], :cum_seq_lens[i]].contiguous())
+    # # split tree mask for seqs_split respectively
+    # tree_mask_split = []
+    # for i in range(len(lens_split)):
+    #     if i > 0: # make sure the tree mask is contiguous, could be optimized
+    #         tree_mask_split.append(tree_mask[..., cum_seq_lens[i-1]:cum_seq_lens[i], :cum_seq_lens[i]].contiguous())
+    #     else:
+    #         tree_mask_split.append(tree_mask[..., :cum_seq_lens[i], :cum_seq_lens[i]].contiguous())
     
-    return seqs_split, tree_pos_ids_split, tree_mask_split, lens_split
+    # return seqs_split, tree_pos_ids_split, tree_mask_split, lens_split
+    return seqs_split, tree_pos_ids_split, lens_split
 
 
 # [MODIFIED] from tree_decoding()
-# def stage_tree_decoding(
-#         stage_model,
-#         stage_past_key_values=None,
-#         retrieve_indices=None,
-#         draft_seqs_split=None,
-#         tree_pos_ids_split=None,
-#         lens_split=None,
-#         input_ids=None,
-# ):
-#     """
-#     pipelined tree decoding for verification
-#     :param stage_model: necessary
-#     :param stage_past_key_values: necessary
-#     :param draft_seqs_split: only necessary for stage1
-#     :param tree_pos_ids_split: only necessary for stage1
-#     :param lens_split: only necessary for stage1
-#     :param input_ids: only necessary for stage1
-#     :param retrieve_indices: only necessary for stage(-1)
-#     :return: return result on stage1
-#     """
-#     # [step1] prepare necessary data to all devices
-#     # todo: overlap with the computation of the 1st subseq on the 1st stage
-#     config = stage_model.config
-#     if stage_model.is_first_stage:
-#         assert None not in (draft_seqs_split, tree_pos_ids_split, input_ids, retrieve_indices)
-#         dist.broadcast(lens_split, src=0)
-#         # ri_shape = torch.tensor(retrieve_indices.shape, dtype=torch.int32)
-#         # dist.send(ri_shape, dst=config.last_rank)
-#         # dist.send(retrieve_indices, dst=config.last_rank)
-#         recv_tasks = []
-#         tree_logits_split = ()
-#         hidden_state_split = ()
+def stage_tree_decoding_liux(
+        stage_model,
+        stage_past_key_values=None,
+        draft_seqs_split=None,
+        lens_split=None,
+        tree_pos_ids=None,
+        tree_mask=None,
+        input_ids=None,
+):
+    """
+    pipelined tree decoding for verification
+    :param stage_model: necessary
+    :param stage_past_key_values: necessary
+    :param draft_seqs_split: only necessary for stage1
+    :param tree_pos_ids_split: only necessary for stage1
+    :param lens_split: only necessary for stage1
+    :param input_ids: only necessary for stage1
+    :param retrieve_indices: only necessary for stage(-1)
+    :return: return result on stage1
+    """
+    # [step1] prepare necessary data to all devices
+    # todo: overlap with the computation of the 1st subseq on the 1st stage
+    config = stage_model.config
+    device = stage_model.stage_base_model.device
+    if stage_model.is_first_stage:
+        # send mask and pos_ids
+        dist.broadcast(lens_split, src=0)
+        tree_pos_ids = tree_pos_ids + input_ids.size(-1)
+        dist.broadcast(tree_pos_ids, src=0)
+        isend_mask = dist.broadcast(tree_mask, src=0, async_op=True)
+        # dist.broadcast(tree_mask, src=0)
+        # print(f'stage {stage_model.stage} tree_mask: {tree_mask.shape}, dtype: {tree_mask.dtype}')
+        tree_logits_split = ()
+        hidden_state_splits = []
 
-#     else:
-#         lens_split = torch.zeros(stage_model.total_stage, dtype=torch.int32)
-#         dist.broadcast(lens_split, src=0)
+    else:
+        # recv mask
+        lens_split = torch.zeros(stage_model.total_stage, dtype=torch.long)
+        dist.broadcast(lens_split, src=0)
+        draft_len = torch.sum(lens_split).item()
+        # tree_pos_ids
+        tree_pos_ids = torch.zeros(draft_len, dtype=torch.long)
+        dist.broadcast(tree_pos_ids, src=0)
+        # tree_mask
+        mask_shape = (1, 1, draft_len, draft_len)
+        tree_mask = torch.zeros(mask_shape, dtype=torch.float32)
+        # print(f'stage {stage_model.stage} tree_mask: {tree_mask.shape}, dtype: {tree_mask.dtype}')
+        dist.broadcast(tree_mask, src=0)
+        tree_mask.to(stage_model.stage_base_model.device)
 
-#     cum_lens_split = torch.cumsum(lens_split, dim=-1)
-#     # [step1] end
+    tree_pos_ids_split = tree_pos_ids.split(lens_split.tolist(), dim=0)
+    cum_lens_split = torch.cumsum(lens_split, dim=-1)
+    # [step1] end
 
-#     # [step2] start pipelined verification
-#     isend_task = None
-#     irecv_task = None
-#     for i, subseq_len in enumerate(lens_split):
-#         if stage_model.is_first_stage:
-#             seq_split = draft_seqs_split[i]
-#             pos_ids_split = tree_pos_ids_split[i]
-#             sub_hidden_state = stage_model(
-#                 input_ids=seq_split,
-#                 past_key_values=stage_past_key_values,
-#                 position_ids=pos_ids_split,
-#                 tree_mask_range=cum_lens_split[i]  # todo: get partial tree mask in forward of stage model
-#             )
-#             hidden_state_split = hidden_state_split + (sub_hidden_state,)
-#             if isend_task is not None:
-#                 isend_task.wait()  # todo: set the timeout in config
-#             isend_task = dist.isend(sub_hidden_state, dst=config.next_stage)
-#             recv_tasks.append(dist.irecv(sub_hidden_state, src=config.last_rank))
+    # [step2] start pipelined verification
+    isend_task = None
+    for i, subseq_len in enumerate(lens_split):
+        if i == 0:
+            # isend_mask.wait()
+            tree_mask_split = tree_mask[..., :cum_lens_split[i], :cum_lens_split[i]].contiguous()
+        else:
+            tree_mask_split = tree_mask[..., cum_lens_split[i-1]:cum_lens_split[i], :cum_lens_split[i]].contiguous()
+        stage_model.stage_base_model.model.tree_mask = tree_mask_split
+        if stage_model.is_first_stage:
+            seq_split = draft_seqs_split[i]
+            # pos_ids_split = tree_pos_ids_split[i] + input_ids.size(-1)
+            outputs, sub_hidden_state = stage_model(
+                input_ids=seq_split,
+                past_key_values=stage_past_key_values,
+                position_ids=tree_pos_ids_split[i],
+                # tree_mask_range=cum_lens_split[i]  # todo: get partial tree mask in forward of stage model
+            )
+            hidden_state_comm = sub_hidden_state.cpu()
+            hidden_state_splits.append(hidden_state_comm)
+            if i == 0:
+                isend_mask.wait()
+            else:
+                if isend_task is not None:
+                    isend_task.wait()  # todo: set the timeout in config
+            isend_task = dist.isend(hidden_state_comm, dst=config.next_rank)
+            # recv_tasks.append(dist.irecv(sub_hidden_state, src=config.last_rank))
 
-#         else:
-#             last_hidden_state = torch.zeros((1, subseq_len, config.d_model), dtype=torch.float16)  # todo: d_model?
-#             dist.recv(last_hidden_state, src=config.last_rank)
+        else:
+            last_hidden_state = torch.zeros((1, subseq_len, config.hidden_size), dtype=torch.float16)  # todo: d_model?
+            dist.recv(last_hidden_state, src=config.last_rank)
 
-#             # if not stage_model.is_last_stage:
-#             # middle stage
-#             sub_hidden_state = stage_model(
-#                 input_embeds=last_hidden_state,
-#                 past_key_values=stage_past_key_values,
-#                 tree_mask_range=cum_lens_split[i],
-#             )
-#             if isend_task is not None:
-#                 isend_task.wait()
-#             isend_task = dist.isend(sub_hidden_state, dst=config.next_rank)
-#     # [step2] end
+            # if not stage_model.is_last_stage:
+            # middle stage
+            outputs, sub_hidden_state = stage_model(
+                inputs_embeds=last_hidden_state.to(device),
+                past_key_values=stage_past_key_values,
+                position_ids=tree_pos_ids_split[i],
+                # tree_mask_range=cum_lens_split[i],
+            )
+            hidden_state_comm = sub_hidden_state.cpu()
+            if isend_task is not None:
+                isend_task.wait()
+            isend_task = dist.isend(hidden_state_comm, dst=config.next_rank)
+    # [step2] end
+    if isend_task is not None:
+        isend_task.wait()
 
-#     # [step3] get complete tree_logits on the first stage
-#     if stage_model.is_first_stage:
-#         for i, recv_task in enumerate(recv_tasks):
-#             recv_task.wait()
-#             tree_logits_split = tree_logits_split + (stage_model.lm_head(hidden_state_split[i]),)
+    # [step3] get complete tree_logits on the first stage
+    if stage_model.is_first_stage:
+        for i, hidden_state_split in enumerate(hidden_state_splits):
+            dist.recv(hidden_state_split, src=config.last_rank)
+            hidden_state_splits[i] = hidden_state_split.to(device)
+            tree_logits_split = tree_logits_split + (stage_model.stage_base_model.lm_head(hidden_state_splits[i]),)
 
-#         tree_logits = torch.concat(tree_logits_split, dim=-2)  # concat at the seq dimension
-#         logits = tree_logits[0, retrieve_indices]
-#         hidden_state = torch.concat(hidden_state_split, dim=-2)
-#         return logits, hidden_state
+        tree_logits = torch.concat(tree_logits_split, dim=-2)  # concat at the seq dimension
+        # logits = tree_logits[0, retrieve_indices]
+        hidden_state = torch.concat(hidden_state_splits, dim=-2)
+        return tree_logits, hidden_state
+
+
 def stage_tree_decoding(
         stage_model,
         stage_past_key_values=None,

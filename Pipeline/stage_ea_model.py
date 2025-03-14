@@ -1,5 +1,5 @@
 import json
-
+# from memory_profiler import profile
 import torch
 import torch.nn as nn
 from huggingface_hub import hf_hub_download
@@ -234,6 +234,8 @@ class StageEaModel(nn.Module):
         else:
             logits_processor = None
 
+        config = self.config
+
         # Initialize the past key and value states
         if hasattr(self, "past_key_values"):
             past_key_values = self.past_key_values
@@ -286,89 +288,108 @@ class StageEaModel(nn.Module):
             new_token = 0
         else:
             initialize_tree_pipeline(self, past_key_values)
+        # print(f'stage{config.stage} initialized')
+        
         
         # print(f"stage {self.stage} barrier")
         # dist.barrier()
         for idx in range(max_length):
             
-            
-            # if self.is_first_stage:
-            #     # send mask to all stages
-            #     mask_shape = torch.tensor(tree_mask.shape, dtype=torch.int32)
-            #     self.base_model.model.tree_mask = tree_mask
-            #     dist.broadcast(mask_shape, src=0)
-            #     dist.broadcast(tree_mask, src=0)
-            
-            # else:
-            #     # todo: maybe end the iterations in here for other stages?
-            #     mask_shape = torch.zeros(4, dtype=torch.int32)  # shape like (1, 1, seq_len, seq_len)
-            #     dist.broadcast(mask_shape, src=0)
-            #     tree_mask = torch.zeros(mask_shape, dtype=torch.float64)
-            #     dist.broadcast(tree_mask, src=0)
-            
             # [tree_decoding]
-            
             if self.is_first_stage:
-                seqs_split, tree_pos_ids_split, tree_mask_split, lens_split = tree_partition_pipeline(
+
+                # seqs_split, tree_pos_ids_split, tree_mask_split, lens_split = tree_partition_pipeline(
+                #     draft_tokens,
+                #     tree_position_ids,
+                #     tree_mask, 
+                #     self.total_stage
+                # )
+                seqs_split, tree_pos_ids_split, lens_split = tree_partition_pipeline(
                     draft_tokens,
                     tree_position_ids,
-                    tree_mask, 
                     self.total_stage
                 )
+                tree_decoding_params = (
+                    self, past_key_values, seqs_split, lens_split, tree_position_ids, tree_mask, input_ids
+                )
+
                 # config tree mask for each stage in stage_tree_decoding()
                 # self.stage_base_model.model.tree_mask = tree_mask
-                tree_decoding_params = (
-                self, past_key_values, retrieve_indices, seqs_split, tree_pos_ids_split, lens_split, input_ids, tree_mask_split)
+                # tree_decoding_params = (
+                # self, past_key_values, retrieve_indices, seqs_split, tree_pos_ids_split, lens_split, input_ids, tree_mask_split)
             else:
+            #     lens_split = torch.zeros(self.total_stage, dtype=torch.long)
+            #     dist.broadcast(lens_split, src=0)
+            #     draft_len = torch.sum(lens_split).item()
+            #     mask_shape = (1, 1, draft_len, draft_len)
+            #     tree_mask = torch.zeros(mask_shape, dtype=torch.float32)
                 tree_decoding_params = (self, past_key_values)
+                # todo: maybe end the iterations in here for other stages?
+                # dist.broadcast(mask_shape, src=0)
+                # dist.broadcast(tree_mask, src=0)
 
-            outputs = stage_tree_decoding(*tree_decoding_params)
+            outputs = stage_tree_decoding_liux(*tree_decoding_params)
+            # print(f'stage{config.stage} tree_decoding finished')
 
-            # print(f"stage {self.stage} barrier waiting for tree decoding")
-            # dist.barrier()
             if self.is_first_stage:
+                logits, hidden_state = outputs
+                logits = logits[0, retrieve_indices]
+
                 padding = (torch.zeros(1, 1, dtype=torch.long) - 1).to(self.stage_base_model.device)
                 draft_tokens = torch.cat((draft_tokens, padding), dim=1)
-                send(draft_tokens, dst=self.total_stage-1)
-                send(retrieve_indices, dst=self.total_stage-1)
-            # [evaluate_posterior]
-            if self.is_last_stage:
-                draft_tokens = recv(src=0, data_type=torch.int64, shape_length=2).to(self.stage_base_model.device)
-                retrieve_indices = recv(src=0, data_type=torch.int64, shape_length=2).to(self.stage_base_model.device)
-                
-                # padding = (torch.zeros(1, 1, dtype=torch.long) - 1).to(self.stage_base_model.device)
-                # draft_tokens = torch.cat((draft_tokens, padding), dim=1)
+
                 candidates = draft_tokens[0, retrieve_indices]
-                logits, hidden_state = outputs  # get the outputs of tree decoding
-                # if idx == 0:    
-                #     print(f"logits: {logits}")
-                #     print(f"candidates: {candidates}")
-                #     print(f"hidden_state: {hidden_state}")
                 best_candidate, accept_length, sample_p = evaluate_posterior(
                     logits, candidates, logits_processor
                 )
-                # if idx == 0:
-                #     print(f"best_candidate: {best_candidate}")
-                #     print(f"accept_length: {accept_length}")
-                #     print(f"sample_p: {sample_p}")
-                # # should be optimized
-                send(hidden_state, dst=0)
-                send(best_candidate, dst=0)
-                accept_length = torch.tensor(accept_length, dtype=torch.int64)
-                send(accept_length, dst=0)
-                send(sample_p, dst=0)
+
+
+            # # print(f"stage {self.stage} barrier waiting for tree decoding")
+            # # dist.barrier()
+            # if self.is_first_stage:
+            #     padding = (torch.zeros(1, 1, dtype=torch.long) - 1).to(self.stage_base_model.device)
+            #     draft_tokens = torch.cat((draft_tokens, padding), dim=1)
+            #     send(draft_tokens, dst=self.total_stage-1)
+            #     send(retrieve_indices, dst=self.total_stage-1)
+            # # [evaluate_posterior]
+            # if self.is_last_stage:
+            #     draft_tokens = recv(src=0, data_type=torch.int64, shape_length=2).to(self.stage_base_model.device)
+            #     retrieve_indices = recv(src=0, data_type=torch.int64, shape_length=2).to(self.stage_base_model.device)
                 
-            if self.is_first_stage:
-                hidden_state = recv(src=self.total_stage-1, data_type=torch.float16, shape_length=3).to(self.stage_base_model.device)
-                # should be optimized
-                best_candidate = recv(src=self.total_stage-1, data_type=torch.int64, shape_length=0).to(self.stage_base_model.device)
-                accept_length = recv(src=self.total_stage-1, data_type=torch.int64, shape_length=0).to(self.stage_base_model.device)
-                sample_p = recv(src=self.total_stage-1, data_type=torch.float16, shape_length=1).to(self.stage_base_model.device)
+            #     # padding = (torch.zeros(1, 1, dtype=torch.long) - 1).to(self.stage_base_model.device)
+            #     # draft_tokens = torch.cat((draft_tokens, padding), dim=1)
+            #     candidates = draft_tokens[0, retrieve_indices]
+            #     logits, hidden_state = outputs  # get the outputs of tree decoding
+            #     # if idx == 0:    
+            #     #     print(f"logits: {logits}")
+            #     #     print(f"candidates: {candidates}")
+            #     #     print(f"hidden_state: {hidden_state}")
+            #     best_candidate, accept_length, sample_p = evaluate_posterior(
+            #         logits, candidates, logits_processor
+            #     )
+            #     # if idx == 0:
+            #     #     print(f"best_candidate: {best_candidate}")
+            #     #     print(f"accept_length: {accept_length}")
+            #     #     print(f"sample_p: {sample_p}")
+            #     # # should be optimized
+            #     send(hidden_state, dst=0)
+            #     send(best_candidate, dst=0)
+            #     accept_length = torch.tensor(accept_length, dtype=torch.int64)
+            #     send(accept_length, dst=0)
+            #     send(sample_p, dst=0)
                 
-                # print(f"hidden_state: {hidden_state}")
-                # print(f"best_candidate: {best_candidate}")
-                # print(f"accept_length: {accept_length}")
-                # print(f"sample_p: {sample_p}")
+            # if self.is_first_stage:
+            #     hidden_state = recv(src=self.total_stage-1, data_type=torch.float16, shape_length=3).to(self.stage_base_model.device)
+            #     # should be optimized
+            #     best_candidate = recv(src=self.total_stage-1, data_type=torch.int64, shape_length=0).to(self.stage_base_model.device)
+            #     accept_length = recv(src=self.total_stage-1, data_type=torch.int64, shape_length=0).to(self.stage_base_model.device)
+            #     sample_p = recv(src=self.total_stage-1, data_type=torch.float16, shape_length=1).to(self.stage_base_model.device)
+                
+            #     # print(f"hidden_state: {hidden_state}")
+            #     # print(f"best_candidate: {best_candidate}")
+            #     # print(f"accept_length: {accept_length}")
+            #     # print(f"sample_p: {sample_p}")
+
             # [update_inference_inputs]
             """
             OWNED

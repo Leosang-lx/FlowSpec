@@ -194,6 +194,8 @@ class StageEaConfig(PretrainedConfig):
             )  # [start_layer_idx, end_layer_idx)
         self.is_first_stage = self.stage == 0
         self.is_last_stage = self.stage == self.total_stage - 1
+        self.last_rank = self.total_stage - 1 if self.stage == 0 else self.stage - 1
+        self.next_rank = 0 if self.stage == self.total_stage - 1 else self.stage + 1
 
         # [MODIFIED] add network config
         self.master_ip = None
@@ -202,8 +204,8 @@ class StageEaConfig(PretrainedConfig):
         self.backend = None
         self.device = None
         
-        self.last_rank = None
-        self.next_rank = None
+        # self.last_rank = None
+        # self.next_rank = None
 
     def _rope_scaling_validation(self):
         """
@@ -242,7 +244,7 @@ class StageEaConfig(PretrainedConfig):
         self.rank = self.stage  # stage idx as device rank
         assert self.total_stage == network_config.world_size
         
-        self.last_rank = None if self.stage == 0 else self.stage - 1
-        self.next_rank = None if self.stage == self.total_stage - 1 else self.stage + 1
+        self.last_rank = self.total_stage - 1 if self.stage == 0 else self.stage - 1
+        self.next_rank = 0 if self.stage == self.total_stage - 1 else self.stage + 1
         self.is_first_stage = (self.stage == 0)
         self.is_last_stage = (self.stage == self.total_stage - 1)

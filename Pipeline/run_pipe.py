@@ -2,12 +2,17 @@ from stage_ea_model import StageEaModel
 from stage_ea_config import StageEaConfig
 from fastchat.model import get_conversation_template
 from datetime import timedelta
+from pipeline_utils import calculate_model_size_with_buffers
 import torch
 import torch.distributed as dist
-
+import time
 import argparse
-
 import os
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning, message="TypedStorage is deprecated.*")
+
+rank = int(os.environ['RANK'])
+world_size = int(os.environ['WORLD_SIZE'])
 
 # os.environ['TORCH_DISTRIBUTED_DEFAULT_TIMEOUT'] = '120'
 
@@ -16,8 +21,8 @@ def main(args):
     torch.set_grad_enabled(False)
     dist.init_process_group(backend='gloo', init_method='env://', timeout=timedelta(seconds=120))
     
-    rank = dist.get_rank()
-    world_size = dist.get_world_size()
+    # rank = dist.get_rank()
+    # world_size = dist.get_world_size()
     device = rank % torch.cuda.device_count()
     torch.cuda.set_device(device)
     print(f'rank={rank}, world_size={world_size}, device={device}')
@@ -33,8 +38,8 @@ def main(args):
             # low_cpu_mem_usage=True,
             device_map=f"cuda:{device}",
             # # total_token=-1,
-            total_token=16,
-            depth=2,
+            total_token=64,
+            depth=6,
         )
     else:
         stage_model = StageEaModel.from_pretrained(
@@ -42,9 +47,13 @@ def main(args):
             torch_dtype=torch.float16,
             # low_cpu_mem_usage=True,
             device_map=f"cuda:{device}",
-            total_token=16,
-            depth=2,
+            total_token=64,
+            depth=6,
         )
+    
+    model_size = calculate_model_size_with_buffers(stage_model)
+    print(f'Rank{rank} Model: {model_size:.2f} MB')
+
     stage_model.to(f"cuda:{device}")
     stage_model.stage_base_model.to(f"cuda:{device}")
     if rank == 0:
@@ -52,20 +61,33 @@ def main(args):
         stage_model.ea_layer.embed_tokens.to(f"cuda:{device}")
     stage_model.eval()
     
-    your_message="Hello"
-    # conv = get_conversation_template("vicuna")
-    conv = get_conversation_template("llama-2-chat")
-    conv.append_message(conv.roles[0], your_message)
-    conv.append_message(conv.roles[1], None)
-    prompt = conv.get_prompt()
-    
     if rank == 0:
+        your_message="Hello"
+        # conv = get_conversation_template("vicuna")
+        conv = get_conversation_template("llama-2-chat")
+
+        sys_p = "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."
+        conv.system_message = sys_p
+
+        conv.append_message(conv.roles[0], your_message)
+        conv.append_message(conv.roles[1], None)
+        prompt = conv.get_prompt() + " "
+        print('\n=========PROMPT=========')
+        print(prompt)
+
         input_ids=stage_model.tokenizer([prompt]).input_ids
         input_ids = torch.as_tensor(input_ids).cuda()
-        # print(f"input_ids: {input_ids}")
-        output_ids=stage_model.eagenerate_pipeline(input_ids,temperature=0.5,max_new_tokens=512)
+        
+        start = time.perf_counter()
+        output_ids = stage_model.eagenerate_pipeline(input_ids,temperature=0.5,max_new_tokens=512)
+        torch.cuda.synchronize()
+        end = time.perf_counter()
+
         output=stage_model.tokenizer.decode(output_ids[0])
+        print('\n=========OUTPUT=========')
         print(output)
+        print(f'Total Inference time: {end - start:.2f}s')
+
     else:
         stage_model.eagenerate_pipeline(temperature=0.5, max_new_tokens=512)
     
