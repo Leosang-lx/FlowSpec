@@ -14,6 +14,8 @@ warnings.filterwarnings("ignore", category=UserWarning, message="TypedStorage is
 rank = int(os.environ['RANK'])
 world_size = int(os.environ['WORLD_SIZE'])
 
+# torch.manual_seed(1234)
+
 # os.environ['TORCH_DISTRIBUTED_DEFAULT_TIMEOUT'] = '120'
 
 def main(args):
@@ -61,6 +63,8 @@ def main(args):
         stage_model.ea_layer.embed_tokens.to(f"cuda:{device}")
     stage_model.eval()
     
+    # for i in range(10):
+    #     torch.manual_seed(12345+i)
     if rank == 0:
         your_message="Hello"
         # conv = get_conversation_template("vicuna")
@@ -79,17 +83,28 @@ def main(args):
         input_ids = torch.as_tensor(input_ids).cuda()
         
         start = time.perf_counter()
-        output_ids = stage_model.eagenerate_pipeline(input_ids,temperature=0.5,max_new_tokens=512)
+        log = True
+        # outputs = stage_model.eagenerate_pipeline(input_ids,temperature=0.5,max_new_tokens=512, log=log)
+        outputs = stage_model.eagenerate_pruned_pipeline(input_ids, temperature=0.5, max_new_tokens=512, log=log)
+        if log:
+            output_ids, new_tokens, idx = outputs
+        else:
+            output_ids = outputs
         torch.cuda.synchronize()
         end = time.perf_counter()
 
-        output=stage_model.tokenizer.decode(output_ids[0])
+        output = stage_model.tokenizer.decode(output_ids[0])
         print('\n=========OUTPUT=========')
         print(output)
+
+        if log:
+            print('New tokens:', new_tokens)
+            print('Rounds:', idx+1)
         print(f'Total Inference time: {end - start:.2f}s')
 
     else:
-        stage_model.eagenerate_pipeline(temperature=0.5, max_new_tokens=512)
+        # stage_model.eagenerate_pipeline(temperature=0.5, max_new_tokens=512)
+        stage_model.eagenerate_pruned_pipeline(temperature=0.5, max_new_tokens=512)
     
     dist.barrier()
     dist.destroy_process_group()
