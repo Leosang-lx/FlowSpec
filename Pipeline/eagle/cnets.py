@@ -467,6 +467,7 @@ class I(nn.Module):
 def len_list(x, n):
     return [i for i in x if len(i) <= n]
 
+
 # draft model of eagle
 class Model(nn.Module):
     def __init__(self, config, load_emb=False, path=None, bias=True, total_tokens=63, depth=5, top_k=8, threshold=1.0):
@@ -657,7 +658,12 @@ class Model(nn.Module):
         self.stable_kv = None
 
     @torch.no_grad()
-    def topK_genrate(self, hidden_states, input_ids, head, logits_processor, total_tokens=None, depth=None, top_k=None):
+    def topK_genrate(self, hidden_states, input_ids, head, logits_processor,
+                     total_tokens=None, depth=None, top_k=None,
+                     return_hidden=False, return_old=False, save_cache=False):
+        """
+        Important: save_cache should be used together with kv-cache pruning after receiving each verification result
+        """
 
         input_ids = input_ids.to(hidden_states.device)
         # [MODIFIED] custom tree scale
@@ -705,6 +711,12 @@ class Model(nn.Module):
         tree_mask = self.tree_mask_init
         topk_cs_index = torch.arange(top_k, device=self.embed_tokens.weight.device)
         # print(f"topk_cs_index.device={topk_cs_index.device}")
+
+        # [MODIFIED] return last_hidden_state in draft_generation for tree expansion
+        if return_hidden:
+            hidden_state_cum = []
+            hidden_state_cum.append(last_hidden)  # last_hidden: the hidden_state of the sampled token from the base model
+
         # 4
         for i in range(depth):
             self.tree_mask = tree_mask
@@ -712,6 +724,10 @@ class Model(nn.Module):
             # with Timer("draft one"):
             out_hidden, past_key_values = self(input_hidden, input_ids=input_ids, past_key_values=past_key_values,
                                                position_ids=position_ids, use_cache=True)
+            # [MODIFIED] save cache for later tree expansion
+            if save_cache:
+                self.stable_kv = past_key_values  # shape like tuple(tuple(Tensor))
+
             len_posi += 1
 
             # with Timer("sort1"):
@@ -736,6 +752,9 @@ class Model(nn.Module):
             out_ids = topk_cs_index // top_k
             # print(f"out_ids.device={out_ids.device}")
             input_hidden = out_hidden[:, out_ids]
+            if return_hidden:
+                hidden_state_cum.append(input_hidden)
+
             # with Timer("2index"):
             #     in_ids = topk_cs_index % top_k
             #     input_ids = topk_index[out_ids, in_ids][None]
@@ -759,9 +778,24 @@ class Model(nn.Module):
 
         scores_list = torch.cat(scores_list, dim=0).view(-1)
         ss_token_list = torch.cat(ss_token, dim=0).view(-1)
+
+        all_draft_size = scores_list.size(-1)
+        print(f'All draft: {all_draft_size}')
+
         top_scores = torch.topk(scores_list, total_tokens, dim=-1)
         top_scores_index = top_scores.indices
         top_scores_index = torch.sort(top_scores_index).values
+
+        if save_cache:  # todo: verify the correctness
+            past_key_values = ((
+                torch.cat(k[:, -all_draft_size], k[:, -all_draft_size:][:, top_scores_index]),
+                torch.cat(v[:, -all_draft_size], v[:, -all_draft_size:][:, top_scores_index])
+                ) for k, v in past_key_values)
+
+        if return_hidden:
+            draft_hidden = torch.cat(hidden_state_cum, dim=-2)  # cat the draft tree hidden on the sequence dimension
+            if not return_old:
+                draft_hidden = draft_hidden[:, top_scores_index]  # select the hidden related to the selected draft tokens
 
         draft_tokens = ss_token_list[top_scores_index]
         draft_tokens = torch.cat((sample_token, draft_tokens), dim=0)
@@ -836,6 +870,9 @@ class Model(nn.Module):
         retrieve_indices = torch.tensor(retrieve_indices, dtype=torch.long)
         del mask_index, mask_index_list, noleaf_index, noleaf_num, leaf_num, max_depth, rid
         tree_position_ids = tree_position_ids.to(hidden_states.device)
+
+        if return_hidden:
+            return draft_tokens, retrieve_indices, tree_mask, tree_position_ids, draft_hidden
 
         return draft_tokens, retrieve_indices, tree_mask, tree_position_ids
 

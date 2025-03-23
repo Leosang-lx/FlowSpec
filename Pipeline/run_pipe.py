@@ -85,7 +85,8 @@ def main(args):
         start = time.perf_counter()
         log = True
         # outputs = stage_model.eagenerate_pipeline(input_ids,temperature=0.5,max_new_tokens=512, log=log)
-        outputs = stage_model.eagenerate_pruned_pipeline(input_ids, temperature=0.5, max_new_tokens=512, log=log)
+        # outputs = stage_model.eagenerate_pruned_pipeline(input_ids, temperature=0.5, max_new_tokens=512, log=log)
+        outputs = stage_model.eagenerate_continuous(input_ids, temperature=0.5, max_new_tokens=512, log=log)
         if log:
             output_ids, new_tokens, idx = outputs
         else:
@@ -104,7 +105,8 @@ def main(args):
 
     else:
         # stage_model.eagenerate_pipeline(temperature=0.5, max_new_tokens=512)
-        stage_model.eagenerate_pruned_pipeline(temperature=0.5, max_new_tokens=512)
+        # stage_model.eagenerate_pruned_pipeline(temperature=0.5, max_new_tokens=512)
+        stage_model.eagenerate_continuous(temperature=0.5, max_new_tokens=512)
     
     dist.barrier()
     dist.destroy_process_group()

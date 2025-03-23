@@ -24,8 +24,9 @@ TOPK = 10  # topk for sparse tree
 def calculate_model_size_with_buffers(model):
     total_memory = 0
     
-    for tensor in model.state_dict().values():
-        total_memory += tensor.element_size() * tensor.numel()
+    for key, tensor in model.state_dict().items():
+        if 'lm_head' not in key:
+            total_memory += tensor.element_size() * tensor.numel()
     
     # transform to MB
     memory_size_mb = total_memory / (1024 ** 2)
@@ -448,10 +449,10 @@ def stage_tree_decoding_liux(
     if stage_model.is_first_stage:
         for i, hidden_state_split in enumerate(hidden_state_splits):
             dist.recv(hidden_state_split, src=config.last_rank)
-            if i == 0:
-                print(f'sub_hidden_state\n{hidden_state_split}')
+            # if i == 0:
+                # print(f'sub_hidden_state\n{hidden_state_split}')
             hidden_state_splits[i] = hidden_state_split.to(device)
-            tree_logits_split = tree_logits_split + (stage_model.stage_base_model.lm_head(hidden_state_splits[i]))
+            tree_logits_split = tree_logits_split + (stage_model.stage_base_model.lm_head(hidden_state_splits[i]),)
 
         tree_logits = torch.concat(tree_logits_split, dim=-2)  # concat at the seq dimension
         # logits = tree_logits[0, retrieve_indices]
