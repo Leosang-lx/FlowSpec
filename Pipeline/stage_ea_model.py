@@ -911,7 +911,7 @@ class StageEaModel(nn.Module):
                     accept_length = 0
                     if config.is_last_stage:
                         subseq_ri_cum_depths = subseq_ri_cum_depths[1:]
-                # [above part is exactly the same as eagenerate_pruned_pipeline()]
+                # [the above part is exactly the same as eagenerate_pruned_pipeline()]
                         
                 # 此时：
                 # 1. 所有stage都要发送sub_hidden_state给下一个stage
@@ -975,8 +975,9 @@ class StageEaModel(nn.Module):
                 # first stage: tree expansion and forword
                 # - execute first_stage_pruning()
                 if config.is_first_stage:
-                    draft_tokens, retrieve_indices, accepted_tokens = first_stage_pruning(
-                            left_indices, accept_length, draft_tokens, retrieve_indices
+                    # prune subseq_ri_cum_depths for continuous speculation
+                    draft_tokens, retrieve_indices, accepted_tokens, subseq_ri_cum_depths = first_stage_pruning(
+                            left_indices, accept_length, draft_tokens, retrieve_indices, subseq_ri_cum_depths
                         )
                     cur_draft_depth = (retrieve_indices != -1).sum(dim=1).max()
                     cur_draft_size = draft_tokens.size(-1)
@@ -1013,7 +1014,8 @@ class StageEaModel(nn.Module):
                     merge_two_tree(
                         (draft_tokens.cpu(), retrieve_indices, tree_mask, tree_position_ids),
                         (new_draft_tokens.cpu(), new_retrieve_indices, new_tree_mask, new_tree_position_ids),
-                        lens_split
+                        lens_split,
+                        subseq_ri_cum_depths
                     )
 
                     raise RuntimeError('stop here')

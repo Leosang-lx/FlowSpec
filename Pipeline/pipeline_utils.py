@@ -658,7 +658,7 @@ def token_tree_partition(draft_tokens, retrieve_indices, total_stage):
     # print(lens_split)
     for i, cum_seq_len in enumerate(cum_seq_lens):
         for j in range(0 if i == 0 else cum_seq_lens[i - 1], cum_seq_len):
-            row_indices = torch.arange(retrieve_indices.size(0), dtype=torch.long)
+            row_indices = torch.arange(retrieve_indices.size(0), dtype=torch.int)
             cum_ri_leaves = retrieve_indices[row_indices, ri_depth_cum]
             ri_depth_cum[cum_ri_leaves == j] += 1
 
@@ -815,7 +815,7 @@ def find_prefix_match(retrieve_indices, accept_indices):
 
     matches = torch.all(prefixes == accept_indices.unsqueeze(0), dim=1)
 
-    match_paths = torch.nonzero(matches).squeeze(dim=1)
+    match_paths = torch.nonzero(matches).squeeze(1)
 
     return match_paths
 
@@ -872,7 +872,7 @@ def pruning(draft_tokens, retrieve_indices, best_candidate, accept_len, new_toke
     # found the paths with prefix of "accept_tokens + new_token"
     # print(f'next_tokens_draft={next_tokens_draft}')
     # print(f'new_token={new_token}')
-    same_indices = torch.nonzero(next_tokens_draft == new_token.cpu()).squeeze(dim=1)
+    same_indices = torch.nonzero(next_tokens_draft == new_token.cpu()).squeeze(1)
     # print(f'same_indices={same_indices}')
     if same_indices.numel() == 0:
         # truncate: unmatched token
@@ -903,7 +903,7 @@ def pruning(draft_tokens, retrieve_indices, best_candidate, accept_len, new_toke
     return left_draft_tokens, transformed_ri, left_indices, left_ri_cum_depths
 
 
-def first_stage_pruning(left_indices, accept_len, draft_tokens, retrieve_indices):
+def first_stage_pruning(left_indices, accept_len, draft_tokens, retrieve_indices,subseq_ri_cum_depths=None):
     left_draft_indices = left_indices[accept_len:]
     # print(left_indices, draft_tokens)
     # prune draft_tokens
@@ -923,6 +923,11 @@ def first_stage_pruning(left_indices, accept_len, draft_tokens, retrieve_indices
     left_retrieve_indices = left_retrieve_indices[:, :max_depth]  # drop the all -1 layers
     left_indices_from_zero = torch.arange(left_indices.size(-1) - accept_len, dtype=torch.long)
     transformed_ri = map_retrieve_indices(left_retrieve_indices, left_indices[accept_len:], left_indices_from_zero)
+
+    # prune subseq_ri_cum_depths
+    if subseq_ri_cum_depths is not None:
+        left_ri_cum_depths = subseq_ri_cum_depths[1:, matched_candidates] - accept_len
+        return left_draft_tokens, transformed_ri, prefix_tokens[:, :-1], left_ri_cum_depths
 
     return left_draft_tokens, transformed_ri, prefix_tokens[:, :-1]
     # , prefix_tokens[:, -1]
@@ -1023,7 +1028,9 @@ def get_parent_indices(tree_mask: torch.Tensor) -> torch.Tensor:
 def merge_two_tree(
         tree1: Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
         tree2: Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
-        lens_split):
+        lens_split,
+        subseq_ri_cum_depths
+):
     """
     Merge two tree that share the same root node, tree1 is the old tree, tree2 is the new tree
     The merged tree has the draft_tokens of: {draft_tokens1, added_tokens}
@@ -1050,10 +1057,8 @@ def merge_two_tree(
     for i, draft_token in enumerate(draft_tokens1[0, :]):
         # important: squeeze(1) to avoid the shape (1) and use tuple(int) for the dict key
         token_path = draft_tokens1[0, torch.nonzero(tree_mask1[i, :]).squeeze(1)].tolist()
-        # print('token_path: ', token_path)
         paths_tree1_idx[tuple(token_path)] = i
-    # for key, value in paths_tree1_idx.items():
-    #     print(f'{key} -> {value}')
+
 
     # [merge draft_tokens]
     # init draft_tokens_merged as draft_tokens1
@@ -1084,7 +1089,7 @@ def merge_two_tree(
 
             # update index_mapping
             index_mapping_2_to_merged[i] = mapped_idx
-    # todo: 可以优化的点：遍历时到了比tree1更深的点应该可以批量化merge
+    # todo: 优化：遍历时到了比tree1更深的点应该可以批量化merge
     # [merge draft_tokens] finish
 
     print(f'draft_tokens_merged: {draft_tokens_merged}')
@@ -1128,16 +1133,16 @@ def merge_two_tree(
     # get leaf nodes of tree1
     leave_paths1 = {}
     for i in range(retrieve_indices1.size(0)):
-        leaf_node_pos = torch.nonzero(retrieve_indices1[i, :]).squeeze(1)[-1]
-        leaf_node_idx = retrieve_indices1[i, leaf_node_pos]
+        leaf_node_pos = torch.nonzero(retrieve_indices1[i, :] != -1).squeeze(1)[-1]
+        # leaf_node_idx = retrieve_indices1[i, leaf_node_pos]
         leaf_path = tuple(draft_tokens1[0, retrieve_indices1[i, :leaf_node_pos+1]].tolist())
         leave_paths1[leaf_path] = i
 
     # get leaf nodes of tree2
     leave_paths2 = {}
     for i in range(retrieve_indices2.size(0)):
-        leaf_node_pos = torch.nonzero(retrieve_indices2[i, :]).squeeze(1)[-1]
-        leaf_node_idx = retrieve_indices2[i, leaf_node_pos]
+        leaf_node_pos = torch.nonzero(retrieve_indices2[i, :] != -1).squeeze(1)[-1]
+        # leaf_node_idx = retrieve_indices2[i, leaf_node_pos]
         leaf_path = tuple(draft_tokens2[0, retrieve_indices2[i, :leaf_node_pos+1]].tolist())
         leave_paths2[leaf_path] = i
 
@@ -1146,30 +1151,59 @@ def merge_two_tree(
     # todo: bug for display with wrong leaf_path
     for leaf_path, leaf_path_idx in leave_paths1.items():
         if leaf_path in paths_tree2 and leaf_path not in leave_paths2:
-            print(leaf_path, 'remove')
+            # print(leaf_path, 'remove')
+            pass
         else:
-            print(leaf_path, 'select')
+            # print(leaf_path, 'select')
             selected_leaves1[leaf_path_idx] = True
     for leaf_path, leaf_path_idx in leave_paths2.items():
         if leaf_path not in paths_tree1_idx:
-            print(leaf_path, 'select')
+            # print(leaf_path, 'select')
             selected_leaves2[leaf_path_idx] = True
         else:
-            print(leaf_path, 'remove')
+            # print(leaf_path, 'remove')
+            pass
 
     ri_selected1 = F.pad(retrieve_indices1[selected_leaves1, :], (0, tree2_depth - tree1_depth), value=-1)
     ri_selected2 = retrieve_indices2[selected_leaves2, :]
     ri_selected2 = map_retrieve_indices(ri_selected2, torch.arange(index_mapping_2_to_merged.size(0)), index_mapping_2_to_merged)
     retrieve_indices_merged = torch.cat((ri_selected1, ri_selected2), dim=0)
-    ri_flat = retrieve_indices_merged.view(-1)
-    ri_unique = torch.unique(ri_flat[ri_flat != -1]).sort()
-    print(ri_unique)
+
+    last_subseq_ri_cum_depth = torch.nonzero(retrieve_indices_merged != -1).squeeze(1)[-1]
+    # ri_flat = retrieve_indices_merged.view(-1)
+    # ri_unique = torch.sort(torch.unique(ri_flat[ri_flat != -1]))
+    # print(ri_unique)
 
     merged_token_tree = map_retrieve_indices(retrieve_indices_merged, torch.arange(draft_tokens_merged.size(0)), draft_tokens_merged)
     print(f'merged_token_tree: {merged_token_tree}')
     # [merge retrieve_indices] finish
 
     # todo: update subseq_ri_cum_depths and lens_split
+    lens_split = torch.cat((lens_split, torch.tensor([draft_tokens_merged.size(0) - tree1_size], dtype=torch.long)))
+    print(f'lens_split: {lens_split}')
+
+    n_leaves = retrieve_indices_merged.size(0)
+    subseq_ri_cum_depths = []
+    cum_seq_lens = torch.cumsum(lens_split, dim=0)
+    bottom = torch.full((n_leaves,), -1, dtype=torch.long)
+    retrieve_indices_filled = torch.cat((retrieve_indices_merged, bottom[:, None]), dim=1)  # add -1 to bottom to prevent overflow
+    # print(retrieve_indices)
+    # print(lens_split)
+    ri_depth_cum = torch.zeros(n_leaves, dtype=torch.long)
+    for i, cum_seq_len in enumerate(cum_seq_lens):
+        for j in range(0 if i == 0 else cum_seq_lens[i - 1], cum_seq_len):
+            row_indices = torch.arange(n_leaves, dtype=torch.int)
+            cum_ri_leaves = retrieve_indices_filled[row_indices, ri_depth_cum]
+            ri_depth_cum[cum_ri_leaves == j] += 1
+
+        # print(ri_depth_cum)
+        subseq_ri_cum_depths.append(ri_depth_cum.clone())
+        # todo: 优化最后一段直接append，不需要累加
+
+    print(f'subseq_ri_cum_depths: {subseq_ri_cum_depths}')
+    
+    return draft_tokens_merged, retrieve_indices_merged, merged_tree_mask, merged_tree_pos_ids, lens_split, subseq_ri_cum_depths
+
 
 
 
