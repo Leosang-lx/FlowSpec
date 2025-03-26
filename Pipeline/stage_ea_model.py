@@ -978,8 +978,10 @@ class StageEaModel(nn.Module):
                     draft_tokens, retrieve_indices, accepted_tokens = first_stage_pruning(
                             left_indices, accept_length, draft_tokens, retrieve_indices
                         )
-                    cur_draft_depth = torch.nonzero(retrieve_indices).sum(dim=1).max()
+                    cur_draft_depth = (retrieve_indices != -1).sum(dim=1).max()
                     cur_draft_size = draft_tokens.size(-1)
+                    print(f'cur_draft_depth: {cur_draft_depth}')
+                    print(f'cur_draft_size: {cur_draft_size}')
                     input_ids = torch.cat((input_ids, accepted_tokens), dim=-1)
 
                     irecv_task.wait()
@@ -996,7 +998,7 @@ class StageEaModel(nn.Module):
                         input_ids_ea,
                         self.stage_base_model.lm_head,
                         logits_processor,
-                        depth=cur_draft_depth + 2,
+                        depth=cur_draft_depth + 1,  # todo: test the best depth and total_tokens size
                         total_tokens=cur_draft_size + 16
                     )
                     print('==========old')
@@ -1007,6 +1009,12 @@ class StageEaModel(nn.Module):
                     print(f'retrieve_indices: {new_retrieve_indices}')
 
                     print(torch.isin(draft_tokens, new_draft_tokens))
+
+                    merge_two_tree(
+                        (draft_tokens.cpu(), retrieve_indices, tree_mask, tree_position_ids),
+                        (new_draft_tokens.cpu(), new_retrieve_indices, new_tree_mask, new_tree_position_ids),
+                        lens_split
+                    )
 
                     raise RuntimeError('stop here')
                     
