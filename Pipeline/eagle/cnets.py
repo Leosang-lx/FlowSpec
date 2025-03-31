@@ -673,6 +673,7 @@ class Model(nn.Module):
             depth = self.depth
         if top_k is None:
             top_k = self.top_k
+        # print(f'top_k: {top_k}')
 
         sample_token = input_ids[:, -1]
 
@@ -689,6 +690,7 @@ class Model(nn.Module):
         # with Timer("draft many"):
         if hasattr(self, "stable_kv") and self.stable_kv is not None:
             kv_len = self.stable_kv[0][0].shape[2]
+            # print(f'kv_len in topk_genrate: {kv_len}')
             out_hidden, past_key_values = self(hidden_states, input_ids=input_ids[:, kv_len:],
                                                past_key_values=self.stable_kv, use_cache=True)
         else:
@@ -780,7 +782,7 @@ class Model(nn.Module):
         ss_token_list = torch.cat(ss_token, dim=0).view(-1)
 
         all_draft_size = scores_list.size(-1)
-        print(f'All draft: {all_draft_size}')
+        # print(f'All draft: {all_draft_size}')
 
         top_scores = torch.topk(scores_list, total_tokens, dim=-1)
         top_scores_index = top_scores.indices
