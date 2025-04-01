@@ -463,6 +463,8 @@ class StageEaModel(nn.Module):
                     hidden_state, input_ids_ea, self.stage_base_model.lm_head,
                     logits_processor)
                 # print('draft_tokens', draft_tokens)
+                tree_mask = tree_mask.to(input_ids.device)
+                tree_position_ids = tree_position_ids + input_ids.size(-1)
 
                 # split the tree
                 draft_tokens_split, lens_split, subseq_ri_cum_depths = token_tree_partition(
@@ -481,6 +483,7 @@ class StageEaModel(nn.Module):
                 )
             else:
                 fill_pipeline_params = (self, past_key_values)
+
             outputs = fill_pipeline_stages(*fill_pipeline_params)
             # print(config.stage, 'finish fill pipeline stages')    
 
@@ -598,7 +601,7 @@ class StageEaModel(nn.Module):
                     # print(f'stage{config.stage}: no pruning in the {i}th round')
                     lens_split = lens_split[1:]
                     accept_length = 0
-                    if config.is_last_stage:
+                    if config.is_first_stage or config.is_last_stage:  # 但是first stage用不着cum_depths
                         subseq_ri_cum_depths = subseq_ri_cum_depths[1:]
 
                 # print(f'stage{config.stage}: lens_split:{lens_split}')
@@ -828,7 +831,7 @@ class StageEaModel(nn.Module):
                 sub_hidden_state = outputs
 
                 # 表示last_stage当前拥有了到了多少subseq对应的信息：ri, draft_tokens, subseq_ri_cum_depths
-                first_stage_subseq_process_idx = last_stage_subseq_process_idx = config.total_stage - 1
+                # first_stage_subseq_process_idx = last_stage_subseq_process_idx = config.total_stage - 1
             elif self.is_last_stage:
                 sub_hidden_state, lens_split, draft_tokens, retrieve_indices, tree_mask, tree_position_ids, subseq_ri_cum_depths = outputs
             else:  # middle stages
@@ -837,8 +840,8 @@ class StageEaModel(nn.Module):
             # print(f'stage{config.stage} idx_spec={idx_spec} kv_len={current_length_data[0].item()} after fill_pipeline_stages')
 
 
-            test_tree_mask = torch.sum(tree_mask[0, 0, ...], dim=-1).to(torch.long)-1
-            test_position_ids = tree_position_ids - tree_position_ids[0]
+            # test_tree_mask = torch.sum(tree_mask[0, 0, ...], dim=-1).to(torch.long)-1
+            # test_position_ids = tree_position_ids - tree_position_ids[0]
             # print(f'stage{config.stage} test tree_mask and tree_position_ids: {torch.equal(test_tree_mask, test_position_ids)} after fill_pipeline_stages')
                 
             if self.is_first_stage:
@@ -934,10 +937,11 @@ class StageEaModel(nn.Module):
 
                     # [global pruning] prune the tokens (kv_cache and hidden_state)
                     # - according to the global_accept_len and the hidden_state_len
-                    if not truncate:
+
+                    # if not truncate:
                         # print(f'stage{config.stage} {i}th tree_mask: {tree_mask.shape} before pruning')
-                        test_tree_mask = torch.sum(tree_mask[0, 0, ...], dim=-1).to(torch.long)-1
-                        test_position_ids = tree_position_ids - tree_position_ids[0]
+                        # test_tree_mask = torch.sum(tree_mask[0, 0, ...], dim=-1).to(torch.long)-1
+                        # test_position_ids = tree_position_ids - tree_position_ids[0]
                         # print(f'stage{config.stage} {i}th test tree_mask and tree_position_ids: {torch.equal(test_tree_mask, test_position_ids)} before pruning')
                         # print(f'stage{config.stage} {i}th lens_split: {lens_split} before pruning')
                         # print(f'stage{config.stage} {i}th sub_hidden_state: {sub_hidden_state.shape} before pruning')
@@ -957,11 +961,11 @@ class StageEaModel(nn.Module):
                     )
                     # print(f'stage{config.stage} {i}th kv_len={current_length_data[0].item()} after token_pruning')
 
-                    if not truncate:
+                    # if not truncate:
                         # print(f'stage{config.stage} {i}th tree_mask: {tree_mask} after pruning')
                         # print(f'stage{config.stage} {i}th tree_mask: {tree_mask.shape} after pruning')
-                        test_tree_mask = torch.sum(tree_mask[0, 0, ...], dim=-1).to(torch.long)-1
-                        test_position_ids = tree_position_ids - tree_position_ids[0]
+                        # test_tree_mask = torch.sum(tree_mask[0, 0, ...], dim=-1).to(torch.long)-1
+                        # test_position_ids = tree_position_ids - tree_position_ids[0]
                         # print(f'stage{config.stage} {i}th test tree_mask and tree_position_ids: {torch.equal(test_tree_mask, test_position_ids)} after pruning')
                         # print(f'stage{config.stage} {i}th lens_split: {lens_split} after pruning')
                         # print(f'stage{config.stage} {i}th sub_hidden_state: {sub_hidden_state.shape} after pruning')
@@ -1140,9 +1144,8 @@ class StageEaModel(nn.Module):
                     dist.broadcast(appended_tree_mask.cpu(), src=config.stage)
 
                     # - last stage: appended tree_pos_ids, tree_mask, and for last stage [appended_draft_tokens + retrieve_indices + subseq_ri_cum_depths]
-                    # if first_stage_subseq_process_idx - last_stage_subseq_process_idx == config.total_stage - 1:
                     ri_shape = torch.tensor(retrieve_indices.shape, dtype=torch.long)
-                    # complete transmission
+                    # complete update
                     dist.send(draft_tokens[:, existing_draft_len:input_draft_end_idx].cpu(), dst=config.last_rank)
                     dist.send(ri_shape, dst=config.last_rank)
                     dist.send(retrieve_indices, dst=config.last_rank)  # todo: maybe merge retrieve_indices and subseq_ri_cum_depths and send once
@@ -1157,7 +1160,6 @@ class StageEaModel(nn.Module):
                     # print(f'stage{config.stage} {i}th tree_mask_split: {tree_mask_split.shape}')
                     self.stage_base_model.model.tree_mask = tree_mask_split
 
-                    # first_stage_subseq_process_idx += 1  # 输入了新的draft subseq
                     outputs, sub_hidden_state = self(
                         input_ids=appended_input_ids,
                         past_key_values=past_key_values,
