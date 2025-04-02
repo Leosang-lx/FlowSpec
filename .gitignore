@@ -3,3 +3,4 @@ __pycache__/
 *.tmp
 *_model.bin
 *.lprof
+test.py
