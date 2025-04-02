@@ -1151,7 +1151,7 @@ class StageEaModel(nn.Module):
                     dist.send(retrieve_indices, dst=config.last_rank)  # todo: maybe merge retrieve_indices and subseq_ri_cum_depths and send once
                     # print(f'stage{config.stage} {i}th send subseq_ri_cum_depths {subseq_ri_cum_depths.shape}')
                     dist.send(subseq_ri_cum_depths, dst=config.last_rank)
-                    last_stage_subseq_process_idx += config.total_stage
+                    # last_stage_subseq_process_idx += config.total_stage
 
                     # print(f'stage{config.stage} {i}th draft_tokens: {draft_tokens.shape}')
                     appended_input_ids = draft_tokens[:, existing_draft_len:input_draft_end_idx]

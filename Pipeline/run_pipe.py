@@ -25,8 +25,8 @@ def main(args):
     
     rank = dist.get_rank()
     world_size = dist.get_world_size()
-    device = rank % torch.cuda.device_count()
-    # device = 0
+    # device = rank % torch.cuda.device_count()
+    device = 1
     torch.cuda.set_device(device)
     print(f'rank={rank}, world_size={world_size}, device={device}')
     
@@ -85,9 +85,9 @@ def main(args):
         
         start = time.perf_counter()
         log = True
-        outputs = stage_model.eagenerate_pipeline(input_ids,temperature=0.5,max_new_tokens=512, log=log)
+        # outputs = stage_model.eagenerate_pipeline(input_ids,temperature=0.5,max_new_tokens=512, log=log)
         # outputs = stage_model.eagenerate_pruned_pipeline(input_ids, temperature=0.5, max_new_tokens=512, log=log)
-        # outputs = stage_model.eagenerate_continuous(input_ids, temperature=0.5, max_new_tokens=512, log=log)
+        outputs = stage_model.eagenerate_continuous(input_ids, temperature=0.5, max_new_tokens=512, log=log)
         if log:
             output_ids, new_tokens, idx = outputs
         else:
@@ -105,9 +105,9 @@ def main(args):
         print(f'Total Inference time: {end - start:.2f}s')
 
     else:
-        stage_model.eagenerate_pipeline(temperature=0.5, max_new_tokens=512)
+        # stage_model.eagenerate_pipeline(temperature=0.5, max_new_tokens=512)
         # stage_model.eagenerate_pruned_pipeline(temperature=0.5, max_new_tokens=512)
-        # stage_model.eagenerate_continuous(temperature=0.5, max_new_tokens=512)
+        stage_model.eagenerate_continuous(temperature=0.5, max_new_tokens=512)
     
     dist.barrier()
     dist.destroy_process_group()
