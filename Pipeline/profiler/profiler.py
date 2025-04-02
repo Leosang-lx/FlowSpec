@@ -197,7 +197,7 @@ class Profiler:
         """
         total_time, avg_time = self.get_all_elapsed_times()
         for name, time in total_time.items():
-            print(star + f"{name}" + star + f"total time: {time} ms, avg time: {avg_time[name]} ms")
+            print(star + f"{name}" + star + f"total time: {time:.2f} ms, avg time: {avg_time[name]:.2f} ms")
 
     def print_all_additional_memory(self):
         """
@@ -205,8 +205,8 @@ class Profiler:
         """
         total_additional, avg_additional = self.get_all_additional_memory()
         for name, additional in total_additional.items():
-            total_additional_str = f" allocated: {additional[0]} MB \n max allocated: {additional[1]} MB \n reserved: {additional[2]} MB \n max reserved: {additional[3]} MB"
-            avg_additional_str = f" avg allocated: {avg_additional[name][0]} MB \n avg max allocated: {avg_additional[name][1]} MB \n avg reserved: {avg_additional[name][2]} MB \n avg max reserved: {avg_additional[name][3]} MB"
+            total_additional_str = f" allocated: {additional[0]:.2f} MB \n max allocated: {additional[1]:.2f} MB \n reserved: {additional[2]:.2f} MB \n max reserved: {additional[3]:.2f} MB"
+            avg_additional_str = f" avg allocated: {avg_additional[name][0]:.2f} MB \n avg max allocated: {avg_additional[name][1]:.2f} MB \n avg reserved: {avg_additional[name][2]:.2f} MB \n avg max reserved: {avg_additional[name][3]:.2f} MB"
             
             print(star + f"{name}" + star + f"{total_additional_str}" + sep + f"{avg_additional_str}")
 

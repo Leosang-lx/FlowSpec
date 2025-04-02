@@ -14,6 +14,7 @@ from stage_modeling_llama import StageLlamaModelForCausalLM
 from stage_ea_config import StageEaConfig
 from pipeline_utils import *
 
+from profiler.profiler import prof
 
 class StageEaModel(nn.Module):
 
@@ -75,63 +76,77 @@ class StageEaModel(nn.Module):
             top_k=10,
             threshold=1.0,
             **kwargs,
-    ):
+    ):  
         model_config = StageEaConfig.from_pretrained(stage_base_model_path)
         assert Type == 'LLaMA'  # only support LLaMA for now
-        stage_base_model = StageLlamaModelForCausalLM.from_pretrained(
-            stage_base_model_path, **kwargs
-        )
+        
+        if model_config.is_first_stage:
+            with prof.profile_context("loading stage base model", device=kwargs['device_map']):
+                stage_base_model = StageLlamaModelForCausalLM.from_pretrained(
+                    stage_base_model_path, **kwargs
+                )
+        else:
+            stage_base_model = StageLlamaModelForCausalLM.from_pretrained(
+                stage_base_model_path, **kwargs
+            )
         # if model_config.has_lm_head:
         #     print(f"stage_base_model.lm_head.weight.device={stage_base_model.lm_head.weight.device}")
         # Type = AutoConfig.from_pretrained(stage_base_model_path).architectures[0]
 
         # [MODIFIED] load draft model when config.has_draft_model==True
         if model_config.has_draft_model:
-            assert ea_model_path is not None
-            config_path = os.path.join(ea_model_path, 'config.json')
-            if not os.path.exists(config_path):
-                config_path = hf_hub_download(ea_model_path, "config.json")
-            try:
-                load_model_path = os.path.join(ea_model_path, "pytorch_model.bin")
-                if not os.path.exists(load_model_path):
-                    load_model_path = hf_hub_download(ea_model_path, "pytorch_model.bin")
-                ea_layer_state_dict = torch.load(load_model_path,
-                                                 map_location=stage_base_model.device)
-            except:
-                from safetensors.torch import load_file
-                load_model_path = os.path.join(ea_model_path, "model.safetensors")
-                if not os.path.exists(load_model_path):
-                    load_model_path = hf_hub_download(ea_model_path, "model.safetensors")
-                ea_layer_state_dict = load_file(load_model_path)
+            with prof.profile_context("loading ea_layer state_dict", device=kwargs['device_map']):
+                
+                assert ea_model_path is not None
+                config_path = os.path.join(ea_model_path, 'config.json')
+                if not os.path.exists(config_path):
+                    config_path = hf_hub_download(ea_model_path, "config.json")
+                try:
+                    load_model_path = os.path.join(ea_model_path, "pytorch_model.bin")
+                    if not os.path.exists(load_model_path):
+                        load_model_path = hf_hub_download(ea_model_path, "pytorch_model.bin")
+                    ea_layer_state_dict = torch.load(load_model_path,
+                                                    map_location=stage_base_model.device)
+                except:
+                    from safetensors.torch import load_file
+                    load_model_path = os.path.join(ea_model_path, "model.safetensors")
+                    if not os.path.exists(load_model_path):
+                        load_model_path = hf_hub_download(ea_model_path, "model.safetensors")
+                    ea_layer_state_dict = load_file(load_model_path,
+                                                    device=stage_base_model.device)
+                    
+                # [MODIFIED] load ea_draft_model in from_pretrained()
+                ea_config = StageEaConfig.from_pretrained(config_path)
+                # load the draft model
+                with open(config_path, "r") as f:
+                    con = json.loads(f.read())
+                try:
+                    bias = con['bias']
+                except:
+                    bias = True
 
-            # [MODIFIED] load ea_draft_model in from_pretrained()
-            ea_config = StageEaConfig.from_pretrained(config_path)
-            # load the draft model
-            with open(config_path, "r") as f:
-                con = json.loads(f.read())
-            try:
-                bias = con['bias']
-            except:
-                bias = True
+                ea_layer = Model(ea_config, bias=bias, total_tokens=total_token, depth=depth, top_k=top_k,
+                                threshold=threshold)
+                low_memory = False
 
-            ea_layer = Model(ea_config, bias=bias, total_tokens=total_token, depth=depth, top_k=top_k,
-                             threshold=threshold)
-            low_memory = False
+                device = stage_base_model.model.layers[-1].self_attn.q_proj.weight.device
+                # print(f"stage_base_model.lm_head.weight.device={stage_base_model.lm_head.weight.device}")
+                # print(f"device={device}")
+                if device != stage_base_model.lm_head.weight.device:
+                    ea_layer.diff_device = True
+                    if not low_memory:
+                        ea_layer.headweight = stage_base_model.lm_head.weight.clone().to(device)
+                    else:
+                        ea_layer.layer_device = device
 
-            device = stage_base_model.model.layers[-1].self_attn.q_proj.weight.device
-            # print(f"stage_base_model.lm_head.weight.device={stage_base_model.lm_head.weight.device}")
-            # print(f"device={device}")
-            if device != stage_base_model.lm_head.weight.device:
-                ea_layer.diff_device = True
-                if not low_memory:
-                    ea_layer.headweight = stage_base_model.lm_head.weight.clone().to(device)
                 else:
-                    ea_layer.layer_device = device
-
-            else:
-                ea_layer.diff_device = False
-            ea_layer.load_state_dict(ea_layer_state_dict, strict=True)
-            ea_layer.to(stage_base_model.dtype).to(device)
+                    ea_layer.diff_device = False
+                ea_layer.load_state_dict(ea_layer_state_dict, strict=True)
+                
+                del ea_layer_state_dict, ea_config, con
+                torch.cuda.empty_cache()
+                
+                ea_layer.to(stage_base_model.dtype).to(device)
             # print(f"ea_layer.embed_tokens.weight.device={ea_layer.embed_tokens.weight.device}")
         else:
             ea_layer = None
@@ -1078,7 +1093,7 @@ class StageEaModel(nn.Module):
                         )  # get a little more appended tokens
                         tree_position_ids2 = tree_position_ids2 + input_ids.size(-1)
 
-                        print(tree_position_ids[0], tree_position_ids2[0])
+                        # print(tree_position_ids[0], tree_position_ids2[0])
                         assert tree_position_ids[0] == tree_position_ids2[0], 'Should starts from same pos_id'
 
                         # print(f'stage{config.stage} {i}th merge two tree')
@@ -1151,7 +1166,7 @@ class StageEaModel(nn.Module):
                     dist.send(retrieve_indices, dst=config.last_rank)  # todo: maybe merge retrieve_indices and subseq_ri_cum_depths and send once
                     # print(f'stage{config.stage} {i}th send subseq_ri_cum_depths {subseq_ri_cum_depths.shape}')
                     dist.send(subseq_ri_cum_depths, dst=config.last_rank)
-                    last_stage_subseq_process_idx += config.total_stage
+                    # last_stage_subseq_process_idx += config.total_stage
 
                     # print(f'stage{config.stage} {i}th draft_tokens: {draft_tokens.shape}')
                     appended_input_ids = draft_tokens[:, existing_draft_len:input_draft_end_idx]

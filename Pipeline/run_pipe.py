@@ -28,15 +28,15 @@ def main(args):
     rank = dist.get_rank()
     world_size = dist.get_world_size()
     device = rank % torch.cuda.device_count()
-    # device = 0
+    device = 1
     torch.cuda.set_device(device)
     print(f'rank={rank}, world_size={world_size}, device={device}')
     
     base_model_path = f"/home/liux/LLM/pipeline_model/meta-llama/Llama-2-7b-chat-hf/stage_model_series_8+8+8+8/stage_model_{rank}"
     EAGLE_model_path = "/home/liux/LLM/models_hf/yuhuili/EAGLE-llama2-chat-7B"
     
-    if rank == 0:
-        with prof.profile_context("loading stage model", device=f"cuda:{device}"):
+    with prof.profile_context(f"Rank {rank}: loading stage model", device=f"cuda:{device}"):
+        if rank == 0:
             stage_model = StageEaModel.from_pretrained(
                 stage_base_model_path=base_model_path,
                 ea_model_path=EAGLE_model_path,
@@ -47,15 +47,15 @@ def main(args):
                 total_token=64,
                 depth=6,
             )
-    else:
-        stage_model = StageEaModel.from_pretrained(
-            stage_base_model_path=base_model_path,
-            torch_dtype=torch.float16,
-            # low_cpu_mem_usage=True,
-            device_map=f"cuda:{device}",
-            total_token=64,
-            depth=6,
-        )
+        else:
+            stage_model = StageEaModel.from_pretrained(
+                stage_base_model_path=base_model_path,
+                torch_dtype=torch.float16,
+                # low_cpu_mem_usage=True,
+                device_map=f"cuda:{device}",
+                total_token=64,
+                depth=6,
+            )
     
     # stage_model.to(f"cuda:{device}")
     # stage_model.stage_base_model.to(f"cuda:{device}")
@@ -63,12 +63,10 @@ def main(args):
     #     stage_model.ea_layer.to(f"cuda:{device}")
     #     stage_model.ea_layer.embed_tokens.to(f"cuda:{device}")
     stage_model.eval()
-    torch.cuda.empty_cache()
-    # for i in range(10):
-    #     torch.manual_seed(12345+i)
+
     with torch.no_grad():
-        if rank == 0:
-            with prof.profile_context("inference", device=f"cuda:{device}"):
+        with prof.profile_context(f"Rank {rank}: inference", device=f"cuda:{device}"):
+            if rank == 0:
                 your_message="Hello"
                 # conv = get_conversation_template("vicuna")
                 conv = get_conversation_template("llama-2-chat")
@@ -105,26 +103,16 @@ def main(args):
                     print('New tokens:', new_tokens)
                     print('Rounds:', idx+1)
                     # print(f'Total Inference time: {end - start:.2f}s')
-
-        else:
-            # stage_model.eagenerate_pipeline(temperature=0.5, max_new_tokens=512)
-            # stage_model.eagenerate_pruned_pipeline(temperature=0.5, max_new_tokens=512)
-            stage_model.eagenerate_continuous(temperature=0.5, max_new_tokens=512)
+            else:
+                # stage_model.eagenerate_pipeline(temperature=0.5, max_new_tokens=512)
+                # stage_model.eagenerate_pruned_pipeline(temperature=0.5, max_new_tokens=512)
+                stage_model.eagenerate_continuous(temperature=0.5, max_new_tokens=512)
     
-    # if rank == 0:
-    #     print(torch.cuda.list_gpu_processes(device=f"cuda:{device}"))
-    # # mem_summary = torch.cuda.memory_summary() + "\n"
-    # # mem_state = torch.cuda.memory_stats(device=f"cuda:{device}")
-    # mem_allocated_line = "Memory allocated:" + str(torch.cuda.memory_allocated(device=f"cuda:{device}") / (1024 * 1024)) + " MB"
-    # max_memory_allocated_line = "Max memory usage:" + str(torch.cuda.max_memory_allocated(device=f"cuda:{device}") / (1024 * 1024)) + " MB"
-    # mem_reserved_line = "Memory reserved:" + str(torch.cuda.memory_reserved(device=f"cuda:{device}") / (1024 * 1024)) + " MB"
-    # max_memory_reserved_line = "Max memory reserved:" + str(torch.cuda.max_memory_reserved(device=f"cuda:{device}") / (1024 * 1024)) + " MB"
-    # prof_lines = [mem_allocated_line, max_memory_allocated_line, mem_reserved_line, max_memory_reserved_line]
-    
-    dist.barrier()
-    # print(f'Rank{rank}' + '\n' + '\n'.join(prof_lines) + '\n')
     if rank == 0:
-        prof.print_all_events()
+        print(torch.cuda.list_gpu_processes(device=f"cuda:{device}"))
+    
+    dist.barrier() # let output looks neat
+    prof.print_all_events()
     
     dist.barrier()
     dist.destroy_process_group()
