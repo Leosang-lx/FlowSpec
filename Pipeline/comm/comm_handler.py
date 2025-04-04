@@ -30,7 +30,7 @@ class CommHandler:
         self.executor = ThreadPoolExecutor(max_workers=max_workers)
         self._running = False
         self._threads = []
-        
+        self.setup_queue()
     def setup_queue(self):
         """
         All devices:
@@ -45,22 +45,23 @@ class CommHandler:
         # send queue
         self.send_queue = Queue()
 
-        # recv queue
-        self.recv_from_queue = {self.last_rank: Queue()}  # recv from last rank for each stage
-        if self.rank == self.world_size - 1:  # last stage
-            self.recv_from_queue[0] = Queue()  # recv from first stage for last stage (additionally)
-        
-        # if self.enable_broadcast:
-        #     # broadcast send queue
-        #     if self.rank == 0 or self.rank == self.world_size - 1:
-        #         self.broadcast_send_queue = Queue()
+        # recv mark
+        rank_mark = [False] * self.world_size
+        rank_mark[self.last_rank] = True
+        if self.rank == self.world_size - 1:
+            rank_mark[0] = True  # first stage send tree_info to last stage (additionally)
 
-        #     # broadcast recv queue
-        #     self.broadcast_recv_queue = {}
-        #     if self.rank != 0:
-        #         self.broadcast_recv_queue[0] = Queue()
-        #     if self.rank != self.world_size - 1:
-        #         self.broadcast_recv_queue[self.world_size - 1] = Queue()
+        if self.enable_broadcast:
+            if self.rank != 0:
+                rank_mark[0] = True  # recv from first stage [only for broadcast]
+            if self.rank != self.world_size - 1:
+                rank_mark[self.world_size - 1] = True  # recv from last stage [only for broadcast]
+
+        # recv queue
+        self.recv_from_queue = {}
+        for i in range(self.world_size):
+            if rank_mark[i]:
+                self.recv_from_queue[i] = Queue()
             
     def get_head(self, data):
         """
@@ -129,46 +130,17 @@ class CommHandler:
     #         thread = self.executor.submit(func, *args)
     #     self._threads.append(thread)
 
-    # def broadcast_send(self, data):
-    #     self.broadcast_send_queue.put(data)
-
-    # def keep_broadcasting_send(self):
-    #     while self._running:
-    #         try:
-    #             data = self.broadcast_send_queue.get()
-    #             print(f"====Rank {self.rank} get broadcast data to send...")
-    #             head = self.get_head(data)
-    #             print(f'====Rank {self.rank} send broadcast head={head}...')
-    #             dist.broadcast(head, src=self.rank)
-    #             print(f'====Rank {self.rank} send broadcast head... done')
-    #             print(f'====Rank {self.rank} send broadcast data...')
-    #             dist.broadcast(data, src=self.rank)
-    #             print(f'====Rank {self.rank} send broadcast data... done')
-    #         except Exception as e:
-    #             print(f"Broadcast send error from rank {self.rank}:\n{type(e)}: {e}")
-    #             break
-
-    # def keep_broadcasting_recv(self, src_rank):
-    #     broadcast_recv_queue = self.broadcast_recv_queue[src_rank]
-    #     while self._running:
-    #         try:
-    #             head = torch.zeros(self.max_head_len, dtype=torch.long)
-    #             print(f"====Rank {self.rank} recv broadcast head from rank {src_rank}...")
-    #             dist.broadcast(head, src=src_rank)
-    #             print(f"====Rank {self.rank} recv broadcast head={head} from rank {src_rank}... done")
-    #             dtype, tensor_shape = self.read_head(head)
-    #             data = torch.zeros(tensor_shape, dtype=dtype)
-    #             print(f"====Rank {self.rank} recv broadcast data from rank {src_rank}...")
-    #             dist.broadcast(data, src=src_rank)
-    #             print(f"====Rank {self.rank} recv broadcast data from rank {src_rank}... done")
-    #             broadcast_recv_queue.put(data)
-    #         except Exception as e:
-    #             print(f"Broadcast recv error from rank {self.rank}:\n{type(e)}: {e}")
-    #             break
-
-    # def broadcast_recv(self, src_rank):
-    #     return self.broadcast_recv_queue[src_rank].get()
-    
+    def broadcast_send(self, data):
+        """
+        - Implement broadcast with sendto()
+        - Recv broadcast by recvfrom()
+        """
+        if not self.enable_broadcast:
+            raise ValueError("Broadcast is not enabled")
+        for dst_rank in range(self.world_size):
+            if dst_rank == self.rank:
+                continue
+            self.send_queue.put((data, dst_rank))
 
     def start_threads(self):
         if self._running:
@@ -182,17 +154,6 @@ class CommHandler:
         for src_rank in self.recv_from_queue.keys():
             # self.start_thread(self.keep_receiving, src_rank)
             self._threads.append(self.executor.submit(self.keep_receiving, src_rank))
-
-        # if self.enable_broadcast:
-        #     # broadcast send thread
-        #     if hasattr(self, 'broadcast_send_queue'):
-        #         # self.start_thread(self.keep_broadcasting_send, ())
-        #         self._threads.append(self.executor.submit(self.keep_broadcasting_send))
-        #     # broadcast recv thread
-        #     if hasattr(self, 'broadcast_recv_queue'):
-        #         for src_rank in self.broadcast_recv_queue.keys():
-        #             # self.start_thread(self.keep_broadcasting_recv, (src_rank,))
-        #             self._threads.append(self.executor.submit(self.keep_broadcasting_recv, src_rank))
 
     def stop(self):
         self._running = False
