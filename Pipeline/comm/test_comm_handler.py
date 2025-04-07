@@ -8,7 +8,7 @@ import tqdm
 def init_comm_handler(rank, world_size, backend='gloo', enable_broadcast=False):
     # Initialize communication handler
     comm = CommHandler(rank, world_size, backend=backend, enable_broadcast=enable_broadcast)
-    comm.init_process_group()
+    comm.init_PG()
     # comm.setup_queue()
     print(f"Rank {rank} setup queue: {comm.recv_from_queue.keys()}")
     comm.start_threads()
@@ -74,28 +74,46 @@ def test_broadcast(comm, rank, world_size, repeat=10):
         if rank == 0:
             # First rank broadcasts
             # print(f"Rank {rank} broadcasting tensor: {test_tensor}")
-            comm.broadcast_send(test_tensor * (rank + i))
-            time.sleep(1)
+            for _ in range(10):
+                # comm.broadcast_send(test_tensor * (rank + i))
+                # task = comm.broadcast_send_async(test_tensor * (rank + i))
+                # task.result()
+                comm.multi_sendto(test_tensor * (rank + i))
+            time.sleep(0.1)
         else:
             # Other ranks receive broadcast
-            time.sleep(1)
-            recv_data = comm.recvfrom(0)
-            # print(f"Rank {rank} received broadcast from {0}: {recv_data}")
-            assert torch.allclose(recv_data, torch.tensor([1.0, 2.0, 3.0]) * (0 + i))
+            time.sleep(0.1)
+            for _ in range(10):
+                recv_data = comm.recv_tensor(0, tag=1)
+                # recv_data = comm.broadcast_recv(0)
+                # task = comm.broadcast_recv_async(0)
+                # task = comm.recvfrom_async(0, tag=1)
+                # recv_data = task.result()
+                # print(f"Rank {rank} received broadcast from {0}: {recv_data}")
+                assert torch.allclose(recv_data, torch.tensor([1.0, 2.0, 3.0]) * (0 + i))
         
         # dist.barrier()
 
         if rank == world_size - 1:
             # Last rank broadcasts
             # print(f"Rank {rank} broadcasting tensor: {test_tensor}")
-            comm.broadcast_send(test_tensor * (rank + i))
-            time.sleep(1)
+            for _ in range(10):
+                # comm.broadcast_send(test_tensor * (rank + i))
+                # comm.broadcast_send_async(test_tensor * (rank + i))
+                comm.multi_sendto(test_tensor * (rank + i))
+            time.sleep(0.1)
         else:
             # Other ranks receive broadcast
-            time.sleep(1)
-            recv_data = comm.recvfrom(world_size - 1)
-            # print(f"Rank {rank} received broadcast from {world_size - 1}: {recv_data}")
-            assert torch.allclose(recv_data, torch.tensor([1.0, 2.0, 3.0]) * (world_size - 1 + i))
+            time.sleep(0.1)
+            for _ in range(10):
+                recv_data = comm.recv_tensor(world_size - 1, tag=1)
+                # recv_data = comm.broadcast_recv(world_size - 1)
+                # task = comm.broadcast_recv_async(world_size - 1)
+                # task = comm.recvfrom_async(world_size - 1, tag=1)
+                # recv_data = task.result()
+                # print(f"Rank {rank} received broadcast from {world_size - 1}: {recv_data}")
+                assert torch.allclose(recv_data, torch.tensor([1.0, 2.0, 3.0]) * (world_size - 1 + i))
+        dist.barrier()
     end = time.perf_counter()
     print(f"Rank {rank} time: {end - start}s")
 
@@ -115,9 +133,9 @@ def main():
 
     # if args.test == 'send_recv':
     try:
-        test_send_recv(comm, rank, world_size, repeat=repeat)
-        dist.barrier()
-        print(f'Rank {rank} finished test_send_recv()... done')
+        # test_send_recv(comm, rank, world_size, repeat=repeat)
+        # dist.barrier()
+        # print(f'Rank {rank} finished test_send_recv()... done')
 
         test_broadcast(comm, rank, world_size, repeat=repeat)
         dist.barrier()
@@ -130,4 +148,5 @@ def main():
 
 if __name__ == '__main__':
     import os
+    # os.environ['OMP_NUM_THREADS'] = '5'
     main() 
