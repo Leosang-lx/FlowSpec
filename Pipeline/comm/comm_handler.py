@@ -90,7 +90,13 @@ class CommHandler:
             init_method = 'env://'
         print(f"Initializing process group with backend {self.backend} and rank {self.rank} and world size {self.world_size}")
         # dist.init_process_group(backend=self.backend, init_method='tcp://localhost:12345', rank=self.rank, world_size=self.world_size)
-        dist.init_process_group(backend=self.backend, init_method=init_method, rank=self.rank, world_size=self.world_size, timeout=timedelta(seconds=30))
+        dist.init_process_group(
+            backend=self.backend,
+            init_method=init_method,
+            rank=self.rank,
+            world_size=self.world_size,
+            timeout=timedelta(seconds=30)
+        )
         print(f'Rank {self.rank} initialized')
 
     def send_tensor(self, data, dst_rank, tag=0):
@@ -179,6 +185,7 @@ class CommHandler:
             raise e
         
     def recvfrom_async(self, src_rank, tag=0):
+        # print(f"Rank {self.rank} recv_async from rank {src_rank}")
         return self.executor.submit(self.recv_tensor, src_rank, tag)
 
     def broadcast_send(self, data):
@@ -200,8 +207,7 @@ class CommHandler:
 
     def broadcast_send_async(self, data):
         try:
-            future = self.executor.submit(self.broadcast_send, data)
-            return future
+            return self.executor.submit(self.broadcast_send, data)
         except Exception as e:
             print(f"Broadcast send async error in rank {self.rank}: {e}")
             raise e
