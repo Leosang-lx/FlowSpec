@@ -27,7 +27,7 @@ def main(args):
     
     rank = dist.get_rank()
     world_size = dist.get_world_size()
-    device = rank % torch.cuda.device_count()
+    # device = rank % torch.cuda.device_count()
     device = 1
     torch.cuda.set_device(device)
     print(f'rank={rank}, world_size={world_size}, device={device}')
