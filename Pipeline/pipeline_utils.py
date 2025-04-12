@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from queue import deque
 from typing import Union, Iterable, List
 import torch.distributed as dist
-from memory_profiler import profile
+# from memory_profiler import profile
 # from stage_ea_model import StageEaModel
 from transformers.generation.logits_process import (
     LogitsProcessorList,
@@ -18,7 +18,7 @@ from transformers.generation.logits_process import (
     TopKLogitsWarper,
     TopPLogitsWarper,
 )
-from tools.communicator import*
+from tools.communicator import *
 from typing import Tuple
 TOPK = 10  # topk for sparse tree
 
@@ -182,6 +182,8 @@ def pipeline_prefill(
     stage_base_model = stage_model.stage_base_model
     device = stage_base_model.device
     total_stage = config.total_stage
+    # comm = stage_model.comm  # update
+
     if config.is_first_stage:
         if input_ids.size(-1) > 50:  # pipelined prefill, split the input_ids when long enough
             seq_splits, lens_split = split_sequence_close_equal_len(input_ids, total_stage)
@@ -206,14 +208,14 @@ def pipeline_prefill(
             hidden_state_splits.append(sub_hidden_state)
             if isend_task is not None:
                 isend_task.wait()
-
             isend_task = dist.isend(sub_hidden_state, dst=config.next_rank)
-
+            # comm.sendto(sub_hidden_state, config.next_rank)
         else:
             # print((1, lens_split[i], config.hidden_size))
             last_hidden_state = torch.zeros((1, lens_split[i], config.hidden_size), dtype=torch.float16)
             dist.recv(last_hidden_state, src=config.last_rank)
             last_hidden_state = last_hidden_state.to(device)
+            # last_hidden_state = comm.recvfrom(config.last_rank, device=device)
 
             # middle stage
             outputs = stage_base_model.model(
@@ -225,7 +227,8 @@ def pipeline_prefill(
                 isend_task.wait()
             sub_hidden_state = sub_hidden_state.cpu()
             isend_task = dist.isend(sub_hidden_state, dst=config.next_rank)
-    
+            # comm.sendto(sub_hidden_state, config.next_rank)
+
     # print(f'stage{config.stage} wait the last send task in pipeline prefill')
     if isend_task is not None:
         isend_task.wait()
@@ -236,6 +239,7 @@ def pipeline_prefill(
 
         for i, hidden_state_split in enumerate(hidden_state_splits):
             dist.recv(hidden_state_split, src=config.last_rank)
+            # hidden_state_split = comm.recvfrom(config.last_rank)
             hidden_state_splits[i] = hidden_state_split.to(device)
             orig = orig + (stage_base_model.lm_head(hidden_state_splits[i]),)
 
@@ -367,6 +371,8 @@ def stage_tree_decoding_liux(
     # todo: overlap with the computation of the 1st subseq on the 1st stage
     config = stage_model.config
     device = stage_model.stage_base_model.device
+    # comm = stage_model.comm
+
     if stage_model.is_first_stage:
         # send mask and pos_ids
         dist.broadcast(lens_split, src=0)
@@ -419,15 +425,18 @@ def stage_tree_decoding_liux(
             hidden_state_splits.append(hidden_state_comm)
             if i == 0:
                 isend_mask.wait()
+                isend_mask = None
             else:
                 if isend_task is not None:
                     isend_task.wait()  # todo: set the timeout in config
             isend_task = dist.isend(hidden_state_comm, dst=config.next_rank)
+            # comm.sendto(hidden_state_comm, config.next_rank)
             # recv_tasks.append(dist.irecv(sub_hidden_state, src=config.last_rank))
 
         else:
             last_hidden_state = torch.zeros((1, subseq_len, config.hidden_size), dtype=torch.float16)  # todo: d_model?
             dist.recv(last_hidden_state, src=config.last_rank)
+            # last_hidden_state = comm.recvfrom(config.last_rank)
 
             # if not stage_model.is_last_stage:
             # middle stage
@@ -441,6 +450,7 @@ def stage_tree_decoding_liux(
             if isend_task is not None:
                 isend_task.wait()
             isend_task = dist.isend(hidden_state_comm, dst=config.next_rank)
+            # comm.sendto(hidden_state_comm, config.next_rank)
 
     # [step2] end
     if isend_task is not None:
@@ -454,6 +464,10 @@ def stage_tree_decoding_liux(
                 # print(f'sub_hidden_state\n{hidden_state_split}')
             hidden_state_splits[i] = hidden_state_split.to(device)
             tree_logits_split = tree_logits_split + (stage_model.stage_base_model.lm_head(hidden_state_splits[i]),)
+        # for i in range(stage_model.total_stage):
+        #     hidden_state_split = comm.recvfrom(config.last_rank)
+        #     hidden_state_splits[i] = hidden_state_split.to(device)
+        #     tree_logits_split = tree_logits_split + (stage_model.stage_base_model.lm_head(hidden_state_splits[i]),)
 
         tree_logits = torch.concat(tree_logits_split, dim=-2)  # concat at the seq dimension
         # logits = tree_logits[0, retrieve_indices]
@@ -682,6 +696,7 @@ def fill_pipeline_stages(
     # print('============fill_pipeline_stages============')
     config = stage_model.config
     device = stage_model.stage_base_model.device
+    # comm = stage_model.comm  # update
 
     # sync lens_split for draft tokens
     if config.is_first_stage:
@@ -861,13 +876,14 @@ def pruning(draft_tokens, retrieve_indices, best_candidate, accept_len, new_toke
     # print(f'accepted_indices={accepted_indices}')
 
     # judge whether the global leaf node is reached
-    if accept_len == retrieve_indices.size(-1) or retrieve_indices[best_candidate, accept_len] == -1:
+    cur_path_depth = (retrieve_indices[best_candidate, :] != -1).sum().item()
+    if accept_len == retrieve_indices.size(-1) or retrieve_indices[best_candidate, accept_len] == -1:  # the next token of the accepted
         # truncate: reach the global leaf
-        # print('leaf has been reached')
+        print('- leaf has been reached')
         return accepted_indices
 
     # judge whether the new token follows the tree
-    matched_candidates = find_prefix_match(retrieve_indices, accepted_indices)
+    matched_candidates = find_prefix_match(retrieve_indices, accepted_indices)  # non-zero
     # print(f'matched_candidates={matched_candidates}')
     next_indices_draft = retrieve_indices[matched_candidates, accept_len]
     # print(f'next_indices_draft={next_indices_draft}')
@@ -879,7 +895,9 @@ def pruning(draft_tokens, retrieve_indices, best_candidate, accept_len, new_toke
     # print(f'same_indices={same_indices}')
     if same_indices.numel() == 0:
         # truncate: unmatched token
-        # print('no match token found in the tree')
+        print(f'- - no match token found in the tree, accept_len/global_depth={accept_len}/{cur_path_depth}')
+        print(f'- - next_tokens_draft={next_tokens_draft.unique()}')
+        print(f'- - new_token={new_token}')
         return accepted_indices
 
     # pruning
@@ -902,6 +920,7 @@ def pruning(draft_tokens, retrieve_indices, best_candidate, accept_len, new_toke
     left_draft_tokens = draft_tokens[:, left_indices[accept_len:]]
 
     # cut the subseq_ri_cum_depths
+    # print(f'subseq_ri_cum_depths: {subseq_ri_cum_depths.device}, left_candidates: {left_candidates.device}, accept_len: {accept_len.device}')
     left_ri_cum_depths = subseq_ri_cum_depths[1:, left_candidates] - accept_len  # if two same cum_depths, mean the latter is cut completely
     # todo: what happen when only one path is left? Or is it possible?
 
@@ -1287,7 +1306,7 @@ def evaluate_posterior(
                 candidates[:, 1:].to(logits.device) == torch.argmax(logits[:, :-1], dim=-1)
         ).int()
         candidates_accept_length = (torch.cumprod(posterior_mask, dim=1)).sum(dim=1)
-        accept_length = candidates_accept_length.max()
+        accept_length = candidates_accept_length.max().item()
         # Choose the best candidate
         if accept_length == 0:
             # Default to the first candidate if none are accepted
@@ -1304,7 +1323,7 @@ def evaluate_posterior(
             # print('stage3: Only one token, accept it')
             # print(f'evaluate_posterior: accept_cand={accept_cand}')
             gt_logits = logits[best_candidate, 0][None]
-            gt_logits = logits_processor(None, gt_logits)
+            gt_logits = logits_processor(None, gt_logits)[0]
             return torch.tensor(best_candidate), accept_length - 1, torch.softmax(gt_logits, dim=0)
 
         for i in range(1, candidates.shape[1]):
@@ -1314,7 +1333,9 @@ def evaluate_posterior(
             is_eq = (candidates[:, :accept_length] == accept_cand).all(dim=1)
             fi = torch.nonzero(is_eq, as_tuple=True)[0][0]
             gt_logits = logits[fi, i - 1][None]
+            # print(f'gt_logits.shape: {gt_logits.shape}')
             gt_logits = logits_processor(None, gt_logits)[0]
+            # print(f'gt_logits.shape: {gt_logits.shape}')
             gtp = torch.softmax(gt_logits, dim=0)
             candidates_set = []
             for j in range(candidates.shape[0]):
@@ -1340,7 +1361,9 @@ def evaluate_posterior(
         if adjustflag and accept_length != candidates.shape[1]:
             sample_p = gtp
         else:
+            print('--  reach leaf')
             gt_logits = logits[best_candidate, accept_length - 1]
+            gt_logits = logits_processor(None, gt_logits)
             sample_p = torch.softmax(gt_logits, dim=0)
         # print(f'evaluate_posterior: accept_cand={accept_cand}')
         return torch.tensor(best_candidate), accept_length - 1, sample_p

@@ -77,6 +77,7 @@ def test_broadcast(comm, rank, world_size, repeat=10):
             for _ in range(10):
                 # comm.broadcast_send(test_tensor * (rank + i))
                 task = comm.broadcast_send_async(test_tensor * (rank + i))
+                time.sleep(0.1)
                 task.result()
                 # comm.multi_sendto(test_tensor * (rank + i))
             # time.sleep(0.1)
@@ -100,6 +101,7 @@ def test_broadcast(comm, rank, world_size, repeat=10):
             for _ in range(10):
                 # comm.broadcast_send(test_tensor * (rank + i))
                 task = comm.broadcast_send_async(test_tensor * (rank + i))
+                time.sleep(0.1)
                 task.result()
                 # comm.multi_sendto(test_tensor * (rank + i))
             # time.sleep(0.1)

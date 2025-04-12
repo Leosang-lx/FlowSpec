@@ -229,6 +229,31 @@ class CommHandler:
     def broadcast_recv_async(self, src_rank, device=None):
         return self.executor.submit(self.broadcast_recv, src_rank, device)
 
+    def broadcast_tree_global(self, lens_split, tree_pos_ids, tree_mask):
+        try:
+            dist.broadcast(lens_split, src=self.rank)
+            dist.broadcast(tree_pos_ids, src=self.rank)
+            dist.broadcast(tree_mask, src=self.rank)
+        except Exception as e:
+            print(f"Broadcast tree global error in rank {self.rank}: {e}")
+            raise e
+
+    def broadcast_tree_global_async(self, lens_split, tree_pos_ids, tree_mask):
+        return self.executor.submit(self.broadcast_tree_global, lens_split.cpu(), tree_pos_ids.cpu(), tree_mask.cpu())
+
+    def broadcast_tree_global_recv(self, src_rank):
+        lens_split = torch.zeros(self.world_size, dtype=torch.long)
+        dist.broadcast(lens_split, src=src_rank)
+        draft_len = torch.sum(lens_split).item()
+        tree_pos_ids = torch.zeros(draft_len, dtype=torch.long)
+        dist.broadcast(tree_pos_ids, src=src_rank)
+        tree_mask = torch.zeros(1, 1, draft_len, draft_len, dtype=torch.float32)
+        dist.broadcast(tree_mask, src=src_rank)
+        return lens_split, tree_pos_ids, tree_mask
+
+    def broadcast_tree_global_recv_async(self, src_rank):
+        return self.executor.submit(self.broadcast_tree_global_recv, src_rank)
+
     def start_threads(self):
         if self._running:
             return
