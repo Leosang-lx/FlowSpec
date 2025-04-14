@@ -12,13 +12,22 @@ class CommHandler:
     """
     Handle communication between pipeline stages
     """
-    def __init__(self, rank, world_size, backend='gloo', enable_broadcast=False, max_workers=4, device=None):
+    def __init__(
+        self,
+        rank,
+        world_size,
+        backend='gloo',
+        enable_async_send_recv=True,
+        enable_async_broadcast=False,
+        max_workers=4,
+        device=None
+    ):
         self.rank = rank
         self.world_size = world_size
         self.last_rank = world_size - 1 if rank == 0 else rank - 1
         self.backend = backend
-        self.enable_broadcast = enable_broadcast
-        self.max_workers = max_workers
+        self.enable_async_send_recv = enable_async_send_recv
+        self.enable_async_broadcast = enable_async_broadcast
 
         # self.device = device if device is not None else torch.device('cpu')
         self.max_head_len = 5  # head = {n_bytes | shape}
@@ -32,7 +41,8 @@ class CommHandler:
         self.executor = ThreadPoolExecutor(max_workers=max_workers)
         self._running = False
         self._threads = []
-        self.setup_queue()
+        if self.enable_async_send_recv:
+            self.setup_queue()
 
     def setup_queue(self):
         """
@@ -51,10 +61,10 @@ class CommHandler:
         # recv mark
         rank_mark = [False] * self.world_size
         rank_mark[self.last_rank] = True
-        if self.rank == self.world_size - 1:
-            rank_mark[0] = True  # first stage send tree_info to last stage (additionally)
+        # if self.rank == self.world_size - 1:
+        #     rank_mark[0] = True  # first stage send tree_info to last stage (additionally)
 
-        if self.enable_broadcast:
+        if self.enable_async_broadcast:
             if self.rank != 0:
                 rank_mark[0] = True  # recv from first stage [only for broadcast]
             if self.rank != self.world_size - 1:
@@ -152,13 +162,6 @@ class CommHandler:
         if device is not None:
             data = data.to(device)
         return data
-    
-    # def start_thread(self, func, args=None):
-    #     if args is None:
-    #         thread = self.executor.submit(func)
-    #     else:
-    #         thread = self.executor.submit(func, *args)
-    #     self._threads.append(thread)
 
     def multi_sendto(self, data):
         """
@@ -238,8 +241,8 @@ class CommHandler:
             print(f"Broadcast tree global error in rank {self.rank}: {e}")
             raise e
 
-    def broadcast_tree_global_async(self, lens_split, tree_pos_ids, tree_mask):
-        return self.executor.submit(self.broadcast_tree_global, lens_split.cpu(), tree_pos_ids.cpu(), tree_mask.cpu())
+    def broadcast_tree_info_async(self, lens_split, tree_pos_ids, tree_mask, draft_tokens, retrieve_indices, subseq_ri_cum_depths, appended=False):
+        return self.executor.submit(self.broadcast_tree_info, lens_split, tree_pos_ids, tree_mask, draft_tokens, retrieve_indices, subseq_ri_cum_depths, appended)
 
     def broadcast_tree_global_recv(self, src_rank):
         lens_split = torch.zeros(self.world_size, dtype=torch.long)
@@ -250,6 +253,79 @@ class CommHandler:
         tree_mask = torch.zeros(1, 1, draft_len, draft_len, dtype=torch.float32)
         dist.broadcast(tree_mask, src=src_rank)
         return lens_split, tree_pos_ids, tree_mask
+
+    def broadcast_tree_info_global(
+        self,
+        lens_split=None,
+        tree_position_ids=None,
+        tree_mask=None,  # global
+        appended=False
+    ):
+        if self.rank == 0:
+            # global broadcast
+            dist.broadcast(lens_split.cpu(), src=self.rank)
+            dist.broadcast(tree_position_ids.cpu(), src=self.rank)
+            dist.broadcast(tree_mask.cpu(), src=self.rank)
+        else:
+            lens_split = torch.zeros(self.world_size, dtype=torch.long)
+            dist.broadcast(lens_split, src=0)
+            draft_len = lens_split.sum()
+            if appended:
+                appended_draft_len = lens_split[-1]
+                tree_position_ids = torch.zeros(appended_draft_len, dtype=torch.long)
+                tree_mask = torch.zeros(1, 1, appended_draft_len, draft_len, dtype=torch.float32)
+            else:
+                tree_position_ids = torch.zeros(draft_len, dtype=torch.long)
+                tree_mask = torch.zeros(1, 1, draft_len, draft_len, dtype=torch.float32)
+            dist.broadcast(tree_position_ids, src=0)
+            dist.broadcast(tree_mask, src=0)
+            return lens_split, tree_position_ids, tree_mask
+
+
+    def broadcast_tree_info(
+        self,
+        lens_split=None,
+        tree_position_ids=None,
+        tree_mask=None,  # global
+        draft_tokens=None,  # for last stage
+        retrieve_indices=None,
+        subseq_ri_cum_depths=None,
+        appended=False  # incremental update or not
+    ):
+        """
+        Specially for synchronize expand_info of draft token tree
+        if appended=True, only send the appended part [expand tree]
+        elif appended=False, send the whole tree [grow new tree]
+        """
+        # global broadcast
+        output = self.broadcast_tree_info_global(lens_split, tree_position_ids, tree_mask, appended)
+        if self.rank != 0:
+            lens_split, tree_position_ids, tree_mask = output
+        if self.rank == 0:
+            # for last stage
+            ri_shape = torch.tensor(retrieve_indices.shape, dtype=torch.long)
+            dist.send(draft_tokens.cpu(), dst=self.world_size - 1)
+            dist.send(ri_shape.cpu(), dst=self.world_size - 1)
+            dist.send(retrieve_indices.cpu(), dst=self.world_size - 1)
+            dist.send(subseq_ri_cum_depths.cpu(), dst=self.world_size - 1)
+        else:
+            if self.rank == self.world_size - 1:  # last stage
+                # for last stage
+                if appended:
+                    draft_tokens = torch.zeros(1, lens_split[-1], dtype=torch.long)
+                else:
+                    draft_len = lens_split.sum()
+                    draft_tokens = torch.zeros(1, draft_len, dtype=torch.long)
+                dist.recv(draft_tokens, src=0)
+                ri_shape = torch.zeros(2, dtype=torch.long)
+                dist.recv(ri_shape, src=0)
+                retrieve_indices = torch.zeros(*ri_shape, dtype=torch.long)
+                dist.recv(retrieve_indices, src=0)
+                subseq_ri_cum_depths = torch.zeros(self.world_size, ri_shape[0], dtype=torch.long)
+                dist.recv(subseq_ri_cum_depths, src=0)
+                return lens_split, tree_position_ids, tree_mask, draft_tokens, retrieve_indices, subseq_ri_cum_depths
+            return lens_split, tree_position_ids, tree_mask
+    
 
     def broadcast_tree_global_recv_async(self, src_rank):
         return self.executor.submit(self.broadcast_tree_global_recv, src_rank)

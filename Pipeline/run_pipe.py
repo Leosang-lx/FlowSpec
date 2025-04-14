@@ -21,7 +21,7 @@ world_size = int(os.environ['WORLD_SIZE'])
 def main(args):
     assert torch.cuda.is_available()
     torch.set_grad_enabled(False)
-    dist.init_process_group(backend='gloo', init_method='env://', timeout=timedelta(seconds=15))
+    # dist.init_process_group(backend='gloo', init_method='env://', timeout=timedelta(seconds=15))
     
     rank = int(os.environ['RANK'])
     world_size = int(os.environ['WORLD_SIZE'])
@@ -33,7 +33,7 @@ def main(args):
     base_model_path = f"/home/liux/LLM/pipeline_model/meta-llama/Llama-2-7b-chat-hf/stage_model_series_8+8+8+8/stage_model_{rank}"
     EAGLE_model_path = "/home/liux/LLM/models_hf/yuhuili/EAGLE-llama2-chat-7B"
     if rank == 0:
-        print(f'base_model_path={base_model_path}, EAGLE_model_path={EAGLE_model_path}')
+        # print(f'base_model_path={base_model_path}, EAGLE_model_path={EAGLE_model_path}')
         stage_model = StageEaModel.from_pretrained(
             stage_base_model_path=base_model_path,
             ea_model_path=EAGLE_model_path,
@@ -91,7 +91,10 @@ def main(args):
         # outputs = stage_model.eagenerate_pruned_pipeline(input_ids, temperature=0.5, max_new_tokens=512, log=log)
         outputs = stage_model.eagenerate_continuous(input_ids, temperature=0.5, max_new_tokens=512, log=log)
         if log:
-            output_ids, new_tokens, idx, turns = outputs
+            if len(outputs) == 3:
+                output_ids, new_tokens, idx = outputs
+            else:
+                output_ids, new_tokens, idx, turns = outputs
         else:
             output_ids = outputs
         torch.cuda.synchronize()
@@ -104,7 +107,8 @@ def main(args):
         if log:
             print('New tokens:', new_tokens)
             print('Rounds:', idx+1)
-            print('Turns:', turns)
+            if len(outputs) == 4:
+                print('Turns:', turns)
         print(f'Total Inference time: {end - start:.2f}s')
 
     else:
@@ -113,7 +117,7 @@ def main(args):
         stage_model.eagenerate_continuous(temperature=0.5, max_new_tokens=512)
     
     dist.barrier()
-    # stage_model.comm.stop()
+    stage_model.comm.stop()
     dist.destroy_process_group()
 
 if __name__ == "__main__":
