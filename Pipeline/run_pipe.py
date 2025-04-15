@@ -23,16 +23,17 @@ world_size = int(os.environ['WORLD_SIZE'])
 def main(args):
     assert torch.cuda.is_available()
     torch.set_grad_enabled(False)
-    dist.init_process_group(backend='gloo', init_method='env://', timeout=timedelta(seconds=60))
+    # dist.init_process_group(backend='gloo', init_method='env://', timeout=timedelta(seconds=60))
     
     rank = int(os.environ['RANK'])
     world_size = int(os.environ['WORLD_SIZE'])
-    device = rank % torch.cuda.device_count()
-    # device = 1
+    # device = rank % torch.cuda.device_count()
+    device = 1
     torch.cuda.set_device(device)
     print(f'rank={rank}, world_size={world_size}, device={device}')
     
-    base_model_path = f"/home/liux/LLM/pipeline_model/meta-llama/Llama-2-7b-chat-hf/stage_model_series_8+8+8+8/stage_model_{rank}"
+    # base_model_path = f"/home/liux/LLM/pipeline_model/meta-llama/Llama-2-7b-chat-hf/stage_model_series_8+8+8+8/stage_model_{rank}"
+    base_model_path = f"/home/liux/big_file/pipeline_model/meta-llama/Llama-2-7b-chat-hf/stage_model_series_6+9+9+8/stage_model_{rank}"
     EAGLE_model_path = "/home/liux/LLM/models_hf/yuhuili/EAGLE-llama2-chat-7B"
     
     with prof.profile_context(f"Rank {rank}: loading stage model", device=f"cuda:{device}"):
@@ -89,7 +90,10 @@ def main(args):
                 # outputs = stage_model.eagenerate_pruned_pipeline(input_ids, temperature=0.5, max_new_tokens=512, log=log)
                 outputs = stage_model.eagenerate_continuous(input_ids, temperature=0.5, max_new_tokens=512, log=log)
                 if log:
-                    output_ids, new_tokens, idx = outputs
+                    if len(outputs) == 3:
+                        output_ids, new_tokens, idx = outputs
+                    else:
+                        output_ids, new_tokens, idx, turns = outputs
                 else:
                     output_ids = outputs
                 # torch.cuda.synchronize()
@@ -102,7 +106,8 @@ def main(args):
                 if log:
                     print('New tokens:', new_tokens)
                     print('Rounds:', idx+1)
-                    # print(f'Total Inference time: {end - start:.2f}s')
+                    if len(outputs) == 4:
+                        print('Turns:', turns)
             else:
                 # stage_model.eagenerate_pipeline(temperature=0.5, max_new_tokens=512)
                 # stage_model.eagenerate_pruned_pipeline(temperature=0.5, max_new_tokens=512)
