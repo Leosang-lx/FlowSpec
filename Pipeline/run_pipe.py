@@ -25,10 +25,10 @@ def main(args):
     torch.set_grad_enabled(False)
     dist.init_process_group(backend='gloo', init_method='env://', timeout=timedelta(seconds=60))
     
-    rank = dist.get_rank()
-    world_size = dist.get_world_size()
-    # device = rank % torch.cuda.device_count()
-    device = 1
+    rank = int(os.environ['RANK'])
+    world_size = int(os.environ['WORLD_SIZE'])
+    device = rank % torch.cuda.device_count()
+    # device = 1
     torch.cuda.set_device(device)
     print(f'rank={rank}, world_size={world_size}, device={device}')
     
@@ -115,6 +115,7 @@ def main(args):
     prof.print_all_events()
     
     dist.barrier()
+    stage_model.comm.stop()
     dist.destroy_process_group()
 
 if __name__ == "__main__":
