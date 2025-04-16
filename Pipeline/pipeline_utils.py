@@ -702,7 +702,7 @@ def pruning(draft_tokens, retrieve_indices, best_candidate, accept_len, new_toke
     :param accept_len:
     :return:
     """
-    # todo: what happens when accept_len==0?: impossible
+    # accept_len > 0
     accepted_indices = retrieve_indices[best_candidate, :accept_len]
 
     # judge whether the global leaf node is reached
@@ -1005,7 +1005,7 @@ def merge_two_tree(
     retrieve_indices_merged = torch.cat((ri_selected1, ri_selected2), dim=0)
     # [merge retrieve_indices] finish
 
-    # todo: update subseq_ri_cum_depths and lens_split
+    # todo: update lens_split and subseq_ri_cum_depths
     lens_split = torch.cat((lens_split, torch.tensor([draft_tokens_merged.size(0) - tree1_size], dtype=torch.long)))
     # print(f'lens_split: {lens_split}')
 
@@ -1017,15 +1017,13 @@ def merge_two_tree(
 
     ri_depth_cum = torch.zeros(n_leaves, dtype=torch.long)
     for i, cum_seq_len in enumerate(cum_seq_lens):
-        for j in range(0 if i == 0 else cum_seq_lens[i - 1], cum_seq_len):
-            row_indices = torch.arange(n_leaves, dtype=torch.int)
-            cum_ri_leaves = retrieve_indices_filled[row_indices, ri_depth_cum]
-            ri_depth_cum[cum_ri_leaves == j] += 1
-
-        # print(ri_depth_cum)
-        # update: 只计算到在pipeline里的draft token tree部分，即将输入的最新一段单独算
-        subseq_ri_cum_depths.append(ri_depth_cum.clone())
-        # todo: 优化最后一段直接append，不需要累加
+        # if i + 1 < cum_seq_lens.size(0):
+            for j in range(0 if i == 0 else cum_seq_lens[i - 1], cum_seq_len):
+                row_indices = torch.arange(n_leaves, dtype=torch.int)
+                cum_ri_leaves = retrieve_indices_filled[row_indices, ri_depth_cum]
+                ri_depth_cum[cum_ri_leaves == j] += 1
+            # update: 只计算到在pipeline里的draft token tree部分，即将输入的最新一段单独算
+            subseq_ri_cum_depths.append(ri_depth_cum.clone())
     
     return draft_tokens_merged.unsqueeze(0), retrieve_indices_merged, merged_tree_mask[None, None], merged_tree_pos_ids, lens_split, torch.stack(subseq_ri_cum_depths, dim=0)
 

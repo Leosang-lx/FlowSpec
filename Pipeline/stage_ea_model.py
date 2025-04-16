@@ -87,9 +87,6 @@ class StageEaModel(nn.Module):
         stage_base_model = StageLlamaModelForCausalLM.from_pretrained(
             stage_base_model_path, **kwargs
         )
-        # if model_config.has_lm_head:
-        #     print(f"stage_base_model.lm_head.weight.device={stage_base_model.lm_head.weight.device}")
-        # Type = AutoConfig.from_pretrained(stage_base_model_path).architectures[0]
 
         # [MODIFIED] load draft model when config.has_draft_model==True
         if model_config.has_draft_model:
@@ -770,9 +767,6 @@ class StageEaModel(nn.Module):
                 input_ids_ea = torch.cat((input_ids, token.to(input_ids.device)), dim=1)
 
                 # make a draft token tree based on the hidden_state and input_ids
-                # print(f'stage{0} hidden_state: {hidden_state.shape}, input_ids_ea: {input_ids_ea.shape}')
-                # if self.ea_layer.stable_kv is not None:
-                    # print(f'stage{0} draft_kv_len: {self.ea_layer.stable_kv[0][0].shape}')
                 draft_tokens, retrieve_indices, tree_mask, tree_position_ids = self.ea_layer.topK_genrate(
                     hidden_state, input_ids_ea, self.stage_base_model.lm_head,
                     logits_processor)
@@ -860,20 +854,19 @@ class StageEaModel(nn.Module):
                             draft_tokens, retrieve_indices, left_indices, subseq_ri_cum_depths = output
                             new_sampled_token = -1
                             truncate = False
-                        
-                        pruning_info = torch.tensor(left_indices.shape, dtype=torch.long) + 2
-                        dist.broadcast(pruning_info, src=config.stage)
-                        pruning_info = torch.cat((torch.tensor((new_sampled_token, accept_length), dtype=torch.long), left_indices), dim=0).contiguous()
 
-                        dist.broadcast(pruning_info, src=config.stage)
-                        if truncate:
+                        pruning_info = torch.cat((torch.tensor((new_sampled_token, accept_length), dtype=torch.long), left_indices), dim=0).contiguous()
+                        if not truncate:  # not truncate: async pruning info broadcast
+                            broadcast_pruning_info_task = comm.executor.submit(
+                                comm.broadcast_send,
+                                pruning_info
+                            )
+                        else:  # truncate: sync pruning info broadcast
+                            comm.broadcast_send(pruning_info)
                             lens_split = tree_mask = tree_position_ids = None
                         
                     else:
-                        pruning_info_shape = torch.zeros(1, dtype=torch.long)
-                        dist.broadcast(pruning_info_shape, src=config.total_stage - 1)
-                        pruning_info = torch.zeros(pruning_info_shape.item(), dtype=torch.long)
-                        dist.broadcast(pruning_info, src=config.total_stage - 1)
+                        pruning_info = comm.broadcast_recv(config.total_stage - 1)
 
                         new_sampled_token = pruning_info[0].item()
                         accept_length = pruning_info[1].item()
@@ -971,7 +964,7 @@ class StageEaModel(nn.Module):
                 else:
                     hs_len = lens_split[config.total_stage - config.stage - 1]
 
-                last_hidden_state = torch.zeros((1, hs_len, config.hidden_size), dtype=torch.float16)
+                # last_hidden_state = torch.zeros((1, hs_len, config.hidden_size), dtype=torch.float16)
                 
                 # recv last_hidden_state
                 if config.is_first_stage:
@@ -989,7 +982,7 @@ class StageEaModel(nn.Module):
 
                         if hs_len > 0:
                             last_hidden_state = comm.recvfrom(config.last_rank, device=self.stage_base_model.device)
-                            accept_hidden_states.append(last_hidden_state.to(self.stage_base_model.device))
+                            accept_hidden_states.append(last_hidden_state)
                             received = True  # says last_hidden_state has been received
                         accepted_hidden_state = torch.cat(accept_hidden_states, dim=-2)
                         accept_hidden_states = []
@@ -1079,6 +1072,9 @@ class StageEaModel(nn.Module):
 
                 else:
                     # get tree_mask and tree_position_ids
+                    if config.is_last_stage:
+                        broadcast_pruning_info_task.result()
+
                     broadcast_tree_info_task = comm.executor.submit(comm.broadcast_tree_info, appended=True)
                     cum_lens = torch.cumsum(lens_split, dim=0)
                     subseq_idx = config.total_stage - config.stage - 1
