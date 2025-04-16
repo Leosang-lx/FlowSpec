@@ -18,6 +18,7 @@ from comm.comm_handler import CommHandler
 from accelerate import init_empty_weights
 
 from profiler.profiler import prof
+from tools.length_sweep import length_sweep
 
 class StageEaModel(nn.Module):
 
@@ -66,7 +67,8 @@ class StageEaModel(nn.Module):
         print(f"init comm handler")
         self.comm.init_PG()
         self.comm.start_threads()
-
+        dist.barrier()
+        
     def get_tokenizer(self):
         """Get the tokenizer of the base model.
 
@@ -101,7 +103,10 @@ class StageEaModel(nn.Module):
         # if model_config.has_lm_head:
         #     print(f"stage_base_model.lm_head.weight.device={stage_base_model.lm_head.weight.device}")
         # Type = AutoConfig.from_pretrained(stage_base_model_path).architectures[0]
-
+        if model_config.is_first_stage:
+            print(f"length_sweep(stage_base_model) * model_config.total_stage={length_sweep(stage_base_model) * model_config.total_stage}")
+            total_token = length_sweep(stage_base_model) * model_config.total_stage
+        
         # [MODIFIED] load draft model when config.has_draft_model==True
         if model_config.has_draft_model:   
             assert ea_model_path is not None
@@ -857,8 +862,8 @@ class StageEaModel(nn.Module):
                         )
                         accept_length += 1
                         # print(f'last stage {idx_spec}th round {i}th turn: {torch.topk(sample_p, k=10, dim=-1)}')
-                        # token = gen_token(prob=sample_p, logits_processor=logits_processor)  # device=cuda
-                        token = torch.multinomial(sample_p, num_samples=1)
+                        token = gen_token(prob=sample_p, logits_processor=logits_processor)  # device=cuda
+                        # token = torch.multinomial(sample_p, num_samples=1)
 
                         cur_draft_depth = subseq_ri_cum_depths[0, best_candidate]
                         print(f'- {i}th turn, accept_len/local_depth: {accept_length}/{cur_draft_depth}')

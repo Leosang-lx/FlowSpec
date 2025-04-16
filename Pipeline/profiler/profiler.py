@@ -79,6 +79,13 @@ class Profiler:
         avg_time = total_time / total_count if total_count > 0 else 0
         return total_time, avg_time
     
+    def delete_time_events(self, name):
+        """
+        Delete the time events for a named section.
+        """
+        if name in self.time_events:
+            del self.time_events[name]
+    
     def memory_start(self, name, device='cuda:1', cpu=False):
         """
         Start recording memory for a named section. Supports multiple starts.

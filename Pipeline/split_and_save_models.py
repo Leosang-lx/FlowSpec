@@ -102,7 +102,8 @@ def save_stage_dict(base_ea_model: EaModel, config: StageEaConfig, save_dir: str
     print('--Saving stage_model_config...')
     config.save_pretrained(stage_file_dir)
     print('--Saving stage_model...')
-    torch.save(stage_state_dict, stage_file_dir + '/pytorch_model.bin')
+    # torch.save(stage_state_dict, stage_file_dir + '/pytorch_model.bin')
+    save_file(stage_state_dict, stage_file_dir + '/model.safetensors', metadata={'format': 'pt'})
     print('--Done!')
     
 if __name__ == '__main__':
