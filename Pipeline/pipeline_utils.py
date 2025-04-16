@@ -548,7 +548,7 @@ def token_tree_partition(draft_tokens, retrieve_indices, total_stage):
 
     for i, cum_seq_len in enumerate(cum_seq_lens):
         for j in range(0 if i == 0 else cum_seq_lens[i - 1], cum_seq_len):
-            row_indices = torch.arange(retrieve_indices.size(0), dtype=torch.int)
+            row_indices = torch.arange(retrieve_indices.size(0), dtype=torch.long)
             cum_ri_leaves = retrieve_indices[row_indices, ri_depth_cum]
             ri_depth_cum[cum_ri_leaves == j] += 1
 
@@ -1018,7 +1018,7 @@ def merge_two_tree(
     ri_depth_cum = torch.zeros(n_leaves, dtype=torch.long)
     for i, cum_seq_len in enumerate(cum_seq_lens):
         for j in range(0 if i == 0 else cum_seq_lens[i - 1], cum_seq_len):
-            row_indices = torch.arange(n_leaves, dtype=torch.int)
+            row_indices = torch.arange(n_leaves, dtype=torch.long)
             cum_ri_leaves = retrieve_indices_filled[row_indices, ri_depth_cum]
             ri_depth_cum[cum_ri_leaves == j] += 1
 

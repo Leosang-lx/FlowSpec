@@ -14,6 +14,8 @@ from stage_modeling_llama import StageLlamaModelForCausalLM
 from stage_ea_config import StageEaConfig
 from pipeline_utils import *
 from comm.comm_handler import CommHandler
+# from torch.nn.init import init_empty_weights
+from accelerate import init_empty_weights
 
 from profiler.profiler import prof
 
@@ -59,7 +61,9 @@ class StageEaModel(nn.Module):
             self.ea_layer.init_tree()
 
         # [MODIFIED] initialize comm handler
+        print(f"start init comm handler")
         self.comm = CommHandler(rank=config.stage, world_size=config.total_stage)
+        print(f"init comm handler")
         self.comm.init_PG()
         self.comm.start_threads()
 
@@ -87,10 +91,9 @@ class StageEaModel(nn.Module):
         assert Type == 'LLaMA'  # only support LLaMA for now
         
         if model_config.is_first_stage:
-            with prof.profile_context("loading stage base model", device=kwargs['device_map']):
-                stage_base_model = StageLlamaModelForCausalLM.from_pretrained(
-                    stage_base_model_path, **kwargs
-                )
+            stage_base_model = StageLlamaModelForCausalLM.from_pretrained(
+                stage_base_model_path, **kwargs
+            )
         else:
             stage_base_model = StageLlamaModelForCausalLM.from_pretrained(
                 stage_base_model_path, **kwargs
@@ -1056,7 +1059,7 @@ class StageEaModel(nn.Module):
                     retrieve_indices_filled = torch.cat((retrieve_indices, torch.full((retrieve_indices.size(0), 1), -1, dtype=torch.long)), dim=1)
 
                     for j in range(existing_draft_len, input_draft_end_idx):
-                        row_indices = torch.arange(retrieve_indices.size(0), dtype=torch.int)
+                        row_indices = torch.arange(retrieve_indices.size(0), dtype=torch.long)
                         cum_ri_leaves = retrieve_indices_filled[row_indices, cur_subseq_ri_cum_depth]
                         cur_subseq_ri_cum_depth[cum_ri_leaves == j] += 1
                     subseq_ri_cum_depths = torch.cat((subseq_ri_cum_depths, cur_subseq_ri_cum_depth.unsqueeze(0)), dim=0)
