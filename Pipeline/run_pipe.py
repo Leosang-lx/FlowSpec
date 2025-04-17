@@ -93,13 +93,15 @@ def main(args):
             
             # start = time.perf_counter()
             # log = True
+            
             with prof.profile_context(f"Rank {rank}: eagenerate", device=f"cuda:{device}"):
-                if run_config.pipeline_type == "naive":
-                    outputs = stage_model.eagenerate_pipeline(input_ids,temperature=run_config.temperature,max_new_tokens=run_config.max_new_tokens, log=run_config.log)
-                elif run_config.pipeline_type == "pruned":
-                    outputs = stage_model.eagenerate_pruned_pipeline(input_ids, temperature=run_config.temperature, max_new_tokens=run_config.max_new_tokens, log=run_config.log)
-                elif run_config.pipeline_type == "continuous":
-                    outputs = stage_model.eagenerate_continuous(input_ids, temperature=run_config.temperature, max_new_tokens=run_config.max_new_tokens, log=run_config.log)
+                outputs = stage_model.stage_generate(input_ids, temperature=run_config.temperature, max_new_tokens=run_config.max_new_tokens, log=run_config.log)
+                # if run_config.pipeline_type == "naive":
+                #     outputs = stage_model.eagenerate_pipeline(input_ids,temperature=run_config.temperature,max_new_tokens=run_config.max_new_tokens, log=run_config.log)
+                # elif run_config.pipeline_type == "pruned":
+                #     outputs = stage_model.eagenerate_pruned_pipeline(input_ids, temperature=run_config.temperature, max_new_tokens=run_config.max_new_tokens, log=run_config.log)
+                # elif run_config.pipeline_type == "continuous":
+                #     outputs = stage_model.eagenerate_continuous(input_ids, temperature=run_config.temperature, max_new_tokens=run_config.max_new_tokens, log=run_config.log)
             if run_config.log:
                 if len(outputs) == 3:
                     output_ids, new_tokens, idx = outputs
@@ -121,12 +123,13 @@ def main(args):
                     print('Turns:', turns)
         else:
             with prof.profile_context(f"Rank {rank}: eagenerate", device=f"cuda:{device}"):
-                if run_config.pipeline_type == "naive":
-                    stage_model.eagenerate_pipeline(temperature=run_config.temperature, max_new_tokens=run_config.max_new_tokens)
-                elif run_config.pipeline_type == "pruned":
-                    stage_model.eagenerate_pruned_pipeline(temperature=run_config.temperature, max_new_tokens=run_config.max_new_tokens)
-                elif run_config.pipeline_type == "continuous":
-                    stage_model.eagenerate_continuous(temperature=run_config.temperature, max_new_tokens=run_config.max_new_tokens)
+                stage_model.stage_generate(temperature=run_config.temperature, max_new_tokens=run_config.max_new_tokens)
+                # if run_config.pipeline_type == "naive":
+                #     stage_model.eagenerate_pipeline(temperature=run_config.temperature, max_new_tokens=run_config.max_new_tokens)
+                # elif run_config.pipeline_type == "pruned":
+                #     stage_model.eagenerate_pruned_pipeline(temperature=run_config.temperature, max_new_tokens=run_config.max_new_tokens)
+                # elif run_config.pipeline_type == "continuous":
+                #     stage_model.eagenerate_continuous(temperature=run_config.temperature, max_new_tokens=run_config.max_new_tokens)
     
     if rank == 0:
         print(torch.cuda.list_gpu_processes(device=f"cuda:{device}"))

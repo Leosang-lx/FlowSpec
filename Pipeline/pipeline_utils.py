@@ -45,7 +45,7 @@ class Timer:
     def __exit__(self, exc_type, exc_value, traceback):
         torch.cuda.synchronize()
         elapsed = time.perf_counter() - self.start
-        print(f'{self.name} took {elapsed} seconds')
+        print(f'==== {self.name} {elapsed} seconds ====')
 
 
 # EAGLE
@@ -155,12 +155,14 @@ def split_sequence_close_equal_len(sequence: torch.Tensor, split_cnt: Union[int,
 # [ADD] logits processor
 def gen_token(logits=None, prob=None, logits_processor=None):
     if logits_processor is not None:
+        print(f'ramdom sampling')
         if logits is not None:
             logits = logits_processor(None, logits)
             prob = torch.nn.functional.softmax(logits, dim=1)
         token = torch.multinomial(prob, 1)
 
     else:
+        print(f'greedy sampling')
         if logits is not None:
             prob = logits
         token = torch.argmax(prob, dim=-1)
