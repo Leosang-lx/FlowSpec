@@ -1,6 +1,7 @@
 import torch
 import time
 import functools
+import gc
 from contextlib import contextmanager
 
 sep = '\n' + '-' * 50 + '\n'
@@ -84,7 +85,12 @@ class Profiler:
         Delete the time events for a named section.
         """
         if name in self.time_events:
+            for start, end in zip(self.time_events[name]['start'], self.time_events[name]['end']):
+                del start, end
             del self.time_events[name]
+            gc.collect()
+            torch.cuda.empty_cache()
+            
     
     def memory_start(self, name, device='cuda:1', cpu=False):
         """

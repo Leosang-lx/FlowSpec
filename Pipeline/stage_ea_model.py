@@ -5,6 +5,7 @@ import torch.nn as nn
 from huggingface_hub import hf_hub_download
 from transformers import AutoTokenizer, AutoConfig
 import os
+import gc
 
 from eagle.utils import *
 from eagle.kv_cache import initialize_past_key_values
@@ -103,10 +104,9 @@ class StageEaModel(nn.Module):
         # if model_config.has_lm_head:
         #     print(f"stage_base_model.lm_head.weight.device={stage_base_model.lm_head.weight.device}")
         # Type = AutoConfig.from_pretrained(stage_base_model_path).architectures[0]
-        if model_config.is_first_stage:
-            print(f"length_sweep(stage_base_model) * model_config.total_stage={length_sweep(stage_base_model) * model_config.total_stage}")
+        if model_config.is_first_stage and total_token == -1:
+            # print(f"length_sweep(stage_base_model) * model_config.total_stage={length_sweep(stage_base_model) * model_config.total_stage}")
             total_token = length_sweep(stage_base_model) * model_config.total_stage
-        
         # [MODIFIED] load draft model when config.has_draft_model==True
         if model_config.has_draft_model:   
             assert ea_model_path is not None
