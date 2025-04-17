@@ -45,7 +45,7 @@ class Timer:
     def __exit__(self, exc_type, exc_value, traceback):
         torch.cuda.synchronize()
         elapsed = time.perf_counter() - self.start
-        print(f'{self.name} took {elapsed} seconds')
+        # print(f'{self.name} took {elapsed} seconds')
 
 
 # EAGLE
@@ -690,7 +690,7 @@ def pruning(draft_tokens, retrieve_indices, best_candidate, accept_len, new_toke
     cur_path_depth = (retrieve_indices[best_candidate, :] != -1).sum().item()
     if accept_len == retrieve_indices.size(-1) or retrieve_indices[best_candidate, accept_len] == -1:  # the next token of the accepted
         # truncate: reach the global leaf: occurs in the eagenerate_pruned_pipeline()
-        print('- leaf has been reached')
+        # print('- leaf has been reached')
         return accepted_indices
 
     # judge whether the new token follows the tree
@@ -702,9 +702,9 @@ def pruning(draft_tokens, retrieve_indices, best_candidate, accept_len, new_toke
     same_indices = torch.nonzero(next_tokens_draft == new_token.cpu()).squeeze(1)
     if same_indices.numel() == 0:
         # truncate: unmatched token
-        print(f'- - no match token found in the tree, accept_len/global_depth={accept_len}/{cur_path_depth}')
-        print(f'- - next_tokens_draft={next_tokens_draft.unique()}')
-        print(f'- - new_token={new_token}')
+        # print(f'- - no match token found in the tree, accept_len/global_depth={accept_len}/{cur_path_depth}')
+        # print(f'- - next_tokens_draft={next_tokens_draft.unique()}')
+        # print(f'- - new_token={new_token}')
         return accepted_indices
 
     # pruning
@@ -997,7 +997,7 @@ def merge_two_tree(
     for i, cum_seq_len in enumerate(cum_seq_lens):
         # if i + 1 < cum_seq_lens.size(0):
             for j in range(0 if i == 0 else cum_seq_lens[i - 1], cum_seq_len):
-                row_indices = torch.arange(n_leaves, dtype=torch.int)
+                row_indices = torch.arange(n_leaves, dtype=torch.long)
                 cum_ri_leaves = retrieve_indices_filled[row_indices, ri_depth_cum]
                 ri_depth_cum[cum_ri_leaves == j] += 1
             # update: 只计算到在pipeline里的draft token tree部分，即将输入的最新一段单独算
@@ -1089,7 +1089,7 @@ def evaluate_posterior(
         if adjustflag and accept_length != candidates.shape[1]:
             sample_p = gtp
         else:
-            print('--  reach leaf')
+            # print('--  reach leaf')
             gt_logits = logits[best_candidate, accept_length - 1]
             gt_logits = logits_processor(None, gt_logits)
             sample_p = torch.softmax(gt_logits, dim=0)
