@@ -163,8 +163,8 @@ def gen_token(logits=None, prob=None, logits_processor=None):
     else:
         if logits is not None:
             prob = logits
-        token = torch.argmax(prob)
-        token = token[None, None]
+        token = torch.argmax(prob, dim=-1)
+        token = token[None]
 
     return token
 
@@ -263,14 +263,7 @@ def initialize_tree_pipeline(stage_model, past_key_values, logits_processor=None
     if stage_model.is_first_stage:
         orig, hidden_states = pipeline_prefill(stage_model, input_ids, past_key_values)
         
-        if logits_processor is not None:
-            logits = orig[:, -1]
-            logits = logits_processor(None, logits)
-            probabilities = torch.nn.functional.softmax(logits, dim=1)
-            token = torch.multinomial(probabilities, 1)
-        else:
-            token = torch.argmax(orig[:, -1])
-            token = token[None, None]
+        token = gen_token(logits=orig[:, -1], logits_processor=logits_processor)
         input_ids = torch.cat((input_ids, token.to(input_ids.device)), dim=1)
         
         draft_tokens, retrieve_indices, tree_mask, tree_position_ids = stage_model.ea_layer.topK_genrate(
@@ -285,7 +278,7 @@ def initialize_tree_pipeline(stage_model, past_key_values, logits_processor=None
 
 
 # [MODIFIED] from tree_decoding()
-def stage_tree_decoding_liux(
+def stage_tree_decoding(
         stage_model,
         stage_past_key_values=None,
         draft_seqs_split=None,
@@ -502,23 +495,11 @@ def update_stage_inference_inputs(
     if model.is_first_stage:
         retrieve_hidden_state_new = hidden_state_new[:, retrieve_indices]
         accept_hidden_state_new = retrieve_hidden_state_new[:, best_candidate, : accept_length]
-        prob = sample_p
-
-        if logits_processor is not None:
-            token = torch.multinomial(prob, 1)
-            token = token[None]
-        else:
-            token = torch.argmax(prob)
-            token = token[None, None]
-
-        draft_tokens, retrieve_indices, tree_mask, tree_position_ids = model.ea_layer.topK_genrate(
-            accept_hidden_state_new,
-            input_ids=torch.cat((input_ids, token.to(input_ids.device)), dim=1),
-            head=model.stage_base_model.lm_head, logits_processor=logits_processor
-        )
+        token = gen_token(prob=sample_p, logits_processor=logits_processor)[None]
+        # prob = sample_p
         new_token += accept_length
-
-        return input_ids, draft_tokens, retrieve_indices, tree_mask, tree_position_ids, new_token, None, token
+        
+        return input_ids, accept_hidden_state_new, token, new_token
 
 
 # [ADD] for continuous speculation
@@ -702,7 +683,7 @@ def pruning(draft_tokens, retrieve_indices, best_candidate, accept_len, new_toke
     :param accept_len:
     :return:
     """
-    # todo: what happens when accept_len==0?: impossible
+    # accept_len > 0
     accepted_indices = retrieve_indices[best_candidate, :accept_len]
 
     # judge whether the global leaf node is reached
@@ -763,11 +744,8 @@ def first_stage_pruning(left_indices, accept_len, draft_tokens, retrieve_indices
     left_retrieve_indices = retrieve_indices[matched_candidates, accept_len:]
     first_stage_left_indices = process_retrieve_indices(left_retrieve_indices)
 
-
     # # prune draft_tokens
     left_draft_tokens = draft_tokens[:, first_stage_left_indices]
-
-    
 
     # print(f'stage0 left_retrieve_indices:{left_retrieve_indices}')
     max_depth = (left_retrieve_indices != -1).sum(dim=1).max().item()
@@ -1005,7 +983,7 @@ def merge_two_tree(
     retrieve_indices_merged = torch.cat((ri_selected1, ri_selected2), dim=0)
     # [merge retrieve_indices] finish
 
-    # todo: update subseq_ri_cum_depths and lens_split
+    # todo: update lens_split and subseq_ri_cum_depths
     lens_split = torch.cat((lens_split, torch.tensor([draft_tokens_merged.size(0) - tree1_size], dtype=torch.long)))
     # print(f'lens_split: {lens_split}')
 
@@ -1017,15 +995,13 @@ def merge_two_tree(
 
     ri_depth_cum = torch.zeros(n_leaves, dtype=torch.long)
     for i, cum_seq_len in enumerate(cum_seq_lens):
-        for j in range(0 if i == 0 else cum_seq_lens[i - 1], cum_seq_len):
-            row_indices = torch.arange(n_leaves, dtype=torch.long)
-            cum_ri_leaves = retrieve_indices_filled[row_indices, ri_depth_cum]
-            ri_depth_cum[cum_ri_leaves == j] += 1
-
-        # print(ri_depth_cum)
-        # update: 只计算到在pipeline里的draft token tree部分，即将输入的最新一段单独算
-        subseq_ri_cum_depths.append(ri_depth_cum.clone())
-        # todo: 优化最后一段直接append，不需要累加
+        # if i + 1 < cum_seq_lens.size(0):
+            for j in range(0 if i == 0 else cum_seq_lens[i - 1], cum_seq_len):
+                row_indices = torch.arange(n_leaves, dtype=torch.int)
+                cum_ri_leaves = retrieve_indices_filled[row_indices, ri_depth_cum]
+                ri_depth_cum[cum_ri_leaves == j] += 1
+            # update: 只计算到在pipeline里的draft token tree部分，即将输入的最新一段单独算
+            subseq_ri_cum_depths.append(ri_depth_cum.clone())
     
     return draft_tokens_merged.unsqueeze(0), retrieve_indices_merged, merged_tree_mask[None, None], merged_tree_pos_ids, lens_split, torch.stack(subseq_ri_cum_depths, dim=0)
 

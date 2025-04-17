@@ -16,9 +16,7 @@ class Config:
     depth: int = 6
     
     # pipeline config
-    naive_pipeline: bool = False
-    pruned_pipeline: bool = False
-    continuous_pipeline: bool = True
+    pipeline_type: str = "naive"
     
     # device config
     device: str = "cuda"

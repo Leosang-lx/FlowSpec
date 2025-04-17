@@ -44,6 +44,20 @@ class CommHandler:
         if self.enable_async_send_recv:
             self.setup_queue()
 
+    def init_PG(self, init_method=None):
+        if init_method is None:
+            init_method = 'env://'
+        print(f"Initializing process group with backend {self.backend} and rank {self.rank} and world size {self.world_size}")
+        # dist.init_process_group(backend=self.backend, init_method='tcp://localhost:12345', rank=self.rank, world_size=self.world_size)
+        dist.init_process_group(
+            backend=self.backend,
+            init_method=init_method,
+            rank=self.rank,
+            world_size=self.world_size,
+            timeout=timedelta(seconds=15)
+        )
+        print(f'Rank {self.rank} initialized')
+
     def setup_queue(self):
         """
         All devices:
@@ -95,20 +109,6 @@ class CommHandler:
         tensor_shape = head_shape[head_shape > 0].tolist()
         return dtype, tensor_shape
 
-    def init_PG(self, init_method=None):
-        if init_method is None:
-            init_method = 'env://'
-        print(f"Initializing process group with backend {self.backend} and rank {self.rank} and world size {self.world_size}")
-        # dist.init_process_group(backend=self.backend, init_method='tcp://localhost:12345', rank=self.rank, world_size=self.world_size)
-        dist.init_process_group(
-            backend=self.backend,
-            init_method=init_method,
-            rank=self.rank,
-            world_size=self.world_size,
-            timeout=timedelta(seconds=30)
-        )
-        print(f'Rank {self.rank} initialized')
-
     def send_tensor(self, data, dst_rank, tag=0):
         head = self.get_head(data)
         dist.send(head, dst=dst_rank, tag=tag)
@@ -130,9 +130,6 @@ class CommHandler:
             try:
                 data, dst = self.send_queue.get(timeout=0.1)
                 self.send_tensor(data, dst)
-                # head = self.get_head(data)
-                # dist.send(head, dst=dst)
-                # dist.send(data, dst=dst)
             except Empty:
                 continue
             except Exception as e:  # break when error occurs
@@ -144,14 +141,13 @@ class CommHandler:
         while self._running:
             try:
                 data = self.recv_tensor(src_rank)
-                # head = torch.zeros(self.max_head_len, dtype=torch.long)
-                # dist.recv(head, src=src_rank)
-                # dtype, tensor_shape = self.read_head(head)
-                # data = torch.zeros(tensor_shape, dtype=dtype)
-                # dist.recv(data, src=src_rank)
                 recv_queue.put(data)
 
-            except Exception as e:  # break when error occurs
+            except RuntimeError as e:
+                # if "Timed out" in str(e):
+                #     print('Rank {self.rank} timed out, exit.')
+                #     break
+                # else:
                 print(f"Recv error from rank {src_rank}->{self.rank}:\n{type(e)}: {e}")
                 # traceback.print_exc()
                 break
@@ -169,7 +165,7 @@ class CommHandler:
         - Recv broadcast by recvfrom()
         - Tag=1: broadcast
         """
-        if not self.enable_broadcast:
+        if not self.enable_async_broadcast:
             raise ValueError("Broadcast is not enabled")
         try:
             for dst_rank in range(self.world_size):
@@ -186,18 +182,8 @@ class CommHandler:
         except Exception as e:
             print(f"Multi send error in rank {self.rank}: {e}")
             raise e
-        
-    def recvfrom_async(self, src_rank, tag=0):
-        # print(f"Rank {self.rank} recv_async from rank {src_rank}")
-        return self.executor.submit(self.recv_tensor, src_rank, tag)
 
     def broadcast_send(self, data):
-        """
-        - Implement broadcast with sendto()
-        - Recv broadcast by recvfrom()
-        """
-        if not self.enable_broadcast:
-            raise ValueError("Broadcast is not enabled")
         try:
             data = data.to(self.comm_device)
             head = self.get_head(data)
@@ -205,14 +191,7 @@ class CommHandler:
             dist.broadcast(data, src=self.rank)
             
         except Exception as e:
-            print(f"Broadcast error in rank {self.rank}: {e}")
-            raise e
-
-    def broadcast_send_async(self, data):
-        try:
-            return self.executor.submit(self.broadcast_send, data)
-        except Exception as e:
-            print(f"Broadcast send async error in rank {self.rank}: {e}")
+            print(f"Broadcast send error in rank {self.rank}: {e}")
             raise e
 
     def broadcast_recv(self, src_rank, device=None):
@@ -226,11 +205,8 @@ class CommHandler:
                 data = data.to(device)
             return data
         except Exception as e:
-            print(f"Broadcast error in rank {self.rank}: {e}")
+            print(f"Broadcast recv error in rank {self.rank}: {e}")
             raise e
-    
-    def broadcast_recv_async(self, src_rank, device=None):
-        return self.executor.submit(self.broadcast_recv, src_rank, device)
 
     def broadcast_tree_global(self, lens_split, tree_pos_ids, tree_mask):
         try:
