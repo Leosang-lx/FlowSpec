@@ -14,7 +14,10 @@ from stage_modeling_llama import StageLlamaModelForCausalLM
 from stage_ea_config import StageEaConfig
 from pipeline_utils import *
 from comm.comm_handler import CommHandler
+# from torch.nn.init import init_empty_weights
+from accelerate import init_empty_weights
 
+from profiler.profiler import prof
 
 class StageEaModel(nn.Module):
 
@@ -38,7 +41,7 @@ class StageEaModel(nn.Module):
             self.hidden_size = stage_base_model.lm_head.weight.shape[-1]
             self.vocab_size = stage_base_model.lm_head.weight.shape[0]
         self.base_model_name_or_path = stage_base_model_or_path
-        if config.is_first_stage or config.is_last_stage:  # has embedding and lm_head
+        if config.is_first_stage:  # has embedding and lm_head
             self.tokenizer = AutoTokenizer.from_pretrained(self.base_model_name_or_path, use_fast=False)
         else:
             self.tokenizer = None
@@ -58,7 +61,9 @@ class StageEaModel(nn.Module):
             self.ea_layer.init_tree()
 
         # [MODIFIED] initialize comm handler
+        print(f"start init comm handler")
         self.comm = CommHandler(rank=config.stage, world_size=config.total_stage)
+        print(f"init comm handler")
         self.comm.init_PG()
         self.comm.start_threads()
 
@@ -81,7 +86,7 @@ class StageEaModel(nn.Module):
             top_k=10,
             threshold=1.0,
             **kwargs,
-    ):
+    ):  
         model_config = StageEaConfig.from_pretrained(stage_base_model_path)
         assert Type == 'LLaMA'  # only support LLaMA for now
         stage_base_model = StageLlamaModelForCausalLM.from_pretrained(
@@ -89,8 +94,8 @@ class StageEaModel(nn.Module):
         )
 
         # [MODIFIED] load draft model when config.has_draft_model==True
-        if model_config.has_draft_model:
-            assert ea_model_path is not None, f'ea_model_path of rank {model_config.stage} is {ea_model_path}'
+        if model_config.has_draft_model:   
+            assert ea_model_path is not None
             config_path = os.path.join(ea_model_path, 'config.json')
             if not os.path.exists(config_path):
                 config_path = hf_hub_download(ea_model_path, "config.json")
@@ -99,14 +104,15 @@ class StageEaModel(nn.Module):
                 if not os.path.exists(load_model_path):
                     load_model_path = hf_hub_download(ea_model_path, "pytorch_model.bin")
                 ea_layer_state_dict = torch.load(load_model_path,
-                                                 map_location=stage_base_model.device)
+                                                map_location=stage_base_model.device)
             except:
                 from safetensors.torch import load_file
                 load_model_path = os.path.join(ea_model_path, "model.safetensors")
                 if not os.path.exists(load_model_path):
                     load_model_path = hf_hub_download(ea_model_path, "model.safetensors")
-                ea_layer_state_dict = load_file(load_model_path)
-
+                ea_layer_state_dict = load_file(load_model_path,
+                                                device=stage_base_model.device)
+                
             # [MODIFIED] load ea_draft_model in from_pretrained()
             ea_config = StageEaConfig.from_pretrained(config_path)
             # load the draft model
@@ -118,7 +124,7 @@ class StageEaModel(nn.Module):
                 bias = True
 
             ea_layer = Model(ea_config, bias=bias, total_tokens=total_token, depth=depth, top_k=top_k,
-                             threshold=threshold)
+                            threshold=threshold)
             low_memory = False
 
             device = stage_base_model.model.layers[-1].self_attn.q_proj.weight.device
@@ -134,6 +140,10 @@ class StageEaModel(nn.Module):
             else:
                 ea_layer.diff_device = False
             ea_layer.load_state_dict(ea_layer_state_dict, strict=True)
+            
+            del ea_layer_state_dict, ea_config, con
+            torch.cuda.empty_cache()
+            
             ea_layer.to(stage_base_model.dtype).to(device)
             # print(f"ea_layer.embed_tokens.weight.device={ea_layer.embed_tokens.weight.device}")
         else:
@@ -210,7 +220,62 @@ class StageEaModel(nn.Module):
             orig = self.stage_base_model.lm_head(hidden_states)
             return outputs, orig, hidden_states
         else:
-            return outputs, hidden_states   
+            return outputs, hidden_states
+    
+    @torch.no_grad()
+    def stage_eagererate(
+        self,
+        input_ids=None,
+        temperature=0.0,
+        top_p=0.0,
+        top_k=0.0,
+        max_new_tokens=512,
+        max_length=2048,
+        log=False,
+        is_llama3=False,
+        pipeline_type="naive",
+    ):
+        if is_llama3:
+            stop_token_id = self.tokenizer.convert_tokens_to_ids("<|eot_id|>")
+        
+        # [MODIFIED]: only the first stage has the ea_layer and input_ids
+        if temperature > 1e-5 and self.config.is_last_stage:
+            logits_processor = prepare_logits_processor(temperature=temperature, top_p=top_p, top_k=top_k)
+        else:
+            logits_processor = None
+        
+        # initialize the past key and value states
+        if hasattr(self, "past_key_values"):
+            past_key_values = self.past_key_values
+            past_key_values_data = self.past_key_values_data
+            current_length_data = self.current_length_data
+            # Reset the past key and value states
+            current_length_data.zero_()
+        else:
+            (
+                past_key_values,
+                past_key_values_data,
+                current_length_data,
+            ) = initialize_past_key_values(self.stage_base_model)
+            self.past_key_values = past_key_values
+            self.past_key_values_data = past_key_values_data
+            self.current_length_data = current_length_data
+            
+        # to determine the stop of the pipeline
+        should_stop = torch.tensor(0, dtype=torch.int32, device=self.stage_base_model.device)
+        
+        config = self.config
+        device = self.stage_base_model.device
+        comm = self.comm
+        
+        if config.is_first_stage or config.is_last_stage:
+            padding = torch.zeros(1, 1, dtype=torch.long) - 1  # padding -1 to the draft token sequence
+
+        
+        
+
+            
+            
 
     @torch.no_grad()  # collaborative function
     def eagenerate_pipeline(
@@ -269,22 +334,24 @@ class StageEaModel(nn.Module):
 
             input_len = input_ids.shape[1]
             reset_tree_mode(self)
-            # make a draft token tree
-            draft_tokens, retrieve_indices, tree_mask, tree_position_ids, logits, hidden_state, sample_token = initialize_tree_pipeline(
-                self, past_key_values, logits_processor, input_ids
-            )
-
-            retrieve_indices = retrieve_indices.to(self.stage_base_model.device)
-            # split the tree for pipeline
-            
             new_token = 0
+
+            # prefill
+            orig, hidden_states = pipeline_prefill(self, input_ids, past_key_values)
+            token = gen_token(logits=orig[:, -1], logits_processor=logits_processor)
         else:
-            initialize_tree_pipeline(self, past_key_values)
+            pipeline_prefill(self, stage_past_key_values=past_key_values)
         
         for idx in range(max_length):
-            
             # [tree_decoding]
             if self.is_first_stage:
+                input_ids_ea = torch.cat((input_ids, token.to(input_ids.device)), dim=1)
+                draft_tokens, retrieve_indices, tree_mask, tree_position_ids = self.ea_layer.topK_genrate(
+                    hidden_states,
+                    input_ids_ea,
+                    self.stage_base_model.lm_head,
+                    logits_processor
+                )
                 seqs_split, lens_split = split_sequence_close_equal_len(
                     draft_tokens,
                     self.total_stage
@@ -296,7 +363,7 @@ class StageEaModel(nn.Module):
             else:
                 tree_decoding_params = (self, past_key_values)
 
-            outputs = stage_tree_decoding_liux(*tree_decoding_params)
+            outputs = stage_tree_decoding(*tree_decoding_params)
 
             if self.is_first_stage:
                 logits, hidden_state = outputs
@@ -346,7 +413,7 @@ class StageEaModel(nn.Module):
             
             # dist.barrier()
             if self.is_first_stage:
-                input_ids, draft_tokens, retrieve_indices, tree_mask, tree_position_ids, new_token, hidden_state, sample_token = outputs
+                input_ids, hidden_states, token, new_token = outputs
 
                 if input_ids is not None and self.tokenizer is not None:
                     if is_llama3 and stop_token_id in input_ids[0, input_len:].tolist():
@@ -415,6 +482,7 @@ class StageEaModel(nn.Module):
 
         # [initialization]
         config = self.config
+        device = self.stage_base_model.device
         comm = self.comm
         if self.is_first_stage or self.is_last_stage:
             padding = torch.zeros(1, 1, dtype=torch.long) - 1  # padding -1 to the draft token sequence
@@ -438,23 +506,23 @@ class StageEaModel(nn.Module):
         )
         if config.is_first_stage:
             orig, hidden_state = output
-            orig = orig[:, -1]
+            token = gen_token(logits=orig[:, -1], logits_processor=logits_processor)
             new_token = 0
 
         # get the global accept length (for later pruning)
         global_accept_len = current_length_data[0].item()
-        should_stop = torch.tensor(0, dtype=torch.int32, device=self.stage_base_model.device)
+        should_stop = torch.tensor(0, dtype=torch.int32)
         new_sampled_token = -1
         
         for idx_spec in range(max_length):
 
             # print(f'stage{config.stage}, idx_spec={idx_spec}')
             if config.is_first_stage:
-                if idx_spec == 0:
-                    token = gen_token(logits=orig, logits_processor=logits_processor)
-                else:
-                    token = torch.tensor([[new_sampled_token]], dtype=torch.long)
-                input_ids_ea = torch.cat((input_ids, token.to(input_ids.device)), dim=1)
+                # if idx_spec == 0:
+                #     token = gen_token(logits=orig, logits_processor=logits_processor)
+                # else:
+                #     token = torch.tensor([[new_sampled_token]], dtype=torch.long)
+                input_ids_ea = torch.cat((input_ids, token), dim=1)
 
                 # make a draft token tree based on the hidden_state and input_ids
                 draft_tokens, retrieve_indices, tree_mask, tree_position_ids = self.ea_layer.topK_genrate(
@@ -555,6 +623,7 @@ class StageEaModel(nn.Module):
 
                         if truncate:
                             sub_hidden_state, lens_split, tree_mask, tree_position_ids = None, None, None, None
+                            token = torch.tensor([[new_sampled_token]], dtype=torch.long, device=device)
 
                     # [global pruning] prune the tokens (kv_cache and hidden_state)
                     # - according to the global_accept_len and the hidden_state_len
@@ -742,7 +811,7 @@ class StageEaModel(nn.Module):
         )
         if config.is_first_stage:
             orig, hidden_state = output
-            orig = orig[:, -1]
+            token = gen_token(logits=orig[:, -1], logits_processor=logits_processor)
             new_token = 0
 
         # get the global accept length (for later pruning)
@@ -751,6 +820,7 @@ class StageEaModel(nn.Module):
 
         turns = 0
         new_sampled_token = -1
+        
 
         # [continuous speculation] outer loop: start from a new draft tree
         for idx_spec in range(max_length):
@@ -758,12 +828,6 @@ class StageEaModel(nn.Module):
             # print(f'stage{config.stage} idx_spec={idx_spec}')
             if config.is_first_stage:
                 print(f'{idx_spec}th round [start]')
-                if idx_spec == 0:
-                    # print(f'first stage {idx_spec}th round {torch.topk(orig, k=10, dim=-1)}')
-                    token = gen_token(logits=orig, logits_processor=logits_processor)
-                    print(f'first stage {idx_spec}th round new token: {token}')
-                else:
-                    token = torch.tensor([[new_sampled_token]], dtype=torch.long)
                 input_ids_ea = torch.cat((input_ids, token.to(input_ids.device)), dim=1)
 
                 # make a draft token tree based on the hidden_state and input_ids
@@ -835,8 +899,8 @@ class StageEaModel(nn.Module):
                         )
                         accept_length += 1
                         # print(f'last stage {idx_spec}th round {i}th turn: {torch.topk(sample_p, k=10, dim=-1)}')
-                        # token = gen_token(prob=sample_p, logits_processor=logits_processor)  # device=cuda
-                        token = torch.multinomial(sample_p, num_samples=1)
+                        token = gen_token(prob=sample_p, logits_processor=logits_processor)  # device=cuda
+                        # token = torch.multinomial(sample_p, num_samples=1)
 
                         cur_draft_depth = subseq_ri_cum_depths[0, best_candidate]
                         print(f'- {i}th turn, accept_len/local_depth: {accept_length}/{cur_draft_depth}')
@@ -875,16 +939,16 @@ class StageEaModel(nn.Module):
                         truncate = new_sampled_token != -1
                         if truncate:
                             sub_hidden_state = lens_split = tree_mask = tree_position_ids = None
+                            if config.is_first_stage:
+                                token = torch.tensor([[new_sampled_token]], dtype=torch.long, device=input_ids.device)
 
                     if config.is_first_stage:
                         # [first stage pruning]
                         # prune subseq_ri_cum_depths for continuous speculation
                         if not truncate:
-                            # print(f'stage{config.stage} {i}th global_accept_len: {global_accept_len} before first_stage_pruning')
                             draft_tokens, retrieve_indices, accepted_tokens, subseq_ri_cum_depths, left_indices = first_stage_pruning(
                                     left_indices, accept_length, draft_tokens, retrieve_indices, subseq_ri_cum_depths
                             )
-                            # append accepted_tokens to input_ids!!!
                             input_ids = torch.cat((input_ids, accepted_tokens), dim=-1)
                             # first stage may have unhandled tokens
 
@@ -1036,14 +1100,17 @@ class StageEaModel(nn.Module):
                     retrieve_indices_filled = torch.cat((retrieve_indices, torch.full((retrieve_indices.size(0), 1), -1, dtype=torch.long)), dim=1)
 
                     for j in range(existing_draft_len, input_draft_end_idx):
-                        row_indices = torch.arange(retrieve_indices.size(0), dtype=torch.int)
+                        row_indices = torch.arange(retrieve_indices.size(0), dtype=torch.long)
                         cum_ri_leaves = retrieve_indices_filled[row_indices, cur_subseq_ri_cum_depth]
                         cur_subseq_ri_cum_depth[cum_ri_leaves == j] += 1
                     subseq_ri_cum_depths = torch.cat((subseq_ri_cum_depths, cur_subseq_ri_cum_depth.unsqueeze(0)), dim=0)
 
+                    appended_draft_tokens = draft_tokens[:, existing_draft_len:input_draft_end_idx]
                     appended_tree_position_ids = tree_position_ids[existing_draft_len:input_draft_end_idx]
                     appended_tree_mask = tree_mask[..., existing_draft_len:input_draft_end_idx, :input_draft_end_idx]
-                    appended_draft_tokens = draft_tokens[:, existing_draft_len:input_draft_end_idx]
+                    # print(f'===Send Appended Tree===')
+                    # print(f'-- draft_tokens: {draft_tokens[:, :input_draft_end_idx]}')
+                    # print(f'-- tree_mask: {tree_mask.shape}; appended_tree_position_ids: {appended_tree_position_ids.shape}; appended_tree_mask: {appended_tree_mask.shape}')
                     broadcast_tree_info_task = comm.executor.submit(
                         comm.broadcast_tree_info,
                         lens_split,
@@ -1105,9 +1172,13 @@ class StageEaModel(nn.Module):
                     else:
                         lens_split, appended_tree_position_ids, appended_tree_mask, appended_draft_tokens, retrieve_indices, subseq_ri_cum_depths = expand_info
                         draft_tokens = torch.cat((draft_tokens, appended_draft_tokens), dim=-1)
+                        # print(f'===Append tree===')
+                        # print(f'-- draft_tokens: {draft_tokens}')
                     appended_draft_len = lens_split[-1]
                     tree_position_ids = torch.cat((tree_position_ids, appended_tree_position_ids.to(tree_position_ids.device)), dim=0)
                     tree_mask = F.pad(tree_mask, (0, appended_draft_len), value=0)
+                    # if config.is_last_stage:
+                        # print(f'-- tree_mask: {tree_mask.shape}; appended_tree_mask: {appended_tree_mask.shape}')
                     tree_mask = torch.cat((tree_mask, appended_tree_mask.to(tree_mask.device)), dim=-2)
                     
             # end this round of speculative decoding

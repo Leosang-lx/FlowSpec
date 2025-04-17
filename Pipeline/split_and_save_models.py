@@ -25,7 +25,8 @@ EAGLE_model_path = cache_dir + EAGLE_model_path
 def gen_stage_model_config_series(total_stage: int, base_ea_config) -> StageEaConfig:
     assert isinstance(total_stage, int) and total_stage > 0
     total_hidden_layers = base_ea_config.num_hidden_layers
-    hidden_layers_split = split_close_equal(total_hidden_layers, total_stage)
+    # hidden_layers_split = split_close_equal(total_hidden_layers, total_stage)
+    hidden_layers_split = [6,9,9,8]
     print(f'total_hidden_layers={total_hidden_layers}, total_stage={total_stage}, hidden_layers_split={hidden_layers_split}')
     stage_model_config_series = []
     for stage, hidden_layer_num in enumerate(hidden_layers_split):
@@ -43,7 +44,7 @@ def gen_stage_model_config_series(total_stage: int, base_ea_config) -> StageEaCo
             has_lm_head=has_lm_head,
         )
         stage_model_config_series.append(stage_model_config)
-
+        
     return stage_model_config_series
 
 def save_stage_dict(base_ea_model: EaModel, config: StageEaConfig, save_dir: str):
@@ -59,7 +60,8 @@ def save_stage_dict(base_ea_model: EaModel, config: StageEaConfig, save_dir: str
                 stage_state_dict[key] = value
     
     for i in range(*config.layer_range):
-        stage_key = f'model.layers.{i % config.stage_num_hidden_layers_list[config.stage]}.'
+        # stage_key = f'model.layers.{i % config.stage_num_hidden_layers_list[config.stage]}.'
+        stage_key = f'model.layers.{i - config.layer_range[0]}.'
         for key, value in state_dict.items():
             if key.startswith(f'model.layers.{i}.input_layernorm'):
                 stage_state_dict[stage_key + 'input_layernorm.weight'] = value
@@ -92,7 +94,7 @@ def save_stage_dict(base_ea_model: EaModel, config: StageEaConfig, save_dir: str
             if key.startswith('model.norm'):
                 stage_state_dict[key] = value
     
-    print(f'stage_state_dict={stage_state_dict}')
+    # print(f'stage_state_dict={stage_state_dict}')
     stage = config.stage
     joined_list = '+'.join(map(str, config.stage_num_hidden_layers_list))
     stage_file_dir = os.path.join(save_dir, f'stage_model_series_{joined_list}/stage_model_{stage}')
@@ -100,7 +102,8 @@ def save_stage_dict(base_ea_model: EaModel, config: StageEaConfig, save_dir: str
     print('--Saving stage_model_config...')
     config.save_pretrained(stage_file_dir)
     print('--Saving stage_model...')
-    torch.save(stage_state_dict, stage_file_dir + '/pytorch_model.bin')
+    # torch.save(stage_state_dict, stage_file_dir + '/pytorch_model.bin')
+    save_file(stage_state_dict, stage_file_dir + '/safetensors_model.safetensors', metadata={'format': 'pt'})
     print('--Done!')
     
 if __name__ == '__main__':
@@ -113,8 +116,6 @@ if __name__ == '__main__':
     
     stage_model_config_series = gen_stage_model_config_series(4, base_ea_config)
     
-    stage_model_save_dir = '/home/liux/LLM/pipeline_model/meta-llama/Llama-2-7b-chat-hf'
+    stage_model_save_dir = '/home/liux/big_file/pipeline_model/meta-llama/Llama-2-7b-chat-hf'
     for config in stage_model_config_series:
         save_stage_dict(model, config, stage_model_save_dir)
-
-    model_struct_test()
