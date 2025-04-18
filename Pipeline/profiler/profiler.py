@@ -1,6 +1,7 @@
 import torch
 import time
 import functools
+import gc
 from contextlib import contextmanager
 
 sep = '\n' + '-' * 50 + '\n'
@@ -78,6 +79,18 @@ class Profiler:
         self.time_events[name]['end'] = []
         avg_time = total_time / total_count if total_count > 0 else 0
         return total_time, avg_time
+    
+    def delete_time_events(self, name):
+        """
+        Delete the time events for a named section.
+        """
+        if name in self.time_events:
+            for start, end in zip(self.time_events[name]['start'], self.time_events[name]['end']):
+                del start, end
+            del self.time_events[name]
+            gc.collect()
+            torch.cuda.empty_cache()
+            
     
     def memory_start(self, name, device='cuda:1', cpu=False):
         """

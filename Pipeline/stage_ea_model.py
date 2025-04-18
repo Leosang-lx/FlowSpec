@@ -5,6 +5,7 @@ import torch.nn as nn
 from huggingface_hub import hf_hub_download
 from transformers import AutoTokenizer, AutoConfig
 import os
+import gc
 
 from eagle.utils import *
 from eagle.kv_cache import initialize_past_key_values
@@ -18,6 +19,7 @@ from comm.comm_handler import CommHandler
 from accelerate import init_empty_weights
 
 from profiler.profiler import prof
+from tools.length_sweep import length_sweep
 
 class StageEaModel(nn.Module):
 
@@ -61,12 +63,13 @@ class StageEaModel(nn.Module):
             self.ea_layer.init_tree()
 
         # [MODIFIED] initialize comm handler
-        print(f"start init comm handler")
+        # print(f"start init comm handler")
         self.comm = CommHandler(rank=config.stage, world_size=config.total_stage)
-        print(f"init comm handler")
+        # print(f"init comm handler")
         self.comm.init_PG()
         self.comm.start_threads()
-
+        dist.barrier()
+        
     def get_tokenizer(self):
         """Get the tokenizer of the base model.
 
@@ -89,10 +92,16 @@ class StageEaModel(nn.Module):
     ):  
         model_config = StageEaConfig.from_pretrained(stage_base_model_path)
         assert Type == 'LLaMA'  # only support LLaMA for now
+        
         stage_base_model = StageLlamaModelForCausalLM.from_pretrained(
-            stage_base_model_path, **kwargs
-        )
-
+                stage_base_model_path, **kwargs
+            )
+        # if model_config.has_lm_head:
+        #     print(f"stage_base_model.lm_head.weight.device={stage_base_model.lm_head.weight.device}")
+        # Type = AutoConfig.from_pretrained(stage_base_model_path).architectures[0]
+        if model_config.is_first_stage and total_token == -1:
+            # print(f"length_sweep(stage_base_model) * model_config.total_stage={length_sweep(stage_base_model) * model_config.total_stage}")
+            total_token = length_sweep(stage_base_model) * model_config.total_stage
         # [MODIFIED] load draft model when config.has_draft_model==True
         if model_config.has_draft_model:   
             assert ea_model_path is not None
@@ -1205,6 +1214,7 @@ class StageEaModel(nn.Module):
             logits_processor = None
 
         # Initialize the past key and value states
+        self.stage_base_model.model.tree_mask = None
         if hasattr(self, "past_key_values"):
             past_key_values = self.past_key_values
             past_key_values_data = self.past_key_values_data
@@ -1326,7 +1336,8 @@ class StageEaModel(nn.Module):
                         token = gen_token(prob=sample_p, logits_processor=logits_processor)  # device=cuda
 
                         cur_draft_depth = subseq_ri_cum_depths[0, best_candidate]
-                        print(f'- {i}th turn, accept_len/local_depth: {accept_length}/{cur_draft_depth}')
+                        if log:
+                            print(f'- {i}th turn, accept_len/local_depth: {accept_length}/{cur_draft_depth}')
 
                         # [local pruning]
                         output = pruning(draft_tokens, retrieve_indices, best_candidate, accept_length, token,
@@ -1510,6 +1521,7 @@ class StageEaModel(nn.Module):
             logits_processor = None
 
         # initialize hte past key and value states
+        self.stage_base_model.model.tree_mask = None
         if hasattr(self, "past_key_values"):
             past_key_values = self.past_key_values
             past_key_values_data = self.past_key_values_data
@@ -1565,9 +1577,10 @@ class StageEaModel(nn.Module):
 
             # print(f'stage{config.stage} idx_spec={idx_spec}')
             if config.is_first_stage:
-                print(f'{idx_spec}th round [start]')
+                if log:
+                    print(f'{idx_spec}th round [start]')    
                 input_ids_ea = torch.cat((input_ids, token.to(input_ids.device)), dim=1)
-
+                
                 # make a draft token tree based on the hidden_state and input_ids
                 draft_tokens, retrieve_indices, tree_mask, tree_position_ids = self.ea_layer.topK_genrate(
                     hidden_state, input_ids_ea, self.stage_base_model.lm_head,
@@ -1641,7 +1654,8 @@ class StageEaModel(nn.Module):
                         # token = torch.multinomial(sample_p, num_samples=1)
 
                         cur_draft_depth = subseq_ri_cum_depths[0, best_candidate]
-                        print(f'- {i}th turn, accept_len/local_depth: {accept_length}/{cur_draft_depth}')
+                        if log:
+                            print(f'- {i}th turn, accept_len/local_depth: {accept_length}/{cur_draft_depth}')
                         
                         # [local pruning]
                         output = pruning(draft_tokens, retrieve_indices, best_candidate, accept_length, token, subseq_ri_cum_depths)

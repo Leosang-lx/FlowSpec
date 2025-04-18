@@ -29,7 +29,7 @@ def main(args):
     rank = int(os.environ['RANK'])
     world_size = int(os.environ['WORLD_SIZE'])
     # device = rank % torch.cuda.device_count()
-    device = 0
+    device = 1
     torch.cuda.set_device(device)
     print(f'rank={rank}, world_size={world_size}, device={device}')
     
@@ -37,7 +37,7 @@ def main(args):
     # base_model_path = f"/home/nvidia/LLM/pipeline_model/meta-llama/Llama-2-7b-chat-hf/stage_model_series_6+9+9+8_half/stage_model_{rank}"
     # EAGLE_model_path = "/home/nvidia/LLM/models_hf/yuhuili/EAGLE-llama2-chat-7B"
     
-    if rank == 0:
+    if rank == 0 and run_config.mode == "demo":
         prof.time_start("total_time")
     with prof.profile_context(f"Rank {rank}: loading stage model", device=f"cuda:{device}"):
         if rank == 0:
@@ -74,6 +74,7 @@ def main(args):
 
     with torch.no_grad():
         assert run_config.pipeline_type in ["naive", "pruned", "continuous"]
+        assert run_config.mode in ["eval", "demo"]
         if rank == 0:
             your_message=run_config.your_message
             # conv = get_conversation_template("vicuna")
@@ -98,10 +99,10 @@ def main(args):
                 outputs = stage_model.stage_generate(input_ids, temperature=run_config.temperature, max_new_tokens=run_config.max_new_tokens, log=run_config.log, pipeline_type=run_config.pipeline_type)
                 
             if run_config.log:
-                if len(outputs) == 3:
-                    output_ids, new_tokens, idx = outputs
-                else:
-                    output_ids, new_tokens, idx, turns = outputs
+                # if len(outputs) == 3:
+                #     output_ids, new_tokens, idx = outputs
+                # else:
+                output_ids, new_tokens, idx, turns = outputs
             else:
                 output_ids = outputs
             # torch.cuda.synchronize()
@@ -120,8 +121,7 @@ def main(args):
             with prof.profile_context(f"Rank {rank}: eagenerate", device=f"cuda:{device}"):
                 stage_model.stage_generate(temperature=run_config.temperature, max_new_tokens=run_config.max_new_tokens, pipeline_type=run_config.pipeline_type)
     
-    if rank == 0:
-        print(torch.cuda.list_gpu_processes(device=f"cuda:{device}"))
+    if rank == 0 and run_config.mode == "demo":
         prof.time_stop("total_time")
     
     dist.barrier() # let output looks neat
