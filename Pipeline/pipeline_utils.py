@@ -155,14 +155,12 @@ def split_sequence_close_equal_len(sequence: torch.Tensor, split_cnt: Union[int,
 # [ADD] logits processor
 def gen_token(logits=None, prob=None, logits_processor=None):
     if logits_processor is not None:
-        print(f'ramdom sampling')
         if logits is not None:
             logits = logits_processor(None, logits)
             prob = torch.nn.functional.softmax(logits, dim=1)
         token = torch.multinomial(prob, 1)
 
     else:
-        print(f'greedy sampling')
         if logits is not None:
             prob = logits
         token = torch.argmax(prob, dim=-1)
@@ -464,7 +462,7 @@ def update_stage_inference_inputs(
         best_candidate=None,
         accept_length=None,
         retrieve_indices=None,
-        new_token=None,
+        # new_token=None,
         hidden_state_new=None,
         sample_p=None,
 ):
@@ -499,9 +497,9 @@ def update_stage_inference_inputs(
         accept_hidden_state_new = retrieve_hidden_state_new[:, best_candidate, : accept_length]
         token = gen_token(prob=sample_p, logits_processor=logits_processor)[None]
         # prob = sample_p
-        new_token += accept_length
+        # new_token += accept_length
         
-        return input_ids, accept_hidden_state_new, token, new_token
+        return input_ids, accept_hidden_state_new, token#, new_token
 
 
 # [ADD] for continuous speculation
@@ -697,7 +695,7 @@ def pruning(draft_tokens, retrieve_indices, best_candidate, accept_len, new_toke
 
     # judge whether the new token follows the tree
     matched_candidates = find_prefix_match(retrieve_indices, accepted_indices)  # non-zero
-    next_indices_draft = retrieve_indices[matched_candidates, accept_len]
+    next_indices_draft = retrieve_indices[matched_candidates, accept_len]  # todo: retrieve_indices会比last stage的draft tokens多，每次appended只会把append的token给到last stage
     next_tokens_draft = draft_tokens[0, next_indices_draft]
     # found the paths with prefix of "accept_tokens + new_token"
 
