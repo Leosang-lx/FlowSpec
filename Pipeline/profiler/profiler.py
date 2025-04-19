@@ -23,7 +23,7 @@ class Profiler:
             f"Cannot start '{name}' as there are more starts than stops"
         
         if cpu:
-            start_event = time.time()
+            start_event = time.perf_counter()
         else:
             start_event = torch.cuda.Event(enable_timing=True)
             if stream is not None:
@@ -42,7 +42,7 @@ class Profiler:
             f"Cannot stop '{name}' as there are more stops than starts"
 
         if cpu:
-            end_event = time.time()
+            end_event = time.perf_counter()
         else:
             end_event = torch.cuda.Event(enable_timing=True)
             if stream is not None:
@@ -170,12 +170,12 @@ class Profiler:
     @contextmanager
     def profile_context(self, name, stream=None, device='cuda:1', cpu=False):
         try:
-            self.memory_start(name, device, cpu)
+            # self.memory_start(name, device, cpu)
             self.time_start(name, stream, cpu)
             yield
         finally:
             self.time_stop(name, stream, cpu)
-            self.memory_stop(name, device, cpu)
+            # self.memory_stop(name, device, cpu)
 
     def get_all_elapsed_times(self):
         """
@@ -228,6 +228,6 @@ class Profiler:
         Print all recorded events.
         """
         self.print_all_elapsed_times()
-        self.print_all_additional_memory()
+        # self.print_all_additional_memory()
 
 prof = Profiler()
