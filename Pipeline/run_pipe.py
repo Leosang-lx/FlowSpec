@@ -35,18 +35,18 @@ def main(args):
     
     if rank == 0 and run_config.mode == "demo":
         prof.time_start("total_time")
-    with prof.profile_context(f"Rank {rank}: loading stage model", device=f"cuda:{device}"):
-        stage_model = StageEaModel.from_pretrained(
-            stage_base_model_path=run_config.base_model_dir + f"/stage_model_{rank}",
-            ea_model_path=run_config.EAGLE_model_path if rank == 0 else None,
-            torch_dtype=torch.float16,
-            low_cpu_mem_usage=True,
-            # max_memory={"cpu": "1GB"},
-            use_safetensors=True,
-            device_map=f"cuda:{device}",
-            total_token=run_config.total_token,
-            depth=run_config.depth,
-        )
+    # with prof.profile_context(f"Rank {rank}: loading stage model", device=f"cuda:{device}"):
+    stage_model = StageEaModel.from_pretrained(
+        stage_base_model_path=run_config.base_model_dir + f"/stage_model_{rank}",
+        ea_model_path=run_config.EAGLE_model_path if rank == 0 else None,
+        torch_dtype=torch.float16,
+        low_cpu_mem_usage=True,
+        # max_memory={"cpu": "1GB"},
+        use_safetensors=True,
+        device_map=f"cuda:{device}",
+        total_token=run_config.total_token,
+        depth=run_config.depth,
+    )
     
     # stage_model.to(f"cuda:{device}")
     # stage_model.stage_base_model.to(f"cuda:{device}")
@@ -78,18 +78,35 @@ def main(args):
     
     # collaborative generation
     def run(log=False, profiler=None):
+        outputs = stage_model.stage_generate(
+            input_ids=input_ids if rank == 0 else None,
+            temperature=run_config.temperature,
+            max_new_tokens=run_config.max_new_tokens,
+            log=log if rank == 0 else False,
+            pipeline_type=run_config.pipeline_type,
+            profiler=profiler,
+        )
         if rank == 0:
-            outputs = stage_model.stage_generate(
-                input_ids,
-                temperature=run_config.temperature,
-                max_new_tokens=run_config.max_new_tokens,
-                log=log,
-                pipeline_type=run_config.pipeline_type,
-                profiler=profiler,    
-            )
             return outputs
-        else:
-            stage_model.stage_generate(temperature=run_config.temperature, max_new_tokens=run_config.max_new_tokens, pipeline_type=run_config.pipeline_type)
+
+        # if rank == 0:
+        #     log = log
+        #     outputs = stage_model.stage_generate(
+        #         input_ids,
+        #         temperature=run_config.temperature,
+        #         max_new_tokens=run_config.max_new_tokens,
+        #         log=log,
+        #         pipeline_type=run_config.pipeline_type,
+        #         profiler=profiler,    
+        #     )
+        #     return outputs
+        # else:
+        #     stage_model.stage_generate(
+        #         temperature=run_config.temperature,
+        #         max_new_tokens=run_config.max_new_tokens,
+        #         pipeline_type=run_config.pipeline_type,
+        #         profiler=profiler,
+        #     )
 
     # [warn-up]
     if run_config.warnup:
@@ -104,9 +121,7 @@ def main(args):
             outputs = run(run_config.log, prof)
     
     # [print output]
-    dist.barrier()
     if rank == 0:  # only for greedy decoding test!!!
-        prof.print_all_events()
         if run_config.log:
             output_ids, new_tokens, idx, turns = outputs
         else:
@@ -119,6 +134,10 @@ def main(args):
             print('Rounds:', idx+1)
             if len(outputs) == 4:
                 print('Turns:', turns)
+    
+    dist.barrier()
+    if rank == 0 or rank == world_size - 1:
+        prof.print_all_events()
     
     # dist.barrier()
     if hasattr(stage_model, "comm"):

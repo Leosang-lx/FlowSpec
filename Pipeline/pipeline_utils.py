@@ -712,7 +712,7 @@ def pruning(draft_tokens, retrieve_indices, best_candidate, accept_len, new_toke
     left_retrieve_indices = retrieve_indices[left_candidates, accept_len:]  # todo: left_retrieve_indices all -1
 
     # [update]: retrieve_indices may be larger than draft_tokens
-    # left_indices_global: for the whole tree
+    # left_indices_global: for the global context
     # left_indices: for the tree in pipeline
     max_depth = (left_retrieve_indices != -1).sum(dim=1).max().item()
     left_retrieve_indices = left_retrieve_indices[:, :max_depth]  # drop the all -1 parts
@@ -786,7 +786,8 @@ def token_pruning(
     # prune cache
     # ***这里的global_accept_len还是没有加上accept_len长度的
     left_indices_global = left_indices + global_accept_len
-    left_indices_in_cache = (left_indices_global[left_indices_global < cur_kv_len]).to(cache_device)
+    left_indices_in_cache = (left_indices_global[left_indices_global < cur_kv_len])
+    
     # copy and set cache length
     left_indices_in_cache_size = left_indices_in_cache.size(-1)
     for past_key_values_data in past_key_values_data_list:
@@ -818,13 +819,15 @@ def token_pruning(
 
     # prune tree_mask
     if tree_mask is not None:
+        tree_mask_cpu = tree_mask.cpu()
         tree_mask_left_indices = left_indices[accept_len:]
-        assert torch.max(tree_mask_left_indices) < tree_mask.size(-1), f'stage{stage} tree_mask_left_indices={tree_mask_left_indices} is out of range'
-        tree_mask = tree_mask[..., tree_mask_left_indices[:, None], tree_mask_left_indices].contiguous()
+        assert torch.max(tree_mask_left_indices) < tree_mask_cpu.size(-1), f'stage{stage} tree_mask_left_indices={tree_mask_left_indices} is out of range'
+        tree_mask = tree_mask_cpu[..., tree_mask_left_indices[:, None], tree_mask_left_indices].to(tree_mask.device)
 
     # prune tree_pos_ids
     if tree_pos_ids is not None:
-        tree_pos_ids = tree_pos_ids[tree_mask_left_indices]
+        tree_pos_ids_cpu = tree_pos_ids.cpu()
+        tree_pos_ids = tree_pos_ids_cpu[tree_mask_left_indices].to(tree_pos_ids.device)
 
     return past_key_values_data_list, current_length_data, lens_split, hidden_state, tree_mask, tree_pos_ids
 
@@ -861,9 +864,11 @@ def merge_two_tree(
         lens_split,
         subseq_ri_cum_depths
 ):
+    # start = time.perf_counter()
     """
     Merge two tree that share the same root node, tree1 is the old tree, tree2 is the new tree
     The merged tree has the draft_tokens of: {draft_tokens1, added_tokens}
+    Ensure that **the whole tree is on CPU**
     """
     # print(f'===========start merging two tree')
     draft_tokens1, retrieve_indices1, tree_mask1, tree_pos_ids1 = tree1
@@ -880,13 +885,12 @@ def merge_two_tree(
     paths_tree1_idx = {}
     for i, draft_token in enumerate(draft_tokens1[0, :]):
         # important: squeeze(1) to avoid the shape (1) and use tuple(int) for the dict key
-        token_path = draft_tokens1[0, torch.nonzero(tree_mask1[i, :]).squeeze(1)].tolist()
+        token_path = draft_tokens1[0, torch.nonzero(tree_mask1[i, :]).view(-1)].tolist()
         paths_tree1_idx[tuple(token_path)] = i
-
 
     # [merge draft_tokens]
     # init draft_tokens_merged as draft_tokens1
-    draft_tokens_merged = draft_tokens1.squeeze(0).clone()  # 转成1维处理先
+    draft_tokens_merged = draft_tokens1.view(-1).clone()  # 转成1维处理先
     # [merge tree_pos_ids]
     # init merged_tree_pos_ids as tree_pos_ids1
     merged_tree_pos_ids = tree_pos_ids1.clone()
@@ -895,7 +899,7 @@ def merge_two_tree(
     paths_tree2 = set()
     index_mapping_2_to_merged = torch.zeros(draft_tokens2.size(1), dtype=torch.long)
     for i, draft_token in enumerate(draft_tokens2[0, :]):
-        token_path = tuple(draft_tokens2[0, torch.nonzero(tree_mask2[i, :]).squeeze(1)].tolist())
+        token_path = tuple(draft_tokens2[0, torch.nonzero(tree_mask2[i, :]).view(-1)].tolist())
         # print('token_path: ', token_path)
         paths_tree2.add(token_path)
 
@@ -928,7 +932,7 @@ def merge_two_tree(
     parent_indices = get_parent_indices(tree_mask2)
     # print(f'parent_indices: {parent_indices}')
     for i, draft_token in enumerate(draft_tokens2[0, :]):
-        token_path = tuple(draft_tokens2[0, torch.nonzero(tree_mask2[i, :]).squeeze(1)].tolist())
+        token_path = tuple(draft_tokens2[0, torch.nonzero(tree_mask2[i, :]).view(-1)].tolist())
 
         if len(token_path) <= tree1_depth and token_path in paths_tree1_idx:
             index_mapping_2_to_merged[i] = paths_tree1_idx[token_path]

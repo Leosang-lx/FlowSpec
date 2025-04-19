@@ -48,7 +48,6 @@ class CommHandler:
         if init_method is None:
             init_method = 'env://'
         print(f"Initializing process group with backend {self.backend} and rank {self.rank} and world size {self.world_size}")
-        # dist.init_process_group(backend=self.backend, init_method='tcp://localhost:12345', rank=self.rank, world_size=self.world_size)
         dist.init_process_group(
             backend=self.backend,
             init_method=init_method,
