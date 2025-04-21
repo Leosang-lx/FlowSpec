@@ -35,15 +35,17 @@ def calculate_model_size_with_buffers(model):
 
 # EAGLE
 class Timer:
-    def __init__(self, name):
+    def __init__(self, name, gpu=False):
         self.name = name
 
     def __enter__(self):
-        torch.cuda.synchronize()
+        if self.gpu:
+            torch.cuda.synchronize()
         self.start = time.perf_counter()
 
     def __exit__(self, exc_type, exc_value, traceback):
-        torch.cuda.synchronize()
+        if self.gpu:
+            torch.cuda.synchronize()
         elapsed = time.perf_counter() - self.start
         print(f'==== {self.name} {elapsed} seconds ====')
 
@@ -856,7 +858,7 @@ def get_parent_indices(tree_mask: torch.Tensor) -> torch.Tensor:
     parent_indices = (n - 1 - parent_indices)  # reverse the indices
     parent_indices[~max_values] = -1  # if all are false, set to -1
     return parent_indices
-
+    
 
 def merge_two_tree(
         tree1: Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
@@ -898,6 +900,7 @@ def merge_two_tree(
     # go through draft_tokens2
     paths_tree2 = set()
     index_mapping_2_to_merged = torch.zeros(draft_tokens2.size(1), dtype=torch.long)
+    # append_indices = []
     for i, draft_token in enumerate(draft_tokens2[0, :]):
         token_path = tuple(draft_tokens2[0, torch.nonzero(tree_mask2[i, :]).view(-1)].tolist())
         # print('token_path: ', token_path)
@@ -908,6 +911,8 @@ def merge_two_tree(
             index_mapping_2_to_merged[i] = paths_tree1_idx[token_path]
         else:
             mapped_idx = draft_tokens_merged.size(0)
+            # mapped_idx = draft_tokens1.size(0) + len(append_indices) - 1
+            # append_indices.append(i)
 
             # expand draft_tokens
             draft_tokens_merged = torch.cat((draft_tokens_merged, draft_tokens2[:, i]), dim=0)
@@ -919,8 +924,14 @@ def merge_two_tree(
     # todo: 优化：遍历时到了比tree1更深的点应该可以批量化merge
     # [merge draft_tokens] finish
 
+    # append_indices = torch.tensor(append_indices, dtype=torch.long)
+    # draft_tokens_merged = torch.cat((draft_tokens1, draft_tokens2[:, append_indices]), dim=1)
+    # print(f'draft_tokens_merged: {draft_tokens_merged.shape}')
+    # merged_tree_pos_ids = torch.cat((tree_pos_ids1, tree_pos_ids2[append_indices]), dim=0)
+
     # [merge tree_mask]
     merged_size = draft_tokens_merged.size(0)
+    # merged_size = tree1_size + append_indices.size(0)
     # print(f'merged_size: {merged_size}')
     # init merged_tree_mask as tree_mask1
     merged_tree_mask = torch.zeros(
@@ -930,6 +941,14 @@ def merge_two_tree(
     )
     merged_tree_mask[:tree1_size, :tree1_size] = tree_mask1
     parent_indices = get_parent_indices(tree_mask2)
+
+    # for i, append_idx in enumerate(append_indices):
+    #     parent_idx = parent_indices[append_idx]
+    #     mapped_parent_mask_row = merged_tree_mask[parent_idx, :parent_idx+1]
+    #     merged_tree_mask[append_idx, :parent_idx+1] = mapped_parent_mask_row
+    #     merged_tree_mask[append_idx, append_idx] = 1
+
+    # [merge tree_mask] finish
     # print(f'parent_indices: {parent_indices}')
     for i, draft_token in enumerate(draft_tokens2[0, :]):
         token_path = tuple(draft_tokens2[0, torch.nonzero(tree_mask2[i, :]).view(-1)].tolist())
@@ -988,6 +1007,7 @@ def merge_two_tree(
     # [merge retrieve_indices] finish
 
     # todo: update lens_split and subseq_ri_cum_depths
+    # lens_split = torch.cat((lens_split, torch.tensor([append_indices.size(0)], dtype=torch.long)))
     lens_split = torch.cat((lens_split, torch.tensor([draft_tokens_merged.size(0) - tree1_size], dtype=torch.long)))
     # print(f'lens_split: {lens_split}')
 
@@ -1007,7 +1027,7 @@ def merge_two_tree(
             # update: 只计算到在pipeline里的draft token tree部分，即将输入的最新一段单独算
             subseq_ri_cum_depths.append(ri_depth_cum.clone())
     
-    return draft_tokens_merged.unsqueeze(0), retrieve_indices_merged, merged_tree_mask[None, None], merged_tree_pos_ids, lens_split, torch.stack(subseq_ri_cum_depths, dim=0)
+    return draft_tokens_merged[None], retrieve_indices_merged, merged_tree_mask[None, None], merged_tree_pos_ids, lens_split, torch.stack(subseq_ri_cum_depths, dim=0)
 
 
 # EAGLE

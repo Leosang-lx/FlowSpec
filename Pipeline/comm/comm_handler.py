@@ -279,19 +279,22 @@ class CommHandler:
         if self.rank == 0:
             # for last stage
             ri_shape = torch.tensor(retrieve_indices.shape, dtype=torch.long)
-            dist.send(draft_tokens.cpu(), dst=self.world_size - 1)
+            self.send_tensor(draft_tokens.cpu(), self.world_size - 1)
+            # dist.send(draft_tokens.cpu(), dst=self.world_size - 1)
             dist.send(ri_shape.cpu(), dst=self.world_size - 1)
             dist.send(retrieve_indices.cpu(), dst=self.world_size - 1)
             dist.send(subseq_ri_cum_depths.cpu(), dst=self.world_size - 1)
         else:
             if self.rank == self.world_size - 1:  # last stage
                 # for last stage
-                if appended:
-                    draft_tokens = torch.zeros(1, lens_split[-1], dtype=torch.long)
-                else:
-                    draft_len = lens_split.sum()
-                    draft_tokens = torch.zeros(1, draft_len, dtype=torch.long)
-                dist.recv(draft_tokens, src=0)
+                # if appended:
+                #     draft_tokens = torch.zeros(1, lens_split[-1], dtype=torch.long)
+                # else:
+                #     draft_len = lens_split.sum()
+                #     draft_tokens = torch.zeros(1, draft_len, dtype=torch.long)
+                # dist.recv(draft_tokens, src=0)
+                draft_tokens = self.recv_tensor(0)
+
                 ri_shape = torch.zeros(2, dtype=torch.long)
                 dist.recv(ri_shape, src=0)
                 retrieve_indices = torch.zeros(*ri_shape, dtype=torch.long)

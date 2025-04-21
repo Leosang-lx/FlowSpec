@@ -89,35 +89,16 @@ def main(args):
         if rank == 0:
             return outputs
 
-        # if rank == 0:
-        #     log = log
-        #     outputs = stage_model.stage_generate(
-        #         input_ids,
-        #         temperature=run_config.temperature,
-        #         max_new_tokens=run_config.max_new_tokens,
-        #         log=log,
-        #         pipeline_type=run_config.pipeline_type,
-        #         profiler=profiler,    
-        #     )
-        #     return outputs
-        # else:
-        #     stage_model.stage_generate(
-        #         temperature=run_config.temperature,
-        #         max_new_tokens=run_config.max_new_tokens,
-        #         pipeline_type=run_config.pipeline_type,
-        #         profiler=profiler,
-        #     )
-
     # [warn-up]
-    if run_config.warnup:
-        cnt = tqdm(range(5), desc="Warmup") if rank == 0 else range(5)
+    if run_config.warmup:
+        cnt = tqdm(range(run_config.warmup_repeat), desc="Warmup") if rank == 0 else range(run_config.warmup_repeat)
         for _ in cnt:
-            run()
+            run(True)
 
     # [test generation]
-    cnt = tqdm(range(10), desc="Test") if rank == 0 else range(10)
+    cnt = tqdm(range(run_config.test_repeat), desc="Test") if rank == 0 else range(run_config.test_repeat)
     for i in cnt:
-        with prof.profile_context(f"Rank {rank}: pipelined generate", device=f"cuda:{device}"):
+        with prof.profile_context(f"Rank {rank}: {run_config.pipeline_type} pipeline", device=f"cuda:{device}"):
             outputs = run(run_config.log, prof)
     
     # [print output]
