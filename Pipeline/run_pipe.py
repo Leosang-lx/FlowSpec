@@ -93,7 +93,7 @@ def main(args):
     if run_config.warmup:
         cnt = tqdm(range(run_config.warmup_repeat), desc="Warmup") if rank == 0 else range(run_config.warmup_repeat)
         for _ in cnt:
-            run(True)
+            run()
 
     # [test generation]
     cnt = tqdm(range(run_config.test_repeat), desc="Test") if rank == 0 else range(run_config.test_repeat)

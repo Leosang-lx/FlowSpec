@@ -738,7 +738,6 @@ def pruning(draft_tokens, retrieve_indices, best_candidate, accept_len, new_toke
 def first_stage_pruning(left_indices, accept_len, draft_tokens, retrieve_indices, subseq_ri_cum_depths=None):
     prefix_indices = left_indices[:accept_len+1]  # including the new token
     # print(f'stage0 prefix_indices={prefix_indices}, draft_tokens={draft_tokens.shape}')
-    prefix_tokens = draft_tokens[:, prefix_indices]  # [accepted tokens + new token]
     accepted_tokens = draft_tokens[:, left_indices[:accept_len]]
 
     # prune retrieve_indices
@@ -756,6 +755,16 @@ def first_stage_pruning(left_indices, accept_len, draft_tokens, retrieve_indices
     transformed_ri = map_retrieve_indices(left_retrieve_indices, first_stage_left_indices, left_indices_from_zero)
 
     first_stage_left_indices = torch.cat((prefix_indices[:-1], first_stage_left_indices), dim=0)
+    try:
+        assert left_draft_tokens.size(-1) + accept_len == first_stage_left_indices.size(-1)
+    except AssertionError as e:
+        print(f'left_draft_tokens + accept_len != first_stage_left_indices: {left_draft_tokens.size(-1)} and {first_stage_left_indices.size(-1)}')
+        print(f'left_indices: {left_indices}')
+        print(f'first_stage_left_indices: {first_stage_left_indices}')
+        print(f'accept_len: {accept_len}')
+        print(f'prefix_indices: {prefix_indices.size(-1)}')
+        assert first_stage_left_indices.max() < draft_tokens.size(-1), f'first_stage_left_indices.max()={first_stage_left_indices.max()} is out of range'
+        raise e
 
     # prune subseq_ri_cum_depths
     if subseq_ri_cum_depths is not None:  # continuous
@@ -764,7 +773,6 @@ def first_stage_pruning(left_indices, accept_len, draft_tokens, retrieve_indices
 
     # pruned-only
     return left_draft_tokens, transformed_ri, accepted_tokens
-    # , prefix_tokens[:, -1]
 
 
 def token_pruning(
@@ -823,7 +831,7 @@ def token_pruning(
     if tree_mask is not None:
         tree_mask_cpu = tree_mask.cpu()
         tree_mask_left_indices = left_indices[accept_len:]
-        assert torch.max(tree_mask_left_indices) < tree_mask_cpu.size(-1), f'stage{stage} tree_mask_left_indices={tree_mask_left_indices} is out of range'
+        # assert torch.max(tree_mask_left_indices) < tree_mask_cpu.size(-1), f'stage{stage} tree_mask_left_indices={tree_mask_left_indices} is out of range'
         tree_mask = tree_mask_cpu[..., tree_mask_left_indices[:, None], tree_mask_left_indices].to(tree_mask.device)
 
     # prune tree_pos_ids
@@ -876,8 +884,7 @@ def merge_two_tree(
     draft_tokens1, retrieve_indices1, tree_mask1, tree_pos_ids1 = tree1
     draft_tokens2, retrieve_indices2, tree_mask2, tree_pos_ids2 = tree2
 
-    tree1_depth = (retrieve_indices1 != -1).sum(dim=1).max()  # maybe contain -1
-    # print(f'tree1_depth: {tree1_depth}')
+    tree1_depth = retrieve_indices1.size(1)
     tree2_depth = retrieve_indices2.size(1)
     tree_mask1 = tree_mask1[0, 0, ...]
     tree_mask2 = tree_mask2[0, 0, ...]
@@ -885,54 +892,36 @@ def merge_two_tree(
 
     # get paths of draft_tokens1
     paths_tree1_idx = {}
-    for i, draft_token in enumerate(draft_tokens1[0, :]):
+    assert draft_tokens1.size(-1) == tree_mask1.size(-1) == tree_mask1.size(-2) == tree_pos_ids1.size(0), f'tree1 size mismatch: {draft_tokens1.size(-1)}, {tree_mask1.size(-1)}, {tree_mask1.size(-2)}, {tree_pos_ids1.size(0)}'
+    for i in range(draft_tokens1.size(-1)):
         # important: squeeze(1) to avoid the shape (1) and use tuple(int) for the dict key
         token_path = draft_tokens1[0, torch.nonzero(tree_mask1[i, :]).view(-1)].tolist()
         paths_tree1_idx[tuple(token_path)] = i
 
-    # [merge draft_tokens]
-    # init draft_tokens_merged as draft_tokens1
-    draft_tokens_merged = draft_tokens1.view(-1).clone()  # 转成1维处理先
-    # [merge tree_pos_ids]
-    # init merged_tree_pos_ids as tree_pos_ids1
-    merged_tree_pos_ids = tree_pos_ids1.clone()
-
     # go through draft_tokens2
     paths_tree2 = set()
     index_mapping_2_to_merged = torch.zeros(draft_tokens2.size(1), dtype=torch.long)
-    # append_indices = []
-    for i, draft_token in enumerate(draft_tokens2[0, :]):
+    append_indices = []
+    for i in range(draft_tokens2.size(-1)):
         token_path = tuple(draft_tokens2[0, torch.nonzero(tree_mask2[i, :]).view(-1)].tolist())
-        # print('token_path: ', token_path)
         paths_tree2.add(token_path)
 
         if len(token_path) <= tree1_depth and token_path in paths_tree1_idx:
-            # print('Same token from tree1 and tree2: ', token_path)
             index_mapping_2_to_merged[i] = paths_tree1_idx[token_path]
         else:
-            mapped_idx = draft_tokens_merged.size(0)
-            # mapped_idx = draft_tokens1.size(0) + len(append_indices) - 1
-            # append_indices.append(i)
-
-            # expand draft_tokens
-            draft_tokens_merged = torch.cat((draft_tokens_merged, draft_tokens2[:, i]), dim=0)
-            # expand tree_pos_ids
-            merged_tree_pos_ids = torch.cat((merged_tree_pos_ids, tree_pos_ids2[i].unsqueeze(0)), dim=0)
+            mapped_idx = tree1_size + len(append_indices)
+            append_indices.append(i)
 
             # update index_mapping
             index_mapping_2_to_merged[i] = mapped_idx
-    # todo: 优化：遍历时到了比tree1更深的点应该可以批量化merge
     # [merge draft_tokens] finish
 
-    # append_indices = torch.tensor(append_indices, dtype=torch.long)
-    # draft_tokens_merged = torch.cat((draft_tokens1, draft_tokens2[:, append_indices]), dim=1)
-    # print(f'draft_tokens_merged: {draft_tokens_merged.shape}')
-    # merged_tree_pos_ids = torch.cat((tree_pos_ids1, tree_pos_ids2[append_indices]), dim=0)
+    append_indices = torch.tensor(append_indices, dtype=torch.long)
+    draft_tokens_merged = torch.cat((draft_tokens1, draft_tokens2[:, append_indices]), dim=1)
+    merged_tree_pos_ids = torch.cat((tree_pos_ids1, tree_pos_ids2[append_indices]), dim=0)
 
     # [merge tree_mask]
-    merged_size = draft_tokens_merged.size(0)
-    # merged_size = tree1_size + append_indices.size(0)
-    # print(f'merged_size: {merged_size}')
+    merged_size = draft_tokens_merged.size(-1)
     # init merged_tree_mask as tree_mask1
     merged_tree_mask = torch.zeros(
         (merged_size, merged_size),  # notice: 2-d here
@@ -940,75 +929,52 @@ def merge_two_tree(
         device=tree_mask1.device
     )
     merged_tree_mask[:tree1_size, :tree1_size] = tree_mask1
+
     parent_indices = get_parent_indices(tree_mask2)
 
-    # for i, append_idx in enumerate(append_indices):
-    #     parent_idx = parent_indices[append_idx]
-    #     mapped_parent_mask_row = merged_tree_mask[parent_idx, :parent_idx+1]
-    #     merged_tree_mask[append_idx, :parent_idx+1] = mapped_parent_mask_row
-    #     merged_tree_mask[append_idx, append_idx] = 1
+    for i, append_idx in enumerate(append_indices):
+        mapped_idx = index_mapping_2_to_merged[append_idx]
+        parent_idx = index_mapping_2_to_merged[parent_indices[append_idx]]
+        mapped_parent_mask_row = merged_tree_mask[parent_idx, :parent_idx+1]
+        merged_tree_mask[mapped_idx, :parent_idx+1] = mapped_parent_mask_row
+        merged_tree_mask[mapped_idx, mapped_idx] = 1
 
-    # [merge tree_mask] finish
-    # print(f'parent_indices: {parent_indices}')
-    for i, draft_token in enumerate(draft_tokens2[0, :]):
-        token_path = tuple(draft_tokens2[0, torch.nonzero(tree_mask2[i, :]).view(-1)].tolist())
-
-        if len(token_path) <= tree1_depth and token_path in paths_tree1_idx:
-            index_mapping_2_to_merged[i] = paths_tree1_idx[token_path]
-        else:
-            mapped_idx = index_mapping_2_to_merged[i]
-
-            # expand tree_mask
-            parent_idx_mapped = index_mapping_2_to_merged[parent_indices[i]]
-            mapped_parent_mask_row = merged_tree_mask[parent_idx_mapped, :parent_idx_mapped+1]
-            merged_tree_mask[mapped_idx, :parent_idx_mapped+1] = mapped_parent_mask_row
-            merged_tree_mask[mapped_idx, mapped_idx] = 1
-    # [merge tree_mask] finish
-    
-    # [merge retrieve_indices]
-    # get leaf nodes of tree1
     leave_paths1 = {}
-    for i in range(retrieve_indices1.size(0)):
-        leaf_node_pos = torch.nonzero(retrieve_indices1[i, :] != -1).squeeze(1)[-1]
-        # leaf_node_idx = retrieve_indices1[i, leaf_node_pos]
-        leaf_path = tuple(draft_tokens1[0, retrieve_indices1[i, :leaf_node_pos+1]].tolist())
+    leaf_depths1 = (retrieve_indices1 != -1).sum(dim=1)
+    for i, leaf_depth in enumerate(leaf_depths1):
+        leaf_path = tuple(draft_tokens1[0, retrieve_indices1[i, :leaf_depth]].tolist())
         leave_paths1[leaf_path] = i
-
-    # get leaf nodes of tree2
+    
     leave_paths2 = {}
-    for i in range(retrieve_indices2.size(0)):
-        leaf_node_pos = torch.nonzero(retrieve_indices2[i, :] != -1).squeeze(1)[-1]
-        # leaf_node_idx = retrieve_indices2[i, leaf_node_pos]
-        leaf_path = tuple(draft_tokens2[0, retrieve_indices2[i, :leaf_node_pos+1]].tolist())
+    leaf_depths2 = (retrieve_indices2 != -1).sum(dim=1)
+    for i, leaf_depth in enumerate(leaf_depths2):
+        leaf_path = tuple(draft_tokens2[0, retrieve_indices2[i, :leaf_depth]].tolist())
         leave_paths2[leaf_path] = i
 
     selected_leaves1 = torch.zeros(retrieve_indices1.size(0), dtype=torch.bool)
     selected_leaves2 = torch.zeros(retrieve_indices2.size(0), dtype=torch.bool)
-    # todo: bug for display with wrong leaf_path
+
     for leaf_path, leaf_path_idx in leave_paths1.items():
         if leaf_path in paths_tree2 and leaf_path not in leave_paths2:
-            # print(leaf_path, 'remove')
             pass
         else:
-            # print(leaf_path, 'select')
             selected_leaves1[leaf_path_idx] = True
     for leaf_path, leaf_path_idx in leave_paths2.items():
         if leaf_path not in paths_tree1_idx:
-            # print(leaf_path, 'select')
             selected_leaves2[leaf_path_idx] = True
         else:
-            # print(leaf_path, 'remove')
             pass
 
     ri_selected1 = F.pad(retrieve_indices1[selected_leaves1, :], (0, tree2_depth - tree1_depth), value=-1)
     ri_selected2 = retrieve_indices2[selected_leaves2, :]
     ri_selected2 = map_retrieve_indices(ri_selected2, torch.arange(index_mapping_2_to_merged.size(0)), index_mapping_2_to_merged)
     retrieve_indices_merged = torch.cat((ri_selected1, ri_selected2), dim=0)
+    # print(f'retrieve_indices_merged: {retrieve_indices_merged}')
     # [merge retrieve_indices] finish
 
     # todo: update lens_split and subseq_ri_cum_depths
-    # lens_split = torch.cat((lens_split, torch.tensor([append_indices.size(0)], dtype=torch.long)))
-    lens_split = torch.cat((lens_split, torch.tensor([draft_tokens_merged.size(0) - tree1_size], dtype=torch.long)))
+    lens_split = torch.cat((lens_split, torch.tensor([append_indices.size(0)], dtype=torch.long)))
+    # lens_split = torch.cat((lens_split, torch.tensor([draft_tokens_merged.size(-1) - tree1_size], dtype=torch.long)))
     # print(f'lens_split: {lens_split}')
 
     n_leaves = retrieve_indices_merged.size(0)
@@ -1019,15 +985,52 @@ def merge_two_tree(
 
     ri_depth_cum = torch.zeros(n_leaves, dtype=torch.long)
     for i, cum_seq_len in enumerate(cum_seq_lens):
-        # if i + 1 < cum_seq_lens.size(0):
-            for j in range(0 if i == 0 else cum_seq_lens[i - 1], cum_seq_len):
-                row_indices = torch.arange(n_leaves, dtype=torch.long)
-                cum_ri_leaves = retrieve_indices_filled[row_indices, ri_depth_cum]
-                ri_depth_cum[cum_ri_leaves == j] += 1
-            # update: 只计算到在pipeline里的draft token tree部分，即将输入的最新一段单独算
-            subseq_ri_cum_depths.append(ri_depth_cum.clone())
+        for j in range(0 if i == 0 else cum_seq_lens[i - 1], cum_seq_len):
+            row_indices = torch.arange(n_leaves, dtype=torch.long)
+            cum_ri_leaves = retrieve_indices_filled[row_indices, ri_depth_cum]
+            ri_depth_cum[cum_ri_leaves == j] += 1
+        # update: 只计算到在pipeline里的draft token tree部分，即将输入的最新一段单独算
+        subseq_ri_cum_depths.append(ri_depth_cum.clone())
     
-    return draft_tokens_merged[None], retrieve_indices_merged, merged_tree_mask[None, None], merged_tree_pos_ids, lens_split, torch.stack(subseq_ri_cum_depths, dim=0)
+    return draft_tokens_merged, retrieve_indices_merged, merged_tree_mask[None, None], merged_tree_pos_ids, lens_split, torch.stack(subseq_ri_cum_depths, dim=0)
+
+
+def expand_tree(
+    draft_tokens,
+    retrieve_indices,
+    tree_mask,
+    tree_pos_ids,
+    lens_split,
+    subseq_ri_cum_depths
+):
+    with prof.profile_context(f"Stage {config.stage}: topK_genrate", device=f"cuda:{device}") if prof is not None else nullcontext():
+        draft_tokens2, retrieve_indices2, tree_mask2, tree_position_ids2 = self.ea_layer.topK_genrate(
+            accepted_hidden_state,
+            input_ids_ea,
+            self.stage_base_model.lm_head,
+            logits_processor,
+            depth=max(cur_draft_depth + 2, 5)  # todo: test best tree settings
+            # total_tokens=64
+        )  # get a little more appended tokens
+    tree_position_ids2 = tree_position_ids2 + input_ids.size(-1)
+
+    # print(tree_position_ids[0], tree_position_ids2[0])
+
+    assert draft_tokens.size(-1) == tree_position_ids.size(0), f'draft_tokens != tree_pos_ids: {draft_tokens.size(-1)} and {tree_position_ids.size(0)}'
+
+    with prof.time_context(f"Stage {config.stage}: merge_two_tree", cpu=True) if prof is not None else nullcontext():
+        # [update] operate on CPU
+        origin_device = draft_tokens.device
+        draft_tokens, retrieve_indices, tree_mask, tree_position_ids, lens_split, subseq_ri_cum_depths = merge_two_tree(
+            (draft_tokens.cpu(), retrieve_indices.cpu(), tree_mask.cpu(), tree_position_ids.cpu()),
+            (draft_tokens2.cpu(), retrieve_indices2.cpu(), tree_mask2.cpu(), tree_position_ids2.cpu()),
+            lens_split,
+            subseq_ri_cum_depths
+        )
+        draft_tokens = draft_tokens.to(origin_device)
+        tree_mask = tree_mask.to(origin_device)
+        tree_position_ids = tree_position_ids.to(origin_device)
+    return draft_tokens, retrieve_indices, tree_mask, tree_position_ids, lens_split, subseq_ri_cum_depths
 
 
 # EAGLE
