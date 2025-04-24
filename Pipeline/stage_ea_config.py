@@ -181,18 +181,24 @@ class StageEaConfig(PretrainedConfig):
         # assert isinstance(stage_num_hidden_layers_list, list) and all(isinstance(n, int) for n in stage_num_hidden_layers_list)
         # assert sum(stage_num_hidden_layers_list) == self.num_hidden_layers
 
+        assert stage_num_hidden_layers_list[0] == 0
+        # [update]: n_split for base model
+        self.n_split = sum([1 if l > 0 else 0 for l in stage_num_hidden_layers_list])
         self.total_stage = int(len(stage_num_hidden_layers_list))
         # if self.total_stage == 1:
         #     raise ValueError("total_stage cannot be 1")
         # assert self.stage < self.total_stage
-
+        
         self.stage_num_hidden_layers_list = stage_num_hidden_layers_list
         self.num_stage_hidden_layers = self.stage_num_hidden_layers_list[self.stage]
         self.layer_range = (
             sum(stage_num_hidden_layers_list[:self.stage]),
             sum(stage_num_hidden_layers_list[:self.stage+1])
             )  # [start_layer_idx, end_layer_idx)
-        self.is_first_stage = self.stage == 0
+        
+        # [update] is_draft_stage: stage 0 is draft stage
+        self.is_draft_stage = self.stage == 0
+        self.is_first_stage = self.stage == 1
         self.is_last_stage = self.stage == self.total_stage - 1
         self.last_rank = self.total_stage - 1 if self.stage == 0 else self.stage - 1
         self.next_rank = 0 if self.stage == self.total_stage - 1 else self.stage + 1

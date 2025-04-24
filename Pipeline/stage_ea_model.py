@@ -34,7 +34,8 @@ class StageEaModel(nn.Module):
             # top_k,
             # threshold,
             # ea_layer_state_dict=None,
-            ea_draft_model=None  # draft model
+            ea_draft_model=None,  # draft model
+            init_comm=False
     ):
         super().__init__()
         self.stage_base_model = stage_base_model
@@ -52,7 +53,9 @@ class StageEaModel(nn.Module):
         # [MODIFIED] stage model for pipelined tree decoding
         self.stage = self.config.stage
         self.total_stage = self.config.total_stage
-        self.is_first_stage = self.stage == 0
+        # [update]: add is_draft_stage
+        self.is_draft_stage = self.stage == 0
+        self.is_first_stage = self.stage == 1
         self.is_last_stage = self.stage == self.total_stage - 1
 
         # [MODIFIED] assume the draft ea_model is on the stage-0 device
@@ -64,11 +67,12 @@ class StageEaModel(nn.Module):
 
         # [MODIFIED] initialize comm handler
         # print(f"start init comm handler")
-        self.comm = CommHandler(rank=config.stage, world_size=config.total_stage)
-        # print(f"init comm handler")
-        self.comm.init_PG()
-        self.comm.start_threads()
-        dist.barrier()
+        if init_comm:
+            self.comm = CommHandler(rank=config.stage, world_size=config.total_stage)
+            # print(f"init comm handler")
+            self.comm.init_PG()
+            self.comm.start_threads()
+            dist.barrier()
         
     def get_tokenizer(self):
         """Get the tokenizer of the base model.
@@ -136,7 +140,8 @@ class StageEaModel(nn.Module):
                             threshold=threshold)
             low_memory = False
 
-            device = stage_base_model.model.layers[-1].self_attn.q_proj.weight.device
+            # device = stage_base_model.model.layers[-1].self_attn.q_proj.weight.device
+            device = stage_base_model.lm_head.weight.device
             # print(f"stage_base_model.lm_head.weight.device={stage_base_model.lm_head.weight.device}")
             # print(f"device={device}")
             if device != stage_base_model.lm_head.weight.device:
@@ -207,7 +212,7 @@ class StageEaModel(nn.Module):
             output_orig=False,
             position_ids=None,
     ):  
-            
+        # the draft stage will not call forward()    
         if self.is_first_stage:
             outputs = self.stage_base_model.model(
             input_ids=input_ids,
@@ -258,29 +263,33 @@ class StageEaModel(nn.Module):
         else:
             raise ValueError(f"Invalid pipeline type: {pipeline_type}")
 
-        # [MODIFIED]: only the first stage has the ea_layer and input_ids
-        if temperature > 1e-5 and (self.is_first_stage or self.config.is_last_stage):
+        # [update]: draft stage and last stage need logits_processor
+        # if temperature > 1e-5 and (self.is_draft_stage or self.config.is_last_stage):
+        if temperature > 1e-5:  # 先让全部stage都有，怕出bug
             logits_processor = prepare_logits_processor(temperature=temperature, top_p=top_p, top_k=top_k)
         else:
             logits_processor = None
         
         # initialize the past key and value states
-        self.stage_base_model.model.tree_mask = None
-        if hasattr(self, "past_key_values"):
-            past_key_values = self.past_key_values
-            past_key_values_data = self.past_key_values_data
-            current_length_data = self.current_length_data
-            # Reset the past key and value states
-            current_length_data.zero_()
+        if config.is_draft_stage:
+            self.ea_layer.reset_kv()
+            self.stage_base_model.model.tree_mask = None
+            if hasattr(self, "past_key_values"):
+                past_key_values = self.past_key_values
+                past_key_values_data = self.past_key_values_data
+                current_length_data = self.current_length_data
+                # Reset the past key and value states
+                current_length_data.zero_()
+            else:
+                (
+                    past_key_values,
+                    past_key_values_data,
+                    current_length_data,
+                ) = initialize_past_key_values(self.stage_base_model)
+                self.past_key_values = past_key_values
+                self.past_key_values_data = past_key_values_data
+                self.current_length_data = current_length_data
         else:
-            (
-                past_key_values,
-                past_key_values_data,
-                current_length_data,
-            ) = initialize_past_key_values(self.stage_base_model)
-            self.past_key_values = past_key_values
-            self.past_key_values_data = past_key_values_data
-            self.current_length_data = current_length_data
             
         # to determine the stop of the pipeline
         should_stop = torch.tensor(0, dtype=torch.int32)  # for break the outer loop
@@ -288,33 +297,39 @@ class StageEaModel(nn.Module):
         config = self.config
         device = self.stage_base_model.device
         comm = self.comm
+        reset_tree_mode(self)
         
-        if config.is_first_stage or config.is_last_stage:
-            padding = torch.zeros(1, 1, dtype=torch.long) - 1  # padding -1 to the draft token sequence
+        # [update]: 不用padding了，直接用F.pad在后面补-1
+        # if config.is_first_stage or config.is_last_stage:
+        #     padding = torch.zeros(1, 1, dtype=torch.long) - 1  # padding -1 to the draft token sequence
 
-        if self.is_first_stage:
+        # [update] prefill: draft stage recv hidden_state and return orig
+        if self.is_draft_stage:
+            # [update] get input_ids from the first stage
+            input_ids, orig, hidden_state = pipeline_prefill(self)
+            token = gen_token(logits=orig[:, -1], logits_processor=logits_processor)
+        elif self.is_first_stage:
+            # ensure input_ids at the first stage
             max_length = max_length - self.ea_layer.total_tokens - 10
             assert input_ids is not None and input_ids.shape[0] == 1, 'First stage must have valid "input_ids"'
             # Avoid modifying the input_ids in-place
             input_ids = input_ids.clone()
-            self.ea_layer.reset_kv()
-
             input_len = input_ids.shape[1]
-            reset_tree_mode(self)
             new_token = 0
 
             # [prefill]
             # with profiler.profile_context(f"Stage {config.stage}: pipeline_prefill", device=f"cuda:{device}") if profiler is not None else nullcontext():
-            orig, hidden_state = pipeline_prefill(self, input_ids, past_key_values)
-            token = gen_token(logits=orig[:, -1], logits_processor=logits_processor)
+            pipeline_prefill(self, input_ids, past_key_values)
+            # token = gen_token(logits=orig[:, -1], logits_processor=logits_processor)
         else:
             pipeline_prefill(self, stage_past_key_values=past_key_values)
         
         should_stop = torch.tensor(0, dtype=torch.int32)
 
         turns_cnt = 0
-        new_sampled_token = -1
-        kv_cache=(past_key_values, past_key_values_data, current_length_data)
+        # new_sampled_token = -1
+        # no kv_cache for the draft stage
+        kv_cache=(past_key_values, past_key_values_data, current_length_data) if not self.is_draft_stage else None
 
         # outer loop
         for idx_spec in range(max_length):
@@ -663,45 +678,46 @@ class StageEaModel(nn.Module):
         log=False,
         prof=None
     ):
-        past_key_values, past_key_values_data, current_length_data = kv_cache
         config = self.config
         comm = self.comm
         device = self.stage_base_model.device
-        global_accept_len = current_length_data[0].item()
-        if config.is_first_stage:
-            # print(f'{idx_spec}th round [start]')
+
+        if config.is_draft_stage:
             input_ids_ea = torch.cat((input_ids, token.to(input_ids.device)), dim=1)
-
-            # make a draft token tree based on the hidden_state and input_ids
-            with prof.profile_context(f"Stage {config.stage}: topK_genrate", device=f"cuda:{device}") if prof is not None else nullcontext():
-                draft_tokens, retrieve_indices, tree_mask, tree_position_ids = self.ea_layer.topK_genrate(
-                    hidden_state, input_ids_ea, self.stage_base_model.lm_head,
-                    logits_processor)
-
-            tree_mask = tree_mask.to(input_ids.device)
-
+            draft_tokens, retrieve_indices, tree_mask, tree_position_ids = self.ea_layer.topK_genrate(
+                    hidden_state,
+                    input_ids_ea,
+                    self.stage_base_model.lm_head,
+                    logits_processor
+            )
+            # todo: 好像没必要在这里移到gpu？因为要传给其他stages
             # update tree_position_ids
             tree_position_ids = tree_position_ids + input_ids.size(-1)
-
-            # split the tree
-            draft_tokens_split, lens_split, subseq_ri_cum_depths = token_tree_partition(
-                draft_tokens, retrieve_indices, config.total_stage)
             
-            # [fill pipeline stages]
-            with prof.profile_context(f"Stage {config.stage}: fill_pipeline_stages", device=f"cuda:{device}") if prof is not None else nullcontext():
-                outputs = fill_pipeline_stages(
-                    self,
-                    past_key_values,
-                    input_ids,
-                    lens_split,
-                    draft_tokens,
-                    retrieve_indices,
-                    tree_mask,
-                    tree_position_ids,
-                    subseq_ri_cum_depths
-                )
+            draft_tokens_split, lens_split, subseq_ri_cum_depths = token_tree_partition(
+                draft_tokens, retrieve_indices, config.total_stage
+            )
+            fill_pipeline_stages(
+                self,
+                lens_split=lens_split,
+                draft_tokens=draft_tokens_split,
+                retrieve_indices=retrieve_indices,
+                tree_mask=tree_mask,
+                tree_position_ids=tree_position_ids,
+                subseq_ri_cum_depths=subseq_ri_cum_depths
+            )
+            waiting_draft = 0
+            accept_hidden_states = []
         else:
+            past_key_values, past_key_values_data, current_length_data = kv_cache
+            global_accept_len = current_length_data[0].item()
+
             outputs = fill_pipeline_stages(self, past_key_values)
+
+            if config.is_last_stage:
+                sub_hidden_state, lens_split, draft_tokens, retrieve_indices, tree_mask, tree_position_ids, subseq_ri_cum_depths = outputs
+            else:  # middle stages
+                sub_hidden_state, lens_split, tree_mask, tree_position_ids = outputs
 
         # outputs = fill_pipeline_stages(*fill_pipeline_params)
 
@@ -892,7 +908,7 @@ class StageEaModel(nn.Module):
 
                 # with prof.profile_context(f"Stage {config.stage}: tree_expansion", device=f"cuda:{device}") if prof is not None else nullcontext():
                 pruned = accept_hidden_states or hs_len
-                expand_condition = waiting_draft < 24  # todo: set proper expand_condition
+                expand_condition = waiting_draft < 10  # todo: set proper expand_condition
                 if pruned and expand_condition:
                     # expand the tree for more waiting_draft   
                          
@@ -917,8 +933,8 @@ class StageEaModel(nn.Module):
                                 input_ids_ea,
                                 self.stage_base_model.lm_head,
                                 logits_processor,
-                                depth=max(cur_draft_depth + 3, 7),  # todo: test best tree settings
-                                total_tokens=80
+                                depth=max(cur_draft_depth + 2, 5),  # todo: test best tree settings
+                                # total_tokens=80
                             )  # get a little more appended tokens
                         tree_position_ids2 = tree_position_ids2 + input_ids.size(-1)
 
@@ -947,11 +963,11 @@ class StageEaModel(nn.Module):
                     # broadcast expand_info
                     # - (global) middle stages: appended tree_pos_ids and tree_mask
                     # appended_draft_len
-                    appended_draft_len = min(waiting_draft, 32)  # todo: set set_subseq_len = 16?
+                    appended_draft_len = min(waiting_draft, 16)  # todo: set set_subseq_len = 16?
                     lens_split[-1] = appended_draft_len
 
                 else:
-                    appended_draft_len = min(waiting_draft, 32)
+                    appended_draft_len = min(waiting_draft, 16)
                     # print(f'stage{config.stage} {i}th appended_draft_len: {appended_draft_len}, waiting_draft: {waiting_draft}')
                     lens_split = torch.cat((lens_split, torch.tensor([appended_draft_len], dtype=torch.long)))
                 
@@ -1006,7 +1022,7 @@ class StageEaModel(nn.Module):
                     tree_mask_split = tree_mask[..., existing_draft_len:input_draft_end_idx, :input_draft_end_idx]
                     self.stage_base_model.model.tree_mask = tree_mask_split
 
-                    with prof.profile_context(f"Stage {config.stage}: forward", device=f"cuda:{device}") if prof is not None else nullcontext():
+                    with prof.time_context(f"Stage {config.stage}: forward", cpu=False) if prof is not None else nullcontext():
                         outputs, sub_hidden_state = self(
                             input_ids=appended_draft_tokens,
                             past_key_values=past_key_values,

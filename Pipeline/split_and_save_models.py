@@ -26,7 +26,7 @@ def gen_stage_model_config_series(total_stage: int, base_ea_config) -> StageEaCo
     assert isinstance(total_stage, int) and total_stage > 0
     total_hidden_layers = base_ea_config.num_hidden_layers
     # hidden_layers_split = split_close_equal(total_hidden_layers, total_stage)
-    hidden_layers_split = [6,9,9,8]
+    hidden_layers_split = [8,8,8,8]
     print(f'total_hidden_layers={total_hidden_layers}, total_stage={total_stage}, hidden_layers_split={hidden_layers_split}')
     stage_model_config_series = []
     for stage, hidden_layer_num in enumerate(hidden_layers_split):
