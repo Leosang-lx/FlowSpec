@@ -52,7 +52,8 @@ class StageEaModel(nn.Module):
         # [MODIFIED] stage model for pipelined tree decoding
         self.stage = self.config.stage
         self.total_stage = self.config.total_stage
-        self.is_first_stage = self.stage == 0
+        self.is_draft_stage = self.stage == 0
+        self.is_first_stage = self.stage == 1
         self.is_last_stage = self.stage == self.total_stage - 1
 
         # [MODIFIED] assume the draft ea_model is on the stage-0 device
@@ -135,8 +136,8 @@ class StageEaModel(nn.Module):
             ea_layer = Model(ea_config, bias=bias, total_tokens=total_token, depth=depth, top_k=top_k,
                             threshold=threshold)
             low_memory = False
-
-            device = stage_base_model.model.layers[-1].self_attn.q_proj.weight.device
+            
+            device = stage_base_model.lm_head.weight.device
             # print(f"stage_base_model.lm_head.weight.device={stage_base_model.lm_head.weight.device}")
             # print(f"device={device}")
             if device != stage_base_model.lm_head.weight.device:

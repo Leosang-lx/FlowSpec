@@ -48,6 +48,9 @@ class StageLlamaModel(LlamaPreTrainedModel):
             )
         if config.is_last_stage:
             self.norm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        
+        if config.has_lm_head and not config.has_embedding:
+            self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
         # Initialize weights adn apply final processing
         if post_init:
@@ -294,8 +297,12 @@ class StageLlamaModelForCausalLM(LlamaPreTrainedModel):
             self.model = StageLlamaModel(config)
             
         if config.has_lm_head:
-            self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
-            self.lm_head.weight = self.model.embed_tokens.weight
+            if config.has_embedding:
+                self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+                self.lm_head.weight = self.model.embed_tokens.weight
+            else:
+                assert self.model.lm_head is not None
+                self.lm_head = self.model.lm_head
 
         # Initialize weights and apply final processing
         self.post_init()
