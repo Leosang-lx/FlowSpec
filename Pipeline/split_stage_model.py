@@ -1,3 +1,6 @@
+"""
+Separate the draft model to an extra stage
+"""
 from stage_ea_model import StageEaModel
 from stage_ea_config import StageEaConfig
 from stage_modeling_llama import StageLlamaModel, StageLlamaModelForCausalLM
@@ -18,20 +21,22 @@ base_model_path = cache_dir + base_model_path
 EAGLE_model_path = cache_dir + EAGLE_model_path
 
 
-def gen_stage_model_config_series(total_stage: int, base_ea_config) -> StageEaConfig:
-    assert isinstance(total_stage, int) and total_stage > 0
+def gen_stage_model_config_series(split_cnt: int, base_ea_config) -> StageEaConfig:
+    assert isinstance(split_cnt, int) and split_cnt > 0
     total_hidden_layers = base_ea_config.num_hidden_layers
-    hidden_layers_split = split_close_equal(total_hidden_layers, total_stage)
-    print(f'total_hidden_layers={total_hidden_layers}, total_stage={total_stage}, hidden_layers_split={hidden_layers_split}')
+    hidden_layers_split = [0] + split_close_equal(total_hidden_layers, split_cnt)
+    print(f'total_hidden_layers={total_hidden_layers}, hidden_layers_split={hidden_layers_split}')
     stage_model_config_series = []
     for stage, hidden_layer_num in enumerate(hidden_layers_split):
-        has_embedding = True if stage == 0 or stage == total_stage - 1 else False
-        has_draft_model = True if stage == 0 else False
-        has_lm_head = True if stage == 0 or stage == total_stage - 1 else False  
+        # [update] only draft stage has draft model
+        has_draft_model = stage == 0
+        # [update] only the first stage has embedding and lm_head
+        has_embedding = stage == 1
+        has_lm_head = stage == 0
 
         stage_model_config = StageEaConfig(
             ea_config=base_ea_config,
-            stage=stage,
+            stage=stage,  # [udpate] starts from 0, but rank starts from 1
             stage_num_hidden_layers_list=hidden_layers_split,
             base_model_name_or_path=base_model_path,
             has_embedding=has_embedding,
@@ -62,19 +67,20 @@ def gen_stage_model(base_ea_model: EaModel, stage_model_config: StageEaConfig, s
         stage_model_config,
         embed_tokens=embedding,
         hidden_layers=partial_hidden_layers,
-        post_init=False # why?
+        post_init=False  # why?
     )
     stage_model.eval()
     print(f"stage_model.config.is_last_stage={stage_model.config.is_last_stage}, stage_model_config.has_lm_head={stage_model_config.has_lm_head}")
     stage_model_with_LMHead = StageLlamaModelForCausalLM(
         stage_model_config,
         stage_model=stage_model,
+        lm_head=base_ea_model.base_model.lm_head if stage_model_config.has_lm_head else None
     )
 
     ea_layer = base_ea_model.ea_layer if stage_model_config.has_draft_model else None
 
     if save_dir is None:
-        stage_ea_model = StageEaModel(stage_model_with_LMHead, base_model_path, stage_model_config, ea_layer)
+        stage_ea_model = StageEaModel(stage_model_with_LMHead, base_model_path, stage_model_config, ea_layer, init_comm=False)
         return stage_ea_model
 
     else:

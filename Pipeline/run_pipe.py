@@ -47,12 +47,11 @@ def main(args):
         total_token=run_config.total_token,
         depth=run_config.depth,
     )
+
+    # check shared_weight
+    # if stage_model.config.has_lm_head:
+    #     assert stage_model.stage_base_model.lm_head.weight is stage_model.stage_base_model.model.embed_tokens.weight
     
-    # stage_model.to(f"cuda:{device}")
-    # stage_model.stage_base_model.to(f"cuda:{device}")
-    # if rank == 0:
-    #     stage_model.ea_layer.to(f"cuda:{device}")
-    #     stage_model.ea_layer.embed_tokens.to(f"cuda:{device}")
     stage_model.eval()
 
     assert run_config.pipeline_type in ["naive", "pruned", "continuous"]
@@ -73,7 +72,7 @@ def main(args):
         print('\n=========PROMPT=========')
         print(prompt)
 
-        input_ids=stage_model.tokenizer([prompt]).input_ids
+        input_ids = stage_model.tokenizer([prompt]).input_ids
         input_ids = torch.as_tensor(input_ids).cuda()
     
     # collaborative generation
@@ -89,7 +88,7 @@ def main(args):
         if rank == 0:
             return outputs
 
-    # [warn-up]
+    # [warm-up]
     if run_config.warmup:
         cnt = tqdm(range(run_config.warmup_repeat), desc="Warmup") if rank == 0 else range(run_config.warmup_repeat)
         for _ in cnt:
@@ -117,8 +116,8 @@ def main(args):
                 print('Turns:', turns)
     
     dist.barrier()
-    if rank == 0 or rank == world_size - 1:
-        prof.print_all_events()
+    # if rank == 0 or rank == world_size - 1:
+    prof.print_all_events()
     
     # dist.barrier()
     if hasattr(stage_model, "comm"):

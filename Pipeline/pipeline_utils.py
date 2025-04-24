@@ -183,17 +183,37 @@ def pipeline_prefill(
     comm = stage_model.comm  # update
 
     if config.is_first_stage:
-        if input_ids.size(-1) > 50:  # pipelined prefill, split the input_ids when long enough
-            seq_splits, lens_split = split_sequence_close_equal_len(input_ids, total_stage)
-            hidden_state_splits = []  # save the hidden_state for later transmission
+        # todo: split strategy depends on the device performance and the input length
+        if input_ids.size(-1) > 64:  # pipelined prefill, split the input_ids when long enough
+            seq_splits, lens_split = split_sequence_close_equal_len(input_ids, config.n_split)
+            # hidden_state_splits = []  # save the hidden_state for later transmission
         else:
             lens_split = torch.zeros(total_stage, dtype=torch.long)
             lens_split[0] = input_ids.size(-1)
             seq_splits = (input_ids,)
     else:
         lens_split = torch.zeros(total_stage, dtype=torch.long)
+
     dist.broadcast(lens_split, src=0)
     lens_split = lens_split[lens_split > 0]
+
+    if config.is_first_stage:
+        comm.sendto(input_ids, dst_rank=0)
+
+    # [update]: draft stage recv base_hidden_state when prefilling
+    if config.is_draft_stage:  # assume 4 subseqs
+        input_ids = comm.recvfrom(src_rank=1, device=device)
+        hidden_state_splits = []
+        orig = ()
+        for i, hidden_state_split in enumerate(hidden_state_splits):
+            hidden_state_split = comm.recvfrom(config.last_rank, device=device)
+            hidden_state_splits.append(hidden_state_split)
+            orig = orig + (stage_base_model.lm_head(hidden_state_split),)
+
+        hidden_state = torch.concat(hidden_state_splits, dim=-2)
+        orig = torch.concat(orig, dim=-2)
+
+        return input_ids, orig, hidden_state
 
     for i in range(lens_split.size(-1)):
         if config.is_first_stage:
@@ -202,7 +222,7 @@ def pipeline_prefill(
                 past_key_values=stage_past_key_values,
             )
             sub_hidden_state = sub_hidden_state.cpu()
-            hidden_state_splits.append(sub_hidden_state)
+            # hidden_state_splits.append(sub_hidden_state)
             comm.sendto(sub_hidden_state, config.next_rank)
         else:
             last_hidden_state = comm.recvfrom(config.last_rank, device=device)
@@ -216,18 +236,18 @@ def pipeline_prefill(
             sub_hidden_state = sub_hidden_state.cpu()
             comm.sendto(sub_hidden_state, config.next_rank)
 
-    if config.is_first_stage:
-        orig = ()
+    # if config.is_first_stage:
+    #     orig = ()
 
-        for i, hidden_state_split in enumerate(hidden_state_splits):
-            hidden_state_split = comm.recvfrom(config.last_rank, device=device)
-            hidden_state_splits[i] = hidden_state_split.to(device)
-            orig = orig + (stage_base_model.lm_head(hidden_state_splits[i]),)
+    #     for i, hidden_state_split in enumerate(hidden_state_splits):
+    #         hidden_state_split = comm.recvfrom(config.last_rank, device=device)
+    #         hidden_state_splits[i] = hidden_state_split.to(device)
+    #         orig = orig + (stage_base_model.lm_head(hidden_state_splits[i]),)
 
-        hidden_state = torch.concat(hidden_state_splits, dim=-2)
-        orig = torch.concat(orig, dim=-2)
+    #     hidden_state = torch.concat(hidden_state_splits, dim=-2)
+    #     orig = torch.concat(orig, dim=-2)
 
-        return orig, hidden_state
+    #     return orig, hidden_state
     
 
 def prefill_pipeline0(stage_model, stage_past_key_values=None, input_ids = None):
@@ -556,8 +576,8 @@ def fill_pipeline_stages(
     device = stage_model.stage_base_model.device
     comm = stage_model.comm  # update
 
-    # async broadcast tree_info
-    if config.is_first_stage:
+    # [update] draft stage async broadcast tree_info
+    if config.is_draft_stage:
         broadcast_tree_info_task = comm.executor.submit(
             comm.broadcast_tree_info,
             lens_split,
@@ -569,17 +589,23 @@ def fill_pipeline_stages(
             appended=False
         )
         draft_tokens_split = draft_tokens.split(lens_split.tolist(), dim=-1)
+        for split_draft_tokens in draft_tokens_split:
+            comm.sendto(split_draft_tokens, dst_rank=config.next_rank)
+            
+        broadcast_tree_info_task.result()
+        # end for draft stage
+        return
     else:
         if not config.is_last_stage:
             lens_split, tree_pos_ids, tree_mask = comm.broadcast_tree_info_global(appended=False)
         else:
             lens_split, tree_pos_ids, tree_mask, draft_tokens, retrieve_indices, subseq_ri_cum_depths = comm.broadcast_tree_info(appended=False)
-    
-    cum_lens_split = torch.cumsum(lens_split, dim=-1)
-    tree_pos_ids_split = tree_pos_ids.split(lens_split.tolist(), dim=0)
+
+        cum_lens_split = torch.cumsum(lens_split, dim=-1)
+        tree_pos_ids_split = tree_pos_ids.split(lens_split.tolist(), dim=0)
     
     # fill the pipeline stages
-    # stage0 doesn't need to recv anything
+    # stage1 doesn't need to recv anything
     for i in range(config.total_stage - config.stage):
         # print(config.stage, f'i={i}')
         if i == 0:
@@ -593,7 +619,7 @@ def fill_pipeline_stages(
         subseq_pos_ids = tree_pos_ids_split[i]
 
         if config.is_first_stage:
-            subseq_ids = draft_tokens_split[i]
+            subseq_ids = comm.recvfrom(src_rank=config.last_rank, device=device)
             
             outputs, sub_hidden_state = stage_model(
                 input_ids=subseq_ids,
@@ -607,15 +633,15 @@ def fill_pipeline_stages(
                 past_key_values=stage_past_key_values,
                 position_ids=subseq_pos_ids,
             )
-        if i == 0:
-            if config.is_first_stage:
-                broadcast_tree_info_task.result()
+        # if i == 0:
+        #     if config.is_first_stage:
+        #         broadcast_tree_info_task.result()
 
         if i < config.total_stage - config.stage - 1:  # not send for the last time
             comm.sendto(sub_hidden_state.cpu(), config.next_rank)
         
-    if config.is_first_stage:
-        return sub_hidden_state
+    # if config.is_first_stage:
+    #     return sub_hidden_state
     if config.is_last_stage:
         return sub_hidden_state, lens_split, draft_tokens, retrieve_indices, tree_mask, tree_pos_ids, subseq_ri_cum_depths
     # middle stages

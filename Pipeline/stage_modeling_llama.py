@@ -286,8 +286,8 @@ class StageLlamaModel(LlamaPreTrainedModel):
 
 class StageLlamaModelForCausalLM(LlamaPreTrainedModel):
     _tied_weights_keys = ["lm_head.weight"]
-
-    def __init__(self, config, stage_model=None):
+    # [update] init with lm_head
+    def __init__(self, config, stage_model=None, lm_head=None):
         super().__init__(config)
 
         self.vocab_size = config.vocab_size

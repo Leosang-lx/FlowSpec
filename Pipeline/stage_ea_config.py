@@ -188,7 +188,7 @@ class StageEaConfig(PretrainedConfig):
         # if self.total_stage == 1:
         #     raise ValueError("total_stage cannot be 1")
         # assert self.stage < self.total_stage
-
+        
         self.stage_num_hidden_layers_list = stage_num_hidden_layers_list
         self.num_stage_hidden_layers = self.stage_num_hidden_layers_list[self.stage]
         self.layer_range = (
@@ -196,6 +196,7 @@ class StageEaConfig(PretrainedConfig):
             sum(stage_num_hidden_layers_list[:self.stage+1])
             )  # [start_layer_idx, end_layer_idx)
         
+        # [update] is_draft_stage: stage 0 is draft stage
         self.is_draft_stage = self.stage == 0
         self.is_first_stage = self.stage == 1
         self.is_last_stage = self.stage == self.total_stage - 1
