@@ -22,21 +22,22 @@ EAGLE_model_path = 'yuhuili/EAGLE-llama2-chat-7B'
 base_model_path = cache_dir + base_model_path
 EAGLE_model_path = cache_dir + EAGLE_model_path
 
-def gen_stage_model_config_series(total_stage: int, base_ea_config) -> StageEaConfig:
-    assert isinstance(total_stage, int) and total_stage > 0
+def gen_stage_model_config_series(split_cnt: int, base_ea_config) -> StageEaConfig:
+    assert isinstance(split_cnt, int) and split_cnt > 0
     total_hidden_layers = base_ea_config.num_hidden_layers
-    # hidden_layers_split = split_close_equal(total_hidden_layers, total_stage)
-    hidden_layers_split = [6,9,9,8]
-    print(f'total_hidden_layers={total_hidden_layers}, total_stage={total_stage}, hidden_layers_split={hidden_layers_split}')
+    hidden_layers_split = [0] + split_close_equal(total_hidden_layers, split_cnt)
+    print(f'total_hidden_layers={total_hidden_layers}, hidden_layers_split={hidden_layers_split}')
     stage_model_config_series = []
     for stage, hidden_layer_num in enumerate(hidden_layers_split):
-        has_embedding = True if stage == 0 or stage == total_stage - 1 else False
-        has_draft_model = True if stage == 0 else False
-        has_lm_head = True if stage == 0 or stage == total_stage - 1 else False  
+        # [update] only draft stage has draft model
+        has_draft_model = stage == 0
+        # [update] only the first stage has embedding and lm_head
+        has_embedding = stage == 1
+        has_lm_head = stage == 0 or stage == split_cnt
 
         stage_model_config = StageEaConfig(
             ea_config=base_ea_config,
-            stage=stage,
+            stage=stage,  # [udpate] starts from 0, but rank starts from 1
             stage_num_hidden_layers_list=hidden_layers_split,
             base_model_name_or_path=base_model_path,
             has_embedding=has_embedding,
@@ -44,10 +45,10 @@ def gen_stage_model_config_series(total_stage: int, base_ea_config) -> StageEaCo
             has_lm_head=has_lm_head,
         )
         stage_model_config_series.append(stage_model_config)
-        
+
     return stage_model_config_series
 
-def save_stage_dict(base_ea_model: EaModel, config: StageEaConfig, save_dir: str):
+def save_stage_dict(base_ea_model: EaModel, config: StageEaConfig, save_dir: str, draft_stage: bool = True):
     """
     save_dir: the directory of according to the base model type on the server/master
     e.g., a valid example: save_dir = '~/LLM/pipeline_model/meta-llama/Llama-2-7b-chat-hf'
@@ -97,7 +98,8 @@ def save_stage_dict(base_ea_model: EaModel, config: StageEaConfig, save_dir: str
     # print(f'stage_state_dict={stage_state_dict}')
     stage = config.stage
     joined_list = '+'.join(map(str, config.stage_num_hidden_layers_list))
-    stage_file_dir = os.path.join(save_dir, f'stage_model_series_{joined_list}/stage_model_{stage}')
+    stage_file_name = ('new_' if draft_stage else '') + f'stage_model_series_{joined_list}' + ('_fp16' if base_ea_model.base_model.dtype == torch.float16 else '') + f'/stage_model_{stage}'
+    stage_file_dir = os.path.join(save_dir, stage_file_name)
     print(f'Save stage_model_{stage} to:' + stage_file_dir)
     print('--Saving stage_model_config...')
     config.save_pretrained(stage_file_dir)
@@ -112,10 +114,11 @@ if __name__ == '__main__':
     model = EaModel.from_pretrained(
         base_model_path=base_model_path,
         ea_model_path=EAGLE_model_path,
+        torch_dtype=torch.float16
     )
     
     stage_model_config_series = gen_stage_model_config_series(4, base_ea_config)
     
     stage_model_save_dir = '/home/liux/big_file/pipeline_model/meta-llama/Llama-2-7b-chat-hf'
     for config in stage_model_config_series:
-        save_stage_dict(model, config, stage_model_save_dir)
+        save_stage_dict(model, config, stage_model_save_dir, draft_stage=True)
