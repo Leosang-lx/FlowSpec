@@ -58,7 +58,7 @@ def main(args):
     assert run_config.mode in ["eval", "demo"]
 
     # [initialize]
-    if rank == 0:
+    if rank == 1:
         your_message=run_config.your_message
         # conv = get_conversation_template("vicuna")
         conv = get_conversation_template("llama-2-chat")
@@ -78,30 +78,30 @@ def main(args):
     # collaborative generation
     def run(log=False, profiler=None):
         outputs = stage_model.stage_generate(
-            input_ids=input_ids if rank == 0 else None,
+            input_ids=input_ids if rank == 1 else None,
             temperature=run_config.temperature,
             max_new_tokens=run_config.max_new_tokens,
-            log=log if rank == 0 else False,
+            log=log if rank == 1 else False,
             pipeline_type=run_config.pipeline_type,
             profiler=profiler,
         )
-        if rank == 0:
+        if rank == 1:
             return outputs
 
     # [warm-up]
     if run_config.warmup:
-        cnt = tqdm(range(run_config.warmup_repeat), desc="Warmup") if rank == 0 else range(run_config.warmup_repeat)
+        cnt = tqdm(range(run_config.warmup_repeat), desc="Warmup") if rank == 1 else range(run_config.warmup_repeat)
         for _ in cnt:
             run()
 
     # [test generation]
-    cnt = tqdm(range(run_config.test_repeat), desc="Test") if rank == 0 else range(run_config.test_repeat)
+    cnt = tqdm(range(run_config.test_repeat), desc="Test") if rank == 1 else range(run_config.test_repeat)
     for i in cnt:
         with prof.profile_context(f"Rank {rank}: {run_config.pipeline_type} pipeline", device=f"cuda:{device}"):
             outputs = run(run_config.log, prof)
     
     # [print output]
-    if rank == 0:  # only for greedy decoding test!!!
+    if rank == 1:  # only for greedy decoding test!!!
         if run_config.log:
             output_ids, new_tokens, idx, turns = outputs
         else:

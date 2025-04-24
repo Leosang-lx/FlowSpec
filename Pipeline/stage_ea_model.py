@@ -35,7 +35,7 @@ class StageEaModel(nn.Module):
             # threshold,
             # ea_layer_state_dict=None,
             ea_draft_model=None,  # draft model
-            init_comm=False
+            init_comm=True
     ):
         super().__init__()
         self.stage_base_model = stage_base_model
@@ -271,8 +271,9 @@ class StageEaModel(nn.Module):
             logits_processor = None
         
         # initialize the past key and value states
-        if config.is_draft_stage:
+        if self.is_draft_stage:
             self.ea_layer.reset_kv()
+        else:
             self.stage_base_model.model.tree_mask = None
             if hasattr(self, "past_key_values"):
                 past_key_values = self.past_key_values
@@ -289,8 +290,6 @@ class StageEaModel(nn.Module):
                 self.past_key_values = past_key_values
                 self.past_key_values_data = past_key_values_data
                 self.current_length_data = current_length_data
-        else:
-            
         # to determine the stop of the pipeline
         should_stop = torch.tensor(0, dtype=torch.int32)  # for break the outer loop
         
@@ -310,7 +309,7 @@ class StageEaModel(nn.Module):
             token = gen_token(logits=orig[:, -1], logits_processor=logits_processor)
         elif self.is_first_stage:
             # ensure input_ids at the first stage
-            max_length = max_length - self.ea_layer.total_tokens - 10
+            # max_length = max_length - self.ea_layer.total_tokens - 10 # 这一步在旧版本中就是没有用的
             assert input_ids is not None and input_ids.shape[0] == 1, 'First stage must have valid "input_ids"'
             # Avoid modifying the input_ids in-place
             input_ids = input_ids.clone()
@@ -323,7 +322,7 @@ class StageEaModel(nn.Module):
             # token = gen_token(logits=orig[:, -1], logits_processor=logits_processor)
         else:
             pipeline_prefill(self, stage_past_key_values=past_key_values)
-        
+            
         should_stop = torch.tensor(0, dtype=torch.int32)
 
         turns_cnt = 0
@@ -333,13 +332,23 @@ class StageEaModel(nn.Module):
 
         # outer loop
         for idx_spec in range(max_length):
-            if config.is_first_stage:
+            if config.is_draft_stage:
                 outputs = pipeline_forward(
-                    kv_cache=kv_cache,
                     logits_processor=logits_processor,
                     input_ids=input_ids,
                     token=token,
                     hidden_state=hidden_state,
+                    # new_token=new_token,
+                    log=log,
+                    prof=profiler
+                )
+            elif config.is_first_stage:
+                outputs = pipeline_forward(
+                    kv_cache=kv_cache,
+                    logits_processor=logits_processor,
+                    input_ids=input_ids,
+                    # token=token,
+                    # hidden_state=hidden_state,
                     # new_token=new_token,
                     log=log,
                     prof=profiler
@@ -700,10 +709,10 @@ class StageEaModel(nn.Module):
             fill_pipeline_stages(
                 self,
                 lens_split=lens_split,
-                draft_tokens=draft_tokens_split,
+                draft_tokens=draft_tokens,
                 retrieve_indices=retrieve_indices,
                 tree_mask=tree_mask,
-                tree_position_ids=tree_position_ids,
+                tree_pos_ids=tree_position_ids,
                 subseq_ri_cum_depths=subseq_ri_cum_depths
             )
             waiting_draft = 0
@@ -718,23 +727,9 @@ class StageEaModel(nn.Module):
                 sub_hidden_state, lens_split, draft_tokens, retrieve_indices, tree_mask, tree_position_ids, subseq_ri_cum_depths = outputs
             else:  # middle stages
                 sub_hidden_state, lens_split, tree_mask, tree_position_ids = outputs
-
-        # outputs = fill_pipeline_stages(*fill_pipeline_params)
-
-        if self.is_first_stage:
-            sub_hidden_state = outputs
-            waiting_draft = 0  # 表示未输入pipeline的draft_tokens数量
-            accept_length_this_round = 0  # accept_len_per_round
-
-            # 表示last_stage当前拥有了到了多少subseq对应的信息：ri, draft_tokens, subseq_ri_cum_depths
-            # first_stage_subseq_process_idx = last_stage_subseq_process_idx = config.total_stage - 1
-        elif self.is_last_stage:
-            sub_hidden_state, lens_split, draft_tokens, retrieve_indices, tree_mask, tree_position_ids, subseq_ri_cum_depths = outputs
-        else:  # middle stages
-            sub_hidden_state, lens_split, tree_mask, tree_position_ids = outputs
-            
-        if self.is_first_stage:
-            accept_hidden_states = []
+        # 测试prefill 和 fill_pipeline_stages完成
+        dist.barrier()
+        raise NotImplementedError('pipeline_stages is not implemented')
 
         i = -1
         

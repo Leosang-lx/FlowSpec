@@ -181,32 +181,35 @@ def pipeline_prefill(
     device = stage_base_model.device
     total_stage = config.total_stage
     comm = stage_model.comm  # update
-
+    
     if config.is_first_stage:
         # todo: split strategy depends on the device performance and the input length
         if input_ids.size(-1) > 64:  # pipelined prefill, split the input_ids when long enough
             seq_splits, lens_split = split_sequence_close_equal_len(input_ids, config.n_split)
             # hidden_state_splits = []  # save the hidden_state for later transmission
         else:
-            lens_split = torch.zeros(total_stage, dtype=torch.long)
+            lens_split = torch.zeros(config.n_split, dtype=torch.long)
             lens_split[0] = input_ids.size(-1)
             seq_splits = (input_ids,)
-    else:
-        lens_split = torch.zeros(total_stage, dtype=torch.long)
+    # else:
+    #     lens_split = torch.zeros(total_stage, dtype=torch.long)
 
-    dist.broadcast(lens_split, src=0)
-    lens_split = lens_split[lens_split > 0]
-
+    
+    # dist.broadcast(lens_split, src=1)
+        lens_split = lens_split[lens_split > 0]
+        
     if config.is_first_stage:
         comm.sendto(input_ids, dst_rank=0)
-
+        
+    dist.barrier()
     # [update]: draft stage recv base_hidden_state when prefilling
     if config.is_draft_stage:  # assume 4 subseqs
         input_ids = comm.recvfrom(src_rank=1, device=device)
+        # hidden_state_splits = [torch.zeros(input_ids.shape[0], lens_split[i], config.hidden_size, device=device) for i in range(lens_split.size(-1))]
         hidden_state_splits = []
         orig = ()
-        for i, hidden_state_split in enumerate(hidden_state_splits):
-            hidden_state_split = comm.recvfrom(config.last_rank, device=device)
+        for i in range(config.n_split):
+            hidden_state_split = comm.recvfrom(config.last_rank, device=device).to(device)
             hidden_state_splits.append(hidden_state_split)
             orig = orig + (stage_base_model.lm_head(hidden_state_split),)
 
@@ -215,15 +218,13 @@ def pipeline_prefill(
 
         return input_ids, orig, hidden_state
 
-    for i in range(lens_split.size(-1)):
+    for i in range(config.n_split):
         if config.is_first_stage:
             outputs, sub_hidden_state = stage_model(
                 input_ids=seq_splits[i],
                 past_key_values=stage_past_key_values,
             )
-            sub_hidden_state = sub_hidden_state.cpu()
-            # hidden_state_splits.append(sub_hidden_state)
-            comm.sendto(sub_hidden_state, config.next_rank)
+            comm.sendto(sub_hidden_state.cpu(), config.next_rank)
         else:
             last_hidden_state = comm.recvfrom(config.last_rank, device=device)
 
@@ -233,8 +234,7 @@ def pipeline_prefill(
                 past_key_values=stage_past_key_values,
             )
             sub_hidden_state = outputs[0]
-            sub_hidden_state = sub_hidden_state.cpu()
-            comm.sendto(sub_hidden_state, config.next_rank)
+            comm.sendto(sub_hidden_state.cpu(), config.next_rank)
 
     # if config.is_first_stage:
     #     orig = ()
@@ -562,7 +562,7 @@ def token_tree_partition(draft_tokens, retrieve_indices, total_stage):
 
 def fill_pipeline_stages(
         stage_model,
-        stage_past_key_values,
+        stage_past_key_values=None,
         input_ids=None,
         lens_split=None,
         draft_tokens=None,
@@ -577,6 +577,7 @@ def fill_pipeline_stages(
     comm = stage_model.comm  # update
 
     # [update] draft stage async broadcast tree_info
+    # 这里的广播其实是同步的？
     if config.is_draft_stage:
         broadcast_tree_info_task = comm.executor.submit(
             comm.broadcast_tree_info,
