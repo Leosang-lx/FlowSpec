@@ -307,6 +307,8 @@ class StageEaModel(nn.Module):
         if self.is_draft_stage:
             # [update] get input_ids from the first stage
             input_ids, orig, hidden_state = pipeline_prefill(self)
+            input_len = input_ids.shape[1]
+            new_token = 0
             token = gen_token(logits=orig[:, -1], logits_processor=logits_processor)
             input_len = input_ids.shape[1]
             new_token = 0
@@ -317,7 +319,7 @@ class StageEaModel(nn.Module):
             # Avoid modifying the input_ids in-place
             input_ids = input_ids.clone()
             input_len = input_ids.shape[1]
-            new_token = 0
+            # new_token = 0
 
             # [prefill]
             # with profiler.profile_context(f"Stage {config.stage}: pipeline_prefill", device=f"cuda:{device}") if profiler is not None else nullcontext():
@@ -400,9 +402,8 @@ class StageEaModel(nn.Module):
         # new_token=None,
         log=False,
         prof=None
-    ):
-        past_key_values, past_key_values_data, current_length_data = kv_cache
-        if self.is_first_stage:
+    ):  
+        if self.is_draft_stage:
             input_ids_ea = torch.cat((input_ids, token.to(input_ids.device)), dim=1)
             draft_tokens, retrieve_indices, tree_mask, tree_position_ids = self.ea_layer.topK_genrate(
                 hidden_state,
@@ -412,18 +413,37 @@ class StageEaModel(nn.Module):
             )
             seqs_split, lens_split = split_sequence_close_equal_len(
                 draft_tokens,
-                self.total_stage
+                self.total_stage - 1
             )
             tree_decoding_params = (
-                self, past_key_values, seqs_split, lens_split, tree_position_ids, tree_mask, input_ids
+                self, None, seqs_split, lens_split, tree_position_ids, tree_mask, input_ids
             )
-
         else:
+            past_key_values, past_key_values_data, current_length_data = kv_cache
             tree_decoding_params = (self, past_key_values)
+        
+        # if self.is_first_stage:
+        #     input_ids_ea = torch.cat((input_ids, token.to(input_ids.device)), dim=1)
+        #     draft_tokens, retrieve_indices, tree_mask, tree_position_ids = self.ea_layer.topK_genrate(
+        #         hidden_state,
+        #         input_ids_ea,
+        #         self.stage_base_model.lm_head,
+        #         logits_processor
+        #     )
+        #     seqs_split, lens_split = split_sequence_close_equal_len(
+        #         draft_tokens,
+        #         self.total_stage
+        #     )
+        #     tree_decoding_params = (
+        #         self, past_key_values, seqs_split, lens_split, tree_position_ids, tree_mask, input_ids
+        #     )
+
+        # else:
+        #     tree_decoding_params = (self, past_key_values)
 
         outputs = stage_tree_decoding(*tree_decoding_params)
 
-        if self.is_first_stage:
+        if self.is_draft_stage:
             logits, hidden_state = outputs
             logits = logits[0, retrieve_indices]
 
@@ -436,13 +456,26 @@ class StageEaModel(nn.Module):
             )
             accept_length += 1
             
+        # if self.is_first_stage:
+        #     logits, hidden_state = outputs
+        #     logits = logits[0, retrieve_indices]
+
+        #     padding = (torch.zeros(1, 1, dtype=torch.long) - 1).to(self.stage_base_model.device)
+        #     draft_tokens = torch.cat((draft_tokens, padding), dim=1)
+
+        #     candidates = draft_tokens[0, retrieve_indices]
+        #     best_candidate, accept_length, sample_p = evaluate_posterior(
+        #         logits, candidates, logits_processor
+        #     )
+        #     accept_length += 1
+            
         # [update_inference_inputs]
-        if self.is_first_stage:
+        if self.is_draft_stage:
             candidates = draft_tokens[0, retrieve_indices]
             update_inputs_params = (
                 self,
-                past_key_values_data,
-                current_length_data,
+                None, # past_key_values_data
+                None, # current_length_data
                 logits_processor,
                 input_ids,
                 candidates,
@@ -457,7 +490,7 @@ class StageEaModel(nn.Module):
             update_inputs_params = (self, past_key_values_data, current_length_data)
 
         outputs = update_stage_inference_inputs(*update_inputs_params)
-        if self.is_first_stage:
+        if self.is_draft_stage:
             return *outputs, accept_length, self.config.total_stage*2-1
 
     def _pruned_pipeline(
