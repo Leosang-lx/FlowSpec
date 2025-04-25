@@ -85,7 +85,7 @@ def main(args):
             pipeline_type=run_config.pipeline_type,
             profiler=profiler,
         )
-        if rank == 1:
+        if rank == 0:
             return outputs
 
     # [warm-up]
@@ -101,7 +101,7 @@ def main(args):
             outputs = run(run_config.log, prof)
     
     # [print output]
-    if rank == 1:  # only for greedy decoding test!!!
+    if rank == 0:  # only for greedy decoding test!!!
         if run_config.log:
             output_ids, new_tokens, idx, turns = outputs
         else:
