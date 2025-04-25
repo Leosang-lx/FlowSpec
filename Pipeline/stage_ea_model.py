@@ -782,7 +782,7 @@ class StageEaModel(nn.Module):
                 with prof.time_context(f"Stage {config.stage}: pruning", cpu=False) if prof is not None else nullcontext():
                     if config.is_last_stage:  # last stage正常pruning
                         # [verification]
-                        print(f'stage{config.stage} {i}th verification')
+                        # print(f'stage{config.stage} {i}th verification')
                         with prof.time_context(f"Stage {config.stage}: lm_head", cpu=False) if prof is not None else nullcontext():
                             subseq_logits = self.stage_base_model.lm_head(sub_hidden_state)
                         
@@ -887,7 +887,7 @@ class StageEaModel(nn.Module):
                                 config.stage
                             )
                         global_accept_len += accept_length
-                        print(f'Stage {config.stage} {i}th turn global_accept_len: {global_accept_len}')
+
                         if config.is_draft_stage: 
                             accept_length_this_round += accept_length
 
@@ -996,7 +996,7 @@ class StageEaModel(nn.Module):
 
                 # with prof.profile_context(f"Stage {config.stage}: tree_expansion", device=f"cuda:{device}") if prof is not None else nullcontext():
                 pruned = accept_hidden_states or hs_len
-                expand_condition = waiting_draft < run_config.subseq_token * 2  # todo: set proper expand_condition
+                expand_condition = waiting_draft < run_config.subseq_token // 2  # todo: set proper expand_condition
                 if pruned and expand_condition:
                     # expand the tree for more waiting_draft   
                          
@@ -1022,7 +1022,7 @@ class StageEaModel(nn.Module):
                                 self.stage_base_model.lm_head,
                                 logits_processor,
                                 total_tokens=run_config.expand_total_token,
-                                depth=max(cur_draft_depth + 1, run_config.expand_depth),  # todo: test best tree settings
+                                depth=max(cur_draft_depth + 2, run_config.expand_depth),  # todo: test best tree settings
                                 # total_tokens=80
                             )  # get a little more appended tokens
                         tree_position_ids2 = tree_position_ids2 + input_ids.size(-1)
@@ -1138,7 +1138,6 @@ class StageEaModel(nn.Module):
 
                 broadcast_tree_info_task = comm.executor.submit(comm.broadcast_tree_info, appended=True)
                 subseq_idx = config.total_stage - config.stage - 1
-                print(f'Stage {config.stage} {i}th turn subseq_idx: {subseq_idx}')
 
                 # [update] first stage recv input for forward first
                 if config.is_first_stage:  # recv input for first stage forward
@@ -1149,7 +1148,7 @@ class StageEaModel(nn.Module):
                     tree_mask_pad = F.pad(tree_mask, (0, appended_draft_len), value=0)                        
                     tree_mask = torch.cat((tree_mask_pad, appended_tree_mask.to(device)), dim=-2)
                 cum_lens = torch.cumsum(lens_split, dim=0)
-                print(f'Stage {config.stage} {i}th turn cum_lens: {cum_lens}')
+
                 # get tree_mask and tree_position_ids
                 if config.is_last_stage:
                     tree_pos_ids = tree_position_ids[:cum_lens[subseq_idx]]
@@ -1157,7 +1156,7 @@ class StageEaModel(nn.Module):
                 else:
                     tree_pos_ids = tree_position_ids[cum_lens[subseq_idx-1] : cum_lens[subseq_idx]]
                     tree_mask_split = tree_mask[..., cum_lens[subseq_idx-1]:cum_lens[subseq_idx], :cum_lens[subseq_idx]].contiguous()
-                    print(f'Stage {config.stage} {i}th turn tree_mask_split: {tree_mask_split.shape}')
+
                 self.stage_base_model.model.tree_mask = tree_mask_split
 
                 # forward
@@ -1171,23 +1170,10 @@ class StageEaModel(nn.Module):
                 else:  # middle stages
 
                     # other stages sync recv and forward
-                    print(f'Stage {config.stage} {i}th turn hs_len: {hs_len}')
                     if hs_len > 0:
-                        
                         with prof.time_context(f'Stage {config.stage}: recv hidden_state', cpu=True) if prof is not None else nullcontext():
                             last_hidden_state = comm.recvfrom(config.last_rank, device=device)
-                        # print(f'Stage {config.stage} {i}th turn recvfrom {config.last_rank} last_hidden_state: {last_hidden_state.shape}')
 
-                        # try:
-                        #     assert last_hidden_state.shape[-2] == tree_pos_ids.size(0)
-                        # except Exception as e:
-                        #     print(f'Stage {config.stage} last_hidden_state.shape != tree_pos_ids: {last_hidden_state.shape[-2]} and {tree_pos_ids.size(0)}')
-                        #     print(f'hs_len: {hs_len}')
-                        #     print(f'last_hidden_state: {last_hidden_state.shape}')
-                        #     print(f'tree_pos_ids: {tree_pos_ids.shape}')
-                        #     print(f'tree_position_ids: {tree_position_ids.shape}')
-                        #     print(f'lens_split: {lens_split}')
-                        #     raise e
                         with prof.time_context(f'Stage {config.stage}: forward', cpu=False) if prof is not None else nullcontext():
                             outputs, sub_hidden_state = self(  # forward
                                 inputs_embeds=last_hidden_state,

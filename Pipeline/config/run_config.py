@@ -25,13 +25,13 @@ class Config:
 
     # draft config
     total_token: int = 100
-    subseq_token: int = 20
+    subseq_token: int = 25
     depth: int = 7
     # expand draft config
     expand_total_token: int = 64
     expand_subseq_token: int = subseq_token
-    expand_depth: int = 3
-    expand_ratio: int = subseq_token // 2
+    expand_depth: int = 4
+    expand_threshold: int = 8
     
     # pipeline config
     pipeline_type: str = "continuous"
