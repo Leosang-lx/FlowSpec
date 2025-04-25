@@ -325,7 +325,7 @@ def stage_tree_decoding(
     device = stage_model.stage_base_model.device
     comm = stage_model.comm
     
-    if config.is_first_stage:
+    if config.is_draft_stage:
         tree_pos_ids = tree_pos_ids + input_ids.size(-1)  # add the input length to the tree position ids
         broadcast_tree_info_global_task = comm.executor.submit(
             comm.broadcast_tree_info_global,
@@ -336,8 +336,24 @@ def stage_tree_decoding(
         )
         tree_logits_split = ()
         hidden_state_splits = []
+        
+        for split_draft_seqs in draft_seqs_split:
+            comm.sendto(split_draft_seqs, dst_rank=config.next_rank)
+            
+        broadcast_tree_info_global_task.result()
     else:
         lens_split, tree_pos_ids, tree_mask = comm.broadcast_tree_info_global(appended=False)
+    
+    if stage_model.is_draft_stage:
+        for i in range(lens_split.size(-1)):
+            hidden_state_split = comm.recvfrom(config.last_rank, device=device)
+            hidden_state_splits.append(hidden_state_split.to(device))
+            tree_logits_split = tree_logits_split + (stage_model.stage_base_model.lm_head(hidden_state_splits[i]),)
+
+        tree_logits = torch.concat(tree_logits_split, dim=-2)  # concat at the seq dimension
+        hidden_state = torch.concat(hidden_state_splits, dim=-2)
+        return tree_logits, hidden_state
+
     tree_pos_ids = tree_pos_ids.to(device)
     tree_mask = tree_mask.to(device)
 
@@ -348,45 +364,32 @@ def stage_tree_decoding(
     # [step2] start pipelined verification
     for i, subseq_len in enumerate(lens_split):
         if i == 0:
-            tree_mask_split = tree_mask[..., :cum_lens_split[i], :cum_lens_split[i]].contiguous()
+            # isend_mask.wait()
+            tree_mask_split = tree_mask[..., :cum_lens_split[i], :cum_lens_split[i]]
         else:
-            tree_mask_split = tree_mask[..., cum_lens_split[i-1]:cum_lens_split[i], :cum_lens_split[i]].contiguous()
-        stage_model.stage_base_model.model.tree_mask = tree_mask_split
-        if stage_model.is_first_stage:
-            seq_split = draft_seqs_split[i]
-            outputs, sub_hidden_state = stage_model(
-                input_ids=seq_split,
-                past_key_values=stage_past_key_values,
-                position_ids=tree_pos_ids_split[i],
-            )
-            sub_hidden_state = sub_hidden_state.cpu()
-            hidden_state_splits.append(sub_hidden_state)
-            if i == 0:
-                broadcast_tree_info_global_task.result()
-            comm.sendto(sub_hidden_state, config.next_rank)
+            tree_mask_split = tree_mask[..., cum_lens_split[i-1]:cum_lens_split[i], :cum_lens_split[i]]
+        
+        # set the tree mask for the current stage
+        stage_model.stage_base_model.model.tree_mask = tree_mask_split.contiguous()
+        subseq_pos_ids = tree_pos_ids_split[i]
 
+        if config.is_first_stage:
+            subseq_ids = comm.recvfrom(src_rank=config.last_rank, device=device)
+            outputs, sub_hidden_state = stage_model(
+                input_ids=subseq_ids,
+                past_key_values=stage_past_key_values,
+                position_ids=subseq_pos_ids,
+            )
         else:
             last_hidden_state = comm.recvfrom(config.last_rank, device=device)
             outputs, sub_hidden_state = stage_model(
                 inputs_embeds=last_hidden_state,
                 past_key_values=stage_past_key_values,
-                position_ids=tree_pos_ids_split[i],
+                position_ids=subseq_pos_ids,
             )
-            sub_hidden_state = sub_hidden_state.cpu()
-            comm.sendto(sub_hidden_state, config.next_rank)
+
+        comm.sendto(sub_hidden_state.cpu(), config.next_rank)
     # [step2] end
-
-    # [step3] get complete tree_logits on the first stage
-    if stage_model.is_first_stage:
-        for i, hidden_state_split in enumerate(hidden_state_splits):
-            hidden_state_split = comm.recvfrom(config.last_rank, device=device)
-            hidden_state_splits[i] = hidden_state_split.to(device)
-            tree_logits_split = tree_logits_split + (stage_model.stage_base_model.lm_head(hidden_state_splits[i]),)
-
-        tree_logits = torch.concat(tree_logits_split, dim=-2)  # concat at the seq dimension
-        hidden_state = torch.concat(hidden_state_splits, dim=-2)
-        return tree_logits, hidden_state
-
 
 def stage_tree_decoding0(
         stage_model,
@@ -487,8 +490,8 @@ def update_stage_inference_inputs(
         # new_token=None,
         hidden_state_new=None,
         sample_p=None,
-):
-    if model.is_first_stage:
+):      
+    if model.is_draft_stage:
         prev_input_len = torch.tensor(input_ids.shape[1], dtype=torch.long)
         # dist.broadcast(prev_input_len, src=0)
         broadcast(prev_input_len, src=0)
@@ -503,6 +506,12 @@ def update_stage_inference_inputs(
         prev_input_len = broadcast(src=0, data_type=torch.int64, shape_length=0)
         select_indices = broadcast(src=0, data_type=torch.int64, shape_length=1)
 
+    if model.is_draft_stage:
+        retrieve_hidden_state_new = hidden_state_new[:, retrieve_indices]
+        accept_hidden_state_new = retrieve_hidden_state_new[:, best_candidate, : accept_length]
+        token = gen_token(prob=sample_p, logits_processor=logits_processor)[None]
+        return input_ids, accept_hidden_state_new, token
+    
     # Update the past key values based on the selected tokens
     for past_key_values_data in past_key_values_data_list:
         tgt = past_key_values_data[..., select_indices.to(past_key_values_data.device), :]
@@ -514,14 +523,14 @@ def update_stage_inference_inputs(
     # Update the current length tensor (currently only support batch size is 1)
     current_length_data.fill_(prev_input_len + tgt.shape[-2])
 
-    if model.is_first_stage:
-        retrieve_hidden_state_new = hidden_state_new[:, retrieve_indices]
-        accept_hidden_state_new = retrieve_hidden_state_new[:, best_candidate, : accept_length]
-        token = gen_token(prob=sample_p, logits_processor=logits_processor)[None]
+    # if model.is_first_stage:
+    #     retrieve_hidden_state_new = hidden_state_new[:, retrieve_indices]
+    #     accept_hidden_state_new = retrieve_hidden_state_new[:, best_candidate, : accept_length]
+    #     token = gen_token(prob=sample_p, logits_processor=logits_processor)[None]
         # prob = sample_p
         # new_token += accept_length
         
-        return input_ids, accept_hidden_state_new, token#, new_token
+        # return input_ids, accept_hidden_state_new, token#, new_token
 
 
 # [ADD] for continuous speculation

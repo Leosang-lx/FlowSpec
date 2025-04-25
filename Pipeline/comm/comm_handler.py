@@ -241,15 +241,15 @@ class CommHandler:
         if self.rank == 0:
             # global broadcast
             dist.broadcast(lens_split.cpu(), src=self.rank)
-            if lens_split[self.world_size - 1]:
+            if lens_split[self.world_size - 2]:
                 dist.broadcast(tree_position_ids.cpu(), src=self.rank)
                 dist.broadcast(tree_mask.cpu(), src=self.rank)
         else:
-            lens_split = torch.zeros(self.world_size, dtype=torch.long)
+            lens_split = torch.zeros(self.world_size-1, dtype=torch.long)
             dist.broadcast(lens_split, src=0)
             draft_len = lens_split.sum()
             if appended:
-                if lens_split[self.world_size - 1]:
+                if lens_split[self.world_size - 2]:
                     appended_draft_len = lens_split[-1]
                     tree_position_ids = torch.zeros(appended_draft_len, dtype=torch.long)
                     tree_mask = torch.zeros(1, 1, appended_draft_len, draft_len, dtype=torch.float32)

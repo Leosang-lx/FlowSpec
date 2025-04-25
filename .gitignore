@@ -4,3 +4,4 @@ __pycache__/
 *_model.bin
 *.lprof
 test.py
+Pipeline/test.py
