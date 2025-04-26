@@ -285,12 +285,12 @@ class CommHandler:
 
         if self.rank != 0:
             lens_split = output[0]
-            if lens_split[self.world_size - 1] == 0:
+            if lens_split[self.world_size - 2] == 0:
                 return (lens_split,)
             else:
                 lens_split, tree_position_ids, tree_mask = output
 
-        if lens_split[self.world_size - 1]:
+        if lens_split[self.world_size - 2]:
             if self.rank == 0:
                 # for last stage
                 ri_shape = torch.tensor(retrieve_indices.shape, dtype=torch.long)

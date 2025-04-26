@@ -209,9 +209,7 @@ class StageEaConfig(PretrainedConfig):
         self.init_method = None
         self.backend = None
         self.device = None
-        
-        # self.last_rank = None
-        # self.next_rank = None
+
 
     def _rope_scaling_validation(self):
         """
