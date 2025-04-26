@@ -20,6 +20,7 @@ from transformers.generation.logits_process import (
 )
 from tools.communicator import *
 from typing import Tuple
+from contextlib import nullcontext
 TOPK = 10  # topk for sparse tree
 
 def calculate_model_size_with_buffers(model):
@@ -308,6 +309,7 @@ def stage_tree_decoding(
         tree_pos_ids=None,
         tree_mask=None,
         input_ids=None,
+        prof=None
 ):
     """
     pipelined tree decoding for verification
@@ -324,7 +326,7 @@ def stage_tree_decoding(
     config = stage_model.config
     device = stage_model.stage_base_model.device
     comm = stage_model.comm
-    
+    profiler = prof
     if config.is_draft_stage:
         tree_pos_ids = tree_pos_ids + input_ids.size(-1)  # add the input length to the tree position ids
         broadcast_tree_info_global_task = comm.executor.submit(
@@ -375,18 +377,20 @@ def stage_tree_decoding(
 
         if config.is_first_stage:
             subseq_ids = comm.recvfrom(src_rank=config.last_rank, device=device)
-            outputs, sub_hidden_state = stage_model(
-                input_ids=subseq_ids,
-                past_key_values=stage_past_key_values,
-                position_ids=subseq_pos_ids,
-            )
+            with profiler.time_context(f"Stage {config.stage}: forward", cpu=False) if profiler is not None else nullcontext():
+                outputs, sub_hidden_state = stage_model(
+                    input_ids=subseq_ids,
+                    past_key_values=stage_past_key_values,
+                    position_ids=subseq_pos_ids,
+                )
         else:
             last_hidden_state = comm.recvfrom(config.last_rank, device=device)
-            outputs, sub_hidden_state = stage_model(
-                inputs_embeds=last_hidden_state,
-                past_key_values=stage_past_key_values,
-                position_ids=subseq_pos_ids,
-            )
+            with profiler.time_context(f"Stage {config.stage}: forward", cpu=False) if profiler is not None else nullcontext():
+                outputs, sub_hidden_state = stage_model(
+                    inputs_embeds=last_hidden_state,
+                    past_key_values=stage_past_key_values,
+                    position_ids=subseq_pos_ids,
+                )
 
         comm.sendto(sub_hidden_state.cpu(), config.next_rank)
     # [step2] end

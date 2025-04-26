@@ -415,30 +415,11 @@ class StageEaModel(nn.Module):
                 self.total_stage - 1
             )
             tree_decoding_params = (
-                self, None, seqs_split, lens_split, tree_position_ids, tree_mask, input_ids
+                self, None, seqs_split, lens_split, tree_position_ids, tree_mask, input_ids, prof
             )
         else:
             past_key_values, past_key_values_data, current_length_data = kv_cache
-            tree_decoding_params = (self, past_key_values)
-        
-        # if self.is_first_stage:
-        #     input_ids_ea = torch.cat((input_ids, token.to(input_ids.device)), dim=1)
-        #     draft_tokens, retrieve_indices, tree_mask, tree_position_ids = self.ea_layer.topK_genrate(
-        #         hidden_state,
-        #         input_ids_ea,
-        #         self.stage_base_model.lm_head,
-        #         logits_processor
-        #     )
-        #     seqs_split, lens_split = split_sequence_close_equal_len(
-        #         draft_tokens,
-        #         self.total_stage
-        #     )
-        #     tree_decoding_params = (
-        #         self, past_key_values, seqs_split, lens_split, tree_position_ids, tree_mask, input_ids
-        #     )
-
-        # else:
-        #     tree_decoding_params = (self, past_key_values)
+            tree_decoding_params = (self, past_key_values, None, None, None, None, None, prof)
 
         outputs = stage_tree_decoding(*tree_decoding_params)
 
@@ -454,19 +435,6 @@ class StageEaModel(nn.Module):
                 logits, candidates, logits_processor
             )
             accept_length += 1
-            
-        # if self.is_first_stage:
-        #     logits, hidden_state = outputs
-        #     logits = logits[0, retrieve_indices]
-
-        #     padding = (torch.zeros(1, 1, dtype=torch.long) - 1).to(self.stage_base_model.device)
-        #     draft_tokens = torch.cat((draft_tokens, padding), dim=1)
-
-        #     candidates = draft_tokens[0, retrieve_indices]
-        #     best_candidate, accept_length, sample_p = evaluate_posterior(
-        #         logits, candidates, logits_processor
-        #     )
-        #     accept_length += 1
             
         # [update_inference_inputs]
         if self.is_draft_stage:
