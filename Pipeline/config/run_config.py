@@ -25,12 +25,12 @@ class Config:
 
     # draft config
     total_token: int = 100
-    subseq_token: int = 25
+    subseq_token: int = 10000
     depth: int = 7
     # expand draft config
     expand_total_token: int = 64
     expand_subseq_token: int = subseq_token
-    expand_depth: int = 4
+    expand_depth: int = 3
     expand_threshold: int = 8
     
     # pipeline config

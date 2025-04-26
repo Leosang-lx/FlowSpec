@@ -53,7 +53,7 @@ class CommHandler:
             init_method=init_method,
             rank=self.rank,
             world_size=self.world_size,
-            timeout=timedelta(seconds=30)
+            timeout=timedelta(seconds=60)
         )
         print(f'Rank {self.rank} initialized')
 
@@ -209,27 +209,27 @@ class CommHandler:
             print(f"Broadcast recv error in rank {self.rank}: {e}")
             raise e
 
-    def broadcast_tree_global(self, lens_split, tree_pos_ids, tree_mask):
-        try:
-            dist.broadcast(lens_split, src=self.rank)
-            dist.broadcast(tree_pos_ids, src=self.rank)
-            dist.broadcast(tree_mask, src=self.rank)
-        except Exception as e:
-            print(f"Broadcast tree global error in rank {self.rank}: {e}")
-            raise e
+    # def broadcast_tree_global(self, lens_split, tree_pos_ids, tree_mask):
+    #     try:
+    #         dist.broadcast(lens_split, src=self.rank)
+    #         dist.broadcast(tree_pos_ids, src=self.rank)
+    #         dist.broadcast(tree_mask, src=self.rank)
+    #     except Exception as e:
+    #         print(f"Broadcast tree global error in rank {self.rank}: {e}")
+    #         raise e
 
-    def broadcast_tree_info_async(self, lens_split, tree_pos_ids, tree_mask, draft_tokens, retrieve_indices, subseq_ri_cum_depths, appended=False):
-        return self.executor.submit(self.broadcast_tree_info, lens_split, tree_pos_ids, tree_mask, draft_tokens, retrieve_indices, subseq_ri_cum_depths, appended)
+    # def broadcast_tree_info_async(self, lens_split, tree_pos_ids, tree_mask, draft_tokens, retrieve_indices, subseq_ri_cum_depths, appended=False):
+    #     return self.executor.submit(self.broadcast_tree_info, lens_split, tree_pos_ids, tree_mask, draft_tokens, retrieve_indices, subseq_ri_cum_depths, appended)
 
-    def broadcast_tree_global_recv(self, src_rank):
-        lens_split = torch.zeros(self.world_size, dtype=torch.long)
-        dist.broadcast(lens_split, src=src_rank)
-        draft_len = torch.sum(lens_split).item()
-        tree_pos_ids = torch.zeros(draft_len, dtype=torch.long)
-        dist.broadcast(tree_pos_ids, src=src_rank)
-        tree_mask = torch.zeros(1, 1, draft_len, draft_len, dtype=torch.float32)
-        dist.broadcast(tree_mask, src=src_rank)
-        return lens_split, tree_pos_ids, tree_mask
+    # def broadcast_tree_global_recv(self, src_rank):
+    #     lens_split = torch.zeros(self.world_size, dtype=torch.long)
+    #     dist.broadcast(lens_split, src=src_rank)
+    #     draft_len = torch.sum(lens_split).item()
+    #     tree_pos_ids = torch.zeros(draft_len, dtype=torch.long)
+    #     dist.broadcast(tree_pos_ids, src=src_rank)
+    #     tree_mask = torch.zeros(1, 1, draft_len, draft_len, dtype=torch.float32)
+    #     dist.broadcast(tree_mask, src=src_rank)
+    #     return lens_split, tree_pos_ids, tree_mask
 
     def broadcast_tree_info_global(
         self,
@@ -264,6 +264,39 @@ class CommHandler:
                 dist.broadcast(tree_position_ids, src=0)
                 dist.broadcast(tree_mask, src=0)
                 return lens_split, tree_position_ids, tree_mask
+
+    def sync_expand_info(self, draft_tokens=None, retrieve_indices=None, subseq_ri_cum_depths=None):
+        if self.rank == 0:
+            if draft_tokens is None:  # do not expand this turn
+                dist.send(torch.zeros(1, dtype=torch.long), dst=self.world_size - 1)
+            else:
+                draft_len = torch.tensor(draft_tokens.shape[-1], dtype=torch.long)
+                dist.send(draft_len, dst=self.world_size - 1)
+                dist.send(draft_tokens.cpu(), dst=self.world_size - 1)
+                ri_shape = torch.tensor(retrieve_indices.shape, dtype=torch.long)
+                dist.send(ri_shape.cpu(), dst=self.world_size - 1)
+                dist.send(retrieve_indices.cpu(), dst=self.world_size - 1)
+                dist.send(subseq_ri_cum_depths.cpu(), dst=self.world_size - 1)
+        else:
+            if self.rank == self.world_size - 1:
+                draft_len = torch.zeros(1, dtype=torch.long)
+                dist.recv(draft_len, src=0)
+                draft_len = draft_len.item()
+                if draft_len == 0:
+                    return None
+                else:
+                    draft_tokens = torch.zeros(1, draft_len, dtype=torch.long)
+                    dist.recv(draft_tokens, src=0)
+                    ri_shape = torch.zeros(2, dtype=torch.long)
+                    dist.recv(ri_shape, src=0)
+                    retrieve_indices = torch.zeros(*ri_shape, dtype=torch.long)
+                    dist.recv(retrieve_indices, src=0)
+                    subseq_ri_cum_depths = torch.zeros(self.world_size, ri_shape[0], dtype=torch.long)
+                    dist.recv(subseq_ri_cum_depths, src=0)
+                    return draft_tokens, retrieve_indices, subseq_ri_cum_depths
+            else:
+                raise NotImplementedError(f"Rank {self.rank} cannot call sync_expand_info()")
+
 
     def broadcast_tree_info(
         self,
