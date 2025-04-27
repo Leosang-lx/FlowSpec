@@ -837,8 +837,6 @@ class StageEaModel(nn.Module):
                         if truncate:
                             if not config.is_last_stage:
                                 sub_hidden_state = None
-                            # else:
-                            #     sub_hidden_state = sub_hidden_state
                             lens_split = tree_mask = tree_position_ids = None 
                         else:
                             left_indices = left_indices[left_indices < lens_split.sum()]
@@ -897,19 +895,18 @@ class StageEaModel(nn.Module):
                 if sub_hidden_state.size(-2):
                     comm.sendto(sub_hidden_state.cpu(), config.next_rank)
                 if not config.is_first_stage:
-                    
                     hs_len = lens_split[config.total_stage - config.stage - 1]
             
             # prepare appended input for first stage forward
             if config.is_draft_stage:  # 剪完枝了
                 # [update] send waiting_draft first
-                appended_draft_len = min(waiting_draft, run_config.subseq_token) # 如果subseq_token 无限大，回取完waiting_draft
+                appended_draft_len = min(waiting_draft, run_config.subseq_token) # 如果subseq_token 无限大，会取完waiting_draft
                 
+                existing_draft_len = torch.sum(lens_split)  # 这个时候len_split少了一个
                 lens_split = torch.cat((lens_split, torch.tensor([appended_draft_len], dtype=torch.long)), dim=-1)
                     
                 waiting_draft -= appended_draft_len
                 if appended_draft_len > 0:
-                    existing_draft_len = torch.sum(lens_split[:-1])  # 这个时候len_split少了一个
                     input_draft_end_idx = existing_draft_len + appended_draft_len
 
                     # lens_split = torch.cat((lens_split, torch.tensor([appended_draft_len], dtype=torch.long)), dim=-1)
@@ -941,8 +938,8 @@ class StageEaModel(nn.Module):
                         lens_split=lens_split,
                         appended=True
                     )
-                    empty_draft = torch.tensor([[-1]], dtype=torch.long, device=device)
-                    comm.sendto(empty_draft, config.next_rank)
+                    # empty_draft = torch.tensor([[-1]], dtype=torch.long, device=device)
+                    # comm.sendto(empty_draft, config.next_rank)
                     cur_subseq_ri_cum_depth = subseq_ri_cum_depths[-1].clone()
 
                 subseq_ri_cum_depths = torch.cat((subseq_ri_cum_depths, cur_subseq_ri_cum_depth.unsqueeze(0)), dim=0)
@@ -1033,50 +1030,48 @@ class StageEaModel(nn.Module):
 
             # following stages: send, recv and forward
             else:
-                # get tree_mask and tree_position_ids
-                if config.is_last_stage:
-                    broadcast_pruning_info_task.result()
-
-                broadcast_tree_info_task = comm.executor.submit(comm.broadcast_tree_info_global, appended=True)
-                subseq_idx = config.total_stage - config.stage - 1
 
                 # [update] first stage recv input for forward first
                 if config.is_first_stage:  # recv input for first stage forward
-                    appended_draft_tokens = comm.recvfrom(config.last_rank, device=device)
-                    appended_draft_len = appended_draft_tokens.size(-1)
+                    appended_info = comm.broadcast_tree_info_global(appended=True)
+                    # appended_info = broadcast_tree_info_task.result()
+                    lens_split = appended_info[0]
+                    appended_draft_len = lens_split[-1]
                     
-                    if appended_draft_len == 1 and appended_draft_tokens.item() == -1:
-                        lens_split = broadcast_tree_info_task.result()[0]
-                    else:
-                        lens_split, appended_tree_position_ids, appended_tree_mask = broadcast_tree_info_task.result()
-                        tree_position_ids = torch.cat((tree_position_ids, appended_tree_position_ids.to(device)), dim=0)
-                        tree_mask_pad = F.pad(tree_mask, (0, appended_draft_len), value=0)                        
-                        tree_mask = torch.cat((tree_mask_pad, appended_tree_mask.to(device)), dim=-2)                            
+                    if appended_draft_len:
+                        _, appended_tree_position_ids, appended_tree_mask = appended_info
+                        self.stage_base_model.model.tree_mask = appended_tree_mask
+                        appended_draft_tokens = comm.recvfrom(config.last_rank, device=device)
 
-                cum_lens = torch.cumsum(lens_split, dim=0)
-
-                # get tree_mask and tree_position_ids
-                if config.is_last_stage:
-                    tree_pos_ids = tree_position_ids[:cum_lens[subseq_idx]]
-                    tree_mask_split = tree_mask[..., :cum_lens[0], :cum_lens[0]].contiguous()
-                else:
-                    tree_pos_ids = tree_position_ids[cum_lens[subseq_idx-1] : cum_lens[subseq_idx]]
-                    tree_mask_split = tree_mask[..., cum_lens[subseq_idx-1]:cum_lens[subseq_idx], :cum_lens[subseq_idx]].contiguous()
-
-                self.stage_base_model.model.tree_mask = tree_mask_split
-
-                # forward
-                if config.is_first_stage:
-                    if lens_split[-1] > 0:
+                        # first stage forward
                         with prof.time_context(f"Stage {config.stage}: forward", cpu=False) if prof is not None else nullcontext():
                             outputs, sub_hidden_state = self(
                                 input_ids=appended_draft_tokens,
                                 past_key_values=past_key_values,
                                 position_ids=appended_tree_position_ids
                             )
+                        tree_position_ids = torch.cat((tree_position_ids, appended_tree_position_ids.to(device)), dim=0)
+                        tree_mask_pad = F.pad(tree_mask, (0, appended_draft_len), value=0)                        
+                        tree_mask = torch.cat((tree_mask_pad, appended_tree_mask.to(device)), dim=-2)
                     else:
                         sub_hidden_state = torch.zeros(1, 0, config.hidden_size, dtype=torch.float16)
-                else:  # middle stages
+                    
+                else:
+                    if config.is_last_stage:
+                        broadcast_pruning_info_task.result()
+                    broadcast_tree_info_task = comm.executor.submit(comm.broadcast_tree_info_global, appended=True)
+
+                    subseq_idx = config.total_stage - config.stage - 1
+                    cum_lens = torch.cumsum(lens_split, dim=0)
+                    # get tree_mask and tree_position_ids
+                    if config.is_last_stage:
+                        tree_pos_ids = tree_position_ids[:cum_lens[subseq_idx]]
+                        tree_mask_split = tree_mask[..., :cum_lens[0], :cum_lens[0]].contiguous()
+                    else:
+                        tree_pos_ids = tree_position_ids[cum_lens[subseq_idx-1] : cum_lens[subseq_idx]]
+                        tree_mask_split = tree_mask[..., cum_lens[subseq_idx-1]:cum_lens[subseq_idx], :cum_lens[subseq_idx]].contiguous()
+
+                    self.stage_base_model.model.tree_mask = tree_mask_split
 
                     # other stages sync recv and forward
                     if hs_len > 0:
@@ -1093,13 +1088,13 @@ class StageEaModel(nn.Module):
                         sub_hidden_state = torch.zeros(1, 0, config.hidden_size, dtype=torch.float16)
 
                     # recv global expand_info
-                    # if not config.is_last_stage:
-                    expand_info = broadcast_tree_info_task.result()
-                    lens_split = expand_info[0]
+                    appended_info = broadcast_tree_info_task.result()
+                    lens_split = appended_info[0]
+                    appended_draft_len = lens_split[-1]
                     # print(f'Stage {config.stage} {i}th turn lens_split: {lens_split} after recv appending')
-                    if lens_split[-1]:
+                    if appended_draft_len:
                         # if not config.is_last_stage:
-                        lens_split, appended_tree_position_ids, appended_tree_mask = expand_info
+                        _, appended_tree_position_ids, appended_tree_mask = appended_info
 
                         # print(f'===Append tree===')
                         # print(f'-- draft_tokens: {draft_tokens}')
@@ -1112,12 +1107,14 @@ class StageEaModel(nn.Module):
                         tree_mask = torch.cat((tree_mask_pad, appended_tree_mask.to(tree_mask.device)), dim=-2)
                         
                     if config.is_last_stage:
+                        # [update] 每次都传，即使是空
                         # waiting_draft = (draft_tokens.size(-1) - torch.sum(lens_split)).item()
                         # if waiting_draft < run_config.subseq_token:
                         sync_expand_task = comm.sync_expand_info()
             
         if self.is_draft_stage:
-            turns = i + config.total_stage
+            # [update] draft stage不计入
+            turns = i + config.total_stage - 1
             hidden_state = torch.cat(accept_hidden_states, dim=-2)
             # return input_ids, hidden_state, token, new_token, accept_length_this_round, turns    
             return input_ids, hidden_state, token, accept_length_this_round, turns    
