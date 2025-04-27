@@ -25,7 +25,7 @@ class Config:
 
     # draft config
     total_token: int = 100
-    subseq_token: int = 10000
+    subseq_token: int = 32
     depth: int = 7
     # expand draft config
     expand_total_token: int = 64

@@ -764,9 +764,7 @@ class StageEaModel(nn.Module):
                             sub_draft_tokens = draft_tokens[:, :lens_split[0]]
                             sub_draft_tokens = F.pad(sub_draft_tokens, (0, 1), value=-1)
                             sub_retrieve_indices = get_subtree_retrieve_indices(retrieve_indices, subseq_ri_cum_depths[0])
-                            sub_retrieve_indices = get_subtree_retrieve_indices(retrieve_indices, subseq_ri_cum_depths[0])
                             subseq_ri_cum_depths = subseq_ri_cum_depths[1:]  # remove the first subseq
-
                             subtree_logits = subseq_logits[0, sub_retrieve_indices]
                             candidates = sub_draft_tokens[0, sub_retrieve_indices]
                         
@@ -914,13 +912,13 @@ class StageEaModel(nn.Module):
             # prepare appended input for first stage forward
             if config.is_draft_stage:  # 剪完枝了
                 # [update] send waiting_draft first
-                appended_draft_len = min(waiting_draft, run_config.subseq_token)
+                appended_draft_len = min(waiting_draft, run_config.subseq_token) # 如果subseq_token 无限大，回取完waiting_draft
                 
                 lens_split = torch.cat((lens_split, torch.tensor([appended_draft_len], dtype=torch.long)), dim=-1)
                     
                 waiting_draft -= appended_draft_len
                 if appended_draft_len > 0:
-                    existing_draft_len = torch.sum(lens_split)  # 这个时候len_split少了一个
+                    existing_draft_len = torch.sum(lens_split[:-1])  # 这个时候len_split少了一个
                     input_draft_end_idx = existing_draft_len + appended_draft_len
 
                     # lens_split = torch.cat((lens_split, torch.tensor([appended_draft_len], dtype=torch.long)), dim=-1)
@@ -934,7 +932,7 @@ class StageEaModel(nn.Module):
                         tree_mask=appended_tree_mask,
                         appended=True
                     )
-                    comm.sendto(draft_tokens[:, :appended_draft_len], config.next_rank)
+                    comm.sendto(draft_tokens[:, existing_draft_len:input_draft_end_idx], config.next_rank)
 
                     # 计算最新输入subseq的subseq_ri_cum_depths
                     cur_subseq_ri_cum_depth = subseq_ri_cum_depths[-1].clone()
@@ -1013,7 +1011,7 @@ class StageEaModel(nn.Module):
                         
                         assert draft_tokens.size(-1) == tree_position_ids.size(0), f'draft_tokens != tree_pos_ids: {draft_tokens.size(-1)} and {tree_position_ids.size(0)}'
 
-                    waiting_draft = lens_split[-1].item()
+                    waiting_draft = lens_split[-1].item() + waiting_draft
                     lens_split = lens_split[:-1]
                     # lens_split[-1] = appended_draft_len
                 
@@ -1021,10 +1019,12 @@ class StageEaModel(nn.Module):
                     sync_expand_task.result()
                     sync_expand_task = None
 
-                if expand_condition:
-                    sync_expand_task = comm.sync_expand_info(draft_tokens, retrieve_indices, subseq_ri_cum_depths)
-                else:
-                    sync_expand_task = comm.sync_expand_info()
+                # if expand_condition:
+                #     sync_expand_task = comm.sync_expand_info(draft_tokens, retrieve_indices, subseq_ri_cum_depths)
+                # else:
+                #     sync_expand_task = comm.sync_expand_info()
+                
+                sync_expand_task = comm.sync_expand_info(draft_tokens, retrieve_indices, subseq_ri_cum_depths)
                     
                 broadcast_appended_tree_info_task.result()
 
@@ -1114,9 +1114,9 @@ class StageEaModel(nn.Module):
                         tree_mask = torch.cat((tree_mask_pad, appended_tree_mask.to(tree_mask.device)), dim=-2)
                         
                     if config.is_last_stage:
-                        waiting_draft = (draft_tokens.size(-1) - torch.sum(lens_split)).item()
-                        if waiting_draft < run_config.subseq_token:
-                            sync_expand_task = comm.sync_expand_info()
+                        # waiting_draft = (draft_tokens.size(-1) - torch.sum(lens_split)).item()
+                        # if waiting_draft < run_config.subseq_token:
+                        sync_expand_task = comm.sync_expand_info()
             
         if self.is_draft_stage:
             turns = i + config.total_stage
