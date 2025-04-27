@@ -697,6 +697,7 @@ class StageEaModel(nn.Module):
 
         if config.is_draft_stage:
             input_ids_ea = torch.cat((input_ids, token.to(input_ids.device)), dim=1)
+
             draft_tokens, retrieve_indices, tree_mask, tree_position_ids = self.ea_layer.topK_genrate(
                     hidden_state,
                     input_ids_ea,
@@ -780,7 +781,7 @@ class StageEaModel(nn.Module):
                             print(f'- {i}th turn, accept_len/local_depth: {accept_length}/{cur_draft_depth}')
                         
                         # [local pruning]
-                        with prof.time_context(f"Stage {config.stage}: last_stage_pruning", cpu=False) if prof is not None else nullcontext():
+                        with prof.time_context(f"Stage {config.stage}: last-stage pruning", cpu=False) if prof is not None else nullcontext():
                             output = pruning(draft_tokens, retrieve_indices, best_candidate, accept_length, token, subseq_ri_cum_depths)
                         if not isinstance(output, tuple):  # start new speculation round
                             left_indices = output
@@ -816,13 +817,9 @@ class StageEaModel(nn.Module):
                         left_indices = pruning_info[2:]
                         
                         truncate = new_sampled_token != -1
-                        # if truncate:
-                        #     sub_hidden_state = lens_split = tree_mask = tree_position_ids = None
-                        #     # [update] draft stage use new token to generate tree
-                        #     if config.is_draft_stage:
-                        #         token = torch.tensor([[new_sampled_token]], dtype=torch.long, device=input_ids.device)
 
                     if config.is_draft_stage:
+                        accept_length_this_round += accept_length
                         if truncate:
                             sub_hidden_state = lens_split = tree_mask = tree_position_ids = None
                             # [update] draft stage use new token to generate tree
@@ -834,12 +831,14 @@ class StageEaModel(nn.Module):
                                         left_indices, accept_length, draft_tokens, tree_mask, tree_position_ids, retrieve_indices, subseq_ri_cum_depths, lens_split
                                 )
                             input_ids = torch.cat((input_ids, accepted_tokens), dim=-1)
-                            accept_length_this_round += accept_length
                             waiting_draft = (draft_tokens.size(-1) - torch.sum(lens_split)).item()
                     
                     else:  # other stages
                         if truncate:
-                            sub_hidden_state = None if not config.is_last_stage else sub_hidden_state
+                            if not config.is_last_stage:
+                                sub_hidden_state = None
+                            # else:
+                            #     sub_hidden_state = sub_hidden_state
                             lens_split = tree_mask = tree_position_ids = None 
                         else:
                             left_indices = left_indices[left_indices < lens_split.sum()]
@@ -870,14 +869,6 @@ class StageEaModel(nn.Module):
                             accept_hidden_states.append(last_hidden_state)
                             accepted_tokens = draft_tokens[:, left_indices]
                             input_ids = torch.cat((input_ids, accepted_tokens), dim=-1)
-                        # if config.is_first_stage:
-                        #     i -= 1  # truncate这一轮循环没有实际计算
-                        #     last_hidden_state = comm.recvfrom(config.last_rank, device=device)
-                        #     # print(f'Stage {config.stage} {i}th turn recvfrom {config.last_rank} last_hidden_state: {last_hidden_state.shape}')
-                        #     accept_hidden_states.append(last_hidden_state)
-
-                        #     accepted_tokens = draft_tokens[:, left_indices]
-                        #     input_ids = torch.cat((input_ids, accepted_tokens), dim=-1)
                         break
 
             else:
@@ -978,7 +969,15 @@ class StageEaModel(nn.Module):
                         accepted_hidden_state = torch.cat(accept_hidden_states, dim=-2)
                         accept_hidden_states = []
 
-                        # print(f'stage{config.stage} {i}th input_ids_ea: {input_ids_ea.shape}, accepted_hidden_state: {accepted_hidden_state.shape}')
+                        # print(f'Stage {config.stage} {i}th input_ids_ea: {input_ids_ea.shape}, accepted_hidden_state: {accepted_hidden_state.shape}')
+                        # try:
+                        #     kv_len = self.ea_layer.stable_kv[0][0].shape[2]
+                        #     input_ids_ea_inside = input_ids_ea[:, kv_len:]
+                        #     assert input_ids_ea_inside.size(1) == accepted_hidden_state.size(1)
+                        # except Exception as e:
+                        #     print('=======Error=========')
+                        #     print(f'Last Stage: init topK_genrate kv_len: {kv_len}, input_ids_ea: {input_ids_ea.shape}, input_ids_ea_inside: {input_ids_ea_inside.shape}, hidden_state: {hidden_state.shape}')
+                        #     raise e
 
                         with prof.profile_context(f"Stage {config.stage}: topK_genrate", device=f"cuda:{device}") if prof is not None else nullcontext():
                             draft_tokens2, retrieve_indices2, tree_mask2, tree_position_ids2 = self.ea_layer.topK_genrate(
@@ -1027,6 +1026,10 @@ class StageEaModel(nn.Module):
                 sync_expand_task = comm.sync_expand_info(draft_tokens, retrieve_indices, subseq_ri_cum_depths)
                     
                 broadcast_appended_tree_info_task.result()
+                # [update] 之前没加：如果不需要生长则晚点recv，实际上可以和上面的合并
+                if not received and hs_len > 0:
+                    last_hidden_state = comm.recvfrom(config.last_rank, device=device)
+                    accept_hidden_states.append(last_hidden_state)
 
             # following stages: send, recv and forward
             else:
@@ -1097,11 +1100,6 @@ class StageEaModel(nn.Module):
                     if lens_split[-1]:
                         # if not config.is_last_stage:
                         lens_split, appended_tree_position_ids, appended_tree_mask = expand_info
-                        # else:
-                            # lens_split, appended_tree_position_ids, appended_tree_mask, appended_draft_tokens, retrieve_indices, subseq_ri_cum_depths = expand_info
-                            # draft_tokens = torch.cat((draft_tokens, appended_draft_tokens), dim=-1)
-
-                            # lens_split, appended_tree_position_ids, appended_tree_mask, draft_tokens, retrieve_indices, subseq_ri_cum_depths = expand_info
 
                         # print(f'===Append tree===')
                         # print(f'-- draft_tokens: {draft_tokens}')

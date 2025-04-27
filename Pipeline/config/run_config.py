@@ -7,7 +7,7 @@ class Config:
     mode = "eval" # "eval" or "demo"
     warmup = True
     warmup_repeat = 5
-    test_repeat = 10
+    test_repeat = 30
     
     # model config
     base_model_dir: str = f'/home/liux/big_file/pipeline_model/meta-llama/Llama-2-7b-chat-hf/new_stage_model_series_0+8+8+8+8_fp16'
@@ -19,8 +19,8 @@ class Config:
     
     # run config
     your_message: str = "Hello"
-    log: bool = False
-    temperature: float = 0.0
+    log: bool = True
+    temperature: float = 0.5
     max_new_tokens: int = 512
 
     # draft config

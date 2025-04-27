@@ -81,7 +81,7 @@ def main(args):
             input_ids=input_ids if rank == 1 else None,
             temperature=run_config.temperature,
             max_new_tokens=run_config.max_new_tokens,
-            log=log if rank == 1 else False,
+            log=log if rank == 0 else False,
             pipeline_type=run_config.pipeline_type,
             profiler=profiler,
         )
