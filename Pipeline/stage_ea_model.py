@@ -319,15 +319,14 @@ class StageEaModel(nn.Module):
             # Avoid modifying the input_ids in-place
             input_ids = input_ids.clone()
             input_len = input_ids.shape[1]
-            # new_token = 0
 
             # [prefill]
             # with profiler.profile_context(f"Stage {config.stage}: pipeline_prefill", device=f"cuda:{device}") if profiler is not None else nullcontext():
             pipeline_prefill(self, input_ids, past_key_values)
-            # token = gen_token(logits=orig[:, -1], logits_processor=logits_processor)
         else:
             pipeline_prefill(self, stage_past_key_values=past_key_values)
-            
+        print(f'Stage {config.stage} pipeline_forward done')
+        dist.barrier()
         should_stop = torch.tensor(0, dtype=torch.int32)
 
         turns_cnt = 0
@@ -711,8 +710,9 @@ class StageEaModel(nn.Module):
             tree_position_ids = tree_position_ids + input_ids.size(-1)
             
             draft_tokens_split, lens_split, subseq_ri_cum_depths = token_tree_partition(
-                draft_tokens, retrieve_indices, config.n_split
+                draft_tokens, retrieve_indices, config.n_split, run_config.subseq_token
             )
+            print(f'Stage {config.stage} lens_split: {lens_split}')
             # 仍保留先分成四段
             fill_pipeline_stages(
                 self,
@@ -723,6 +723,8 @@ class StageEaModel(nn.Module):
                 tree_pos_ids=tree_position_ids,
                 subseq_ri_cum_depths=subseq_ri_cum_depths
             )
+            print(f'Stage {config.stage} fill_pipeline_stages done')
+            dist.barrier()
             waiting_draft = 0
             accept_hidden_states = []
             global_accept_len = input_ids.size(-1)
@@ -733,12 +735,14 @@ class StageEaModel(nn.Module):
 
             outputs = fill_pipeline_stages(self, past_key_values)
 
+            dist.barrier()
+            print(f'Stage {config.stage} fill_pipeline_stages done')
+
             if config.is_last_stage:
                 sub_hidden_state, lens_split, draft_tokens, retrieve_indices, tree_mask, tree_position_ids, subseq_ri_cum_depths = outputs
             else:  # middle stages
                 sub_hidden_state, lens_split, tree_mask, tree_position_ids = outputs
         # 测试prefill 和 fill_pipeline_stages完成
-        dist.barrier()
         # raise NotImplementedError('pipeline_stages is not implemented')
 
         i = -1

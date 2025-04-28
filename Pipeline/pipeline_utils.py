@@ -201,7 +201,6 @@ def pipeline_prefill(
     if config.is_first_stage:
         comm.sendto(input_ids, dst_rank=0)
         
-    dist.barrier()
     # [update]: draft stage recv base_hidden_state when prefilling
     if config.is_draft_stage:  # assume 4 subseqs
         input_ids = comm.recvfrom(src_rank=1, device=device)
@@ -537,9 +536,10 @@ def update_stage_inference_inputs(
 
 
 # [ADD] for continuous speculation
-def token_tree_partition(draft_tokens, retrieve_indices, total_stage):
+def token_tree_partition(draft_tokens, retrieve_indices, total_stage, subseq_len=None):
     """
     [Update] one more subseq as waiting_draft
+    至少分成total_stage组(4)，如果每段长度大于subseq_len，则取subseq_len，多余的作为多出的一段(5)
     split the token tree into multiple subtrees: initial partition to start pipelined tree decoding
     :param draft_tokens:
     :param retrieve_indices:
@@ -551,8 +551,16 @@ def token_tree_partition(draft_tokens, retrieve_indices, total_stage):
     # for example: dfs order (lexicographical order)
     # rows = [row.tolist() for row in retrieve_indices]
     # sorted_retrieve_indices = torch.tensor(sorted(rows))  # sort in lexicographical order
-
-    tokens_split, lens_split = split_sequence_close_equal_len(draft_tokens, total_stage)
+    if subseq_len is not None:
+        draft_len = draft_tokens.size(-1)
+        if draft_len // total_stage <= subseq_len:
+            tokens_split, lens_split = split_sequence_close_equal_len(draft_tokens, total_stage)
+        else:
+            lens_split = [subseq_len] * total_stage + [draft_len - subseq_len * total_stage]
+            tokens_split = draft_tokens.split(lens_split, dim=-1)
+            lens_split = torch.tensor(lens_split, dtype=torch.long)
+    else:
+        tokens_split, lens_split = split_sequence_close_equal_len(draft_tokens, total_stage)
     # tree_position_ids_split = tree_position_ids.split(lens_split)
 
     cum_seq_lens = torch.cumsum(lens_split, dim=-1)
@@ -574,94 +582,155 @@ def token_tree_partition(draft_tokens, retrieve_indices, total_stage):
 
 
 def fill_pipeline_stages(
-        stage_model,
-        stage_past_key_values=None,
-        input_ids=None,
-        lens_split=None,
-        draft_tokens=None,
-        retrieve_indices=None,
-        tree_mask=None,
-        tree_pos_ids=None,
-        subseq_ri_cum_depths=None,
+    stage_model,
+    stage_past_key_values=None,  # necessary for following stages
+    input_ids=None,
+    lens_split=None,
+    draft_tokens=None,
+    retrieve_indices=None,
+    tree_mask=None,
+    tree_pos_ids=None,
+    subseq_ri_cum_depths=None,
 ):
-    # print('============fill_pipeline_stages============')
     config = stage_model.config
     device = stage_model.stage_base_model.device
-    comm = stage_model.comm  # update
+    comm = stage_model.comm
+    print(f'Stage {config.stage} fill_pipeline_stages')
+    dist.barrier()
 
-    # [update] draft stage async broadcast tree_info
-    # 这里的广播其实是同步的？
-    if config.is_draft_stage:
-        broadcast_tree_info_task = comm.executor.submit(
-            comm.broadcast_tree_info,
-            lens_split,
-            tree_pos_ids,
-            tree_mask,
-            draft_tokens,
-            retrieve_indices,
-            subseq_ri_cum_depths,
-            appended=False
-        )
-        draft_tokens_split = draft_tokens.split(lens_split.tolist(), dim=-1)
-        for split_draft_tokens in draft_tokens_split:
-            comm.sendto(split_draft_tokens, dst_rank=config.next_rank)
-            
-        broadcast_tree_info_task.result()
-        # end for draft stage
+    # draft stage 0
+    if config.is_draft_stage:  # [IMPORTANT] lens_split = world_size = 5
+        cum_subseq_lens = torch.cumsum(lens_split, dim=-1)
+        for i, cum_seq_len in enumerate(cum_subseq_lens):  # send 5 times
+            start_ids = 0 if i == 0 else cum_subseq_lens[i-1]
+            draft_tokens_split = draft_tokens[..., start_ids:cum_seq_len]
+            tree_pos_ids_split = tree_pos_ids[..., start_ids:cum_seq_len]
+            tree_mask_split = tree_mask[..., start_ids:cum_seq_len, :cum_seq_len]
+            print(f'Stage {config.stage} {i}th send_appended')
+            # print(f'-- draft_tokens_split: {draft_tokens_split.shape}')
+            # print(f'-- tree_pos_ids_split: {tree_pos_ids_split.shape}')
+            # print(f'-- tree_mask_split: {tree_mask_split.shape}')
+            comm.send_appended(draft_tokens_split, tree_pos_ids_split, tree_mask_split.contiguous())
         return
-    else:
-        if not config.is_last_stage:
-            lens_split, tree_pos_ids, tree_mask = comm.broadcast_tree_info_global(appended=False)
-        else:
-            lens_split, tree_pos_ids, tree_mask, draft_tokens, retrieve_indices, subseq_ri_cum_depths = comm.broadcast_tree_info(appended=False)
-        tree_mask = tree_mask.to(device)
-        tree_pos_ids = tree_pos_ids.to(device)
-
-        cum_lens_split = torch.cumsum(lens_split, dim=-1)
-        tree_pos_ids_split = tree_pos_ids.split(lens_split.tolist(), dim=0)
     
-    # fill the pipeline stages
-    # stage1 doesn't need to recv anything
-    for i in range(config.total_stage - config.stage):
-        # print(config.stage, f'i={i}')
-        if i == 0:
-            # isend_mask.wait()
-            tree_mask_split = tree_mask[..., :cum_lens_split[i], :cum_lens_split[i]]
-        else:
-            tree_mask_split = tree_mask[..., cum_lens_split[i-1]:cum_lens_split[i], :cum_lens_split[i]]
-        
+    # following stages 1-4
+    for i in range(config.total_stage - config.stage - 1):
+        print(f'Stage {config.stage} recv_appended {i}')
+        appended_input, subseq_pos_ids, tree_mask = comm.recv_appended(device)
         # set the tree mask for the current stage
-        stage_model.stage_base_model.model.tree_mask = tree_mask_split.contiguous()
-        subseq_pos_ids = tree_pos_ids_split[i]
+        stage_model.stage_base_model.model.tree_mask = tree_mask
 
-        if config.is_first_stage:
-            subseq_ids = comm.recvfrom(src_rank=config.last_rank, device=device)
-            
+        if config.is_first_stage:            
             outputs, sub_hidden_state = stage_model(
-                input_ids=subseq_ids,
+                input_ids=appended_input,
                 past_key_values=stage_past_key_values,
                 position_ids=subseq_pos_ids,
             )
         else:
-            last_hidden_state = comm.recvfrom(config.last_rank, device=device)
             outputs, sub_hidden_state = stage_model(
-                inputs_embeds=last_hidden_state,
+                inputs_embeds=appended_input,
                 past_key_values=stage_past_key_values,
                 position_ids=subseq_pos_ids,
             )
-        # if i == 0:
-        #     if config.is_first_stage:
-        #         broadcast_tree_info_task.result()
 
-        if i < config.total_stage - config.stage - 1:  # not send for the last time
-            comm.sendto(sub_hidden_state.cpu(), config.next_rank)
+        if i < config.total_stage - config.stage:  # send for the last time
+            print(f'Stage {config.stage} {i}th send_appended')
+            # print(f'-- sub_hidden_state: {sub_hidden_state.shape}')
+            # print(f'-- subseq_pos_ids: {subseq_pos_ids.shape}')
+            # print(f'-- tree_mask: {tree_mask.shape}')
+            comm.send_appended(sub_hidden_state, subseq_pos_ids, tree_mask)
+            # comm.sendto(sub_hidden_state.cpu(), config.next_rank)
         
-    # if config.is_first_stage:
-    #     return sub_hidden_state
-    if config.is_last_stage:
-        return sub_hidden_state, lens_split, draft_tokens, retrieve_indices, tree_mask, tree_pos_ids, subseq_ri_cum_depths
-    # middle stages
-    return sub_hidden_state, lens_split, tree_mask, tree_pos_ids
+
+# def fill_pipeline_stages(
+#         stage_model,
+#         stage_past_key_values=None,
+#         input_ids=None,
+#         lens_split=None,
+#         draft_tokens=None,
+#         retrieve_indices=None,
+#         tree_mask=None,
+#         tree_pos_ids=None,
+#         subseq_ri_cum_depths=None,
+# ):
+#     # print('============fill_pipeline_stages============')
+#     config = stage_model.config
+#     device = stage_model.stage_base_model.device
+#     comm = stage_model.comm  # update
+
+#     # [update] draft stage async broadcast tree_info
+#     # 这里的广播其实是同步的？
+#     if config.is_draft_stage:
+#         broadcast_tree_info_task = comm.executor.submit(
+#             comm.broadcast_tree_info,
+#             lens_split,
+#             tree_pos_ids,
+#             tree_mask,
+#             draft_tokens,
+#             retrieve_indices,
+#             subseq_ri_cum_depths,
+#             appended=False
+#         )
+#         draft_tokens_split = draft_tokens.split(lens_split.tolist(), dim=-1)
+#         for split_draft_tokens in draft_tokens_split:
+#             comm.sendto(split_draft_tokens, dst_rank=config.next_rank)
+            
+#         broadcast_tree_info_task.result()
+#         # end for draft stage
+#         return
+#     else:
+#         if not config.is_last_stage:
+#             lens_split, tree_pos_ids, tree_mask = comm.broadcast_tree_info_global(appended=False)
+#         else:
+#             lens_split, tree_pos_ids, tree_mask, draft_tokens, retrieve_indices, subseq_ri_cum_depths = comm.broadcast_tree_info(appended=False)
+#         tree_mask = tree_mask.to(device)
+#         tree_pos_ids = tree_pos_ids.to(device)
+
+#         cum_lens_split = torch.cumsum(lens_split, dim=-1)
+#         tree_pos_ids_split = tree_pos_ids.split(lens_split.tolist(), dim=0)
+    
+#     # fill the pipeline stages
+#     # stage1 doesn't need to recv anything
+#     for i in range(config.total_stage - config.stage):
+#         # print(config.stage, f'i={i}')
+#         if i == 0:
+#             # isend_mask.wait()
+#             tree_mask_split = tree_mask[..., :cum_lens_split[i], :cum_lens_split[i]]
+#         else:
+#             tree_mask_split = tree_mask[..., cum_lens_split[i-1]:cum_lens_split[i], :cum_lens_split[i]]
+        
+#         # set the tree mask for the current stage
+#         stage_model.stage_base_model.model.tree_mask = tree_mask_split.contiguous()
+#         subseq_pos_ids = tree_pos_ids_split[i]
+
+#         if config.is_first_stage:
+#             subseq_ids = comm.recvfrom(src_rank=config.last_rank, device=device)
+            
+#             outputs, sub_hidden_state = stage_model(
+#                 input_ids=subseq_ids,
+#                 past_key_values=stage_past_key_values,
+#                 position_ids=subseq_pos_ids,
+#             )
+#         else:
+#             last_hidden_state = comm.recvfrom(config.last_rank, device=device)
+#             outputs, sub_hidden_state = stage_model(
+#                 inputs_embeds=last_hidden_state,
+#                 past_key_values=stage_past_key_values,
+#                 position_ids=subseq_pos_ids,
+#             )
+#         # if i == 0:
+#         #     if config.is_first_stage:
+#         #         broadcast_tree_info_task.result()
+
+#         if i < config.total_stage - config.stage - 1:  # not send for the last time
+#             comm.sendto(sub_hidden_state.cpu(), config.next_rank)
+        
+#     # if config.is_first_stage:
+#     #     return sub_hidden_state
+#     if config.is_last_stage:
+#         return sub_hidden_state, lens_split, draft_tokens, retrieve_indices, tree_mask, tree_pos_ids, subseq_ri_cum_depths
+#     # middle stages
+#     return sub_hidden_state, lens_split, tree_mask, tree_pos_ids
     
 
 # generated by Qwen2.5Max
@@ -863,7 +932,7 @@ def token_pruning(
         past_key_values_data_list,
         current_length_data,
         lens_split,
-        hidden_state,
+        last_hidden_state,
         tree_mask,
         tree_pos_ids,
         left_indices,
@@ -872,7 +941,8 @@ def token_pruning(
         stage
 ):
     """
-    prune the tokens related data: kv-cache, hidden_state, tree_mask
+    prune the tokens related data: kv-cache, last_hidden_state, tree_mask
+    [update] last_hidden_state is the output of last_rank
     """
     cur_kv_len = current_length_data[0].item()
     cache_device = past_key_values_data_list[0][0].device
@@ -881,6 +951,7 @@ def token_pruning(
     # ***这里的global_accept_len还是没有加上accept_len长度的
     left_indices_global = left_indices + global_accept_len
     left_indices_in_cache = (left_indices_global[left_indices_global < cur_kv_len])
+    left_indices_after_cache = left_indices_global[left_indices_in_cache.size(-1):]
     
     # copy and set cache length
     left_indices_in_cache_size = left_indices_in_cache.size(-1)
@@ -898,18 +969,19 @@ def token_pruning(
         cum_lens = torch.cumsum(lens_split, dim=0)
         lens_split = torch.tensor([torch.sum((left_indices >= cum_lens[i-1]) & (left_indices < cum_lens[i])) for i in range(1, cum_lens.size(-1))], dtype=torch.long)
 
-    # prune hidden_state
-    # the hidden_state here are the output of the current stage_model
-    if hidden_state is not None:
-        cur_hs_len = hidden_state.size(-2)
+    # prune last_hidden_state
+    # the last_hidden_state here are the output of the current stage_model
+    if last_hidden_state is not None:
+        cur_hs_len = last_hidden_state.size(-2)
 
-        hs_indices_start_idx = cur_kv_len - cur_hs_len  # [update]: idx should minus 1 additionally
-        left_indices_in_hs = left_indices_in_cache[(left_indices_in_cache >= hs_indices_start_idx) & (left_indices_in_cache < cur_kv_len)] - hs_indices_start_idx
-        left_indices_in_hs = left_indices_in_hs.to(hidden_state.device)
+        hs_indices_start_idx = cur_kv_len  # [update]: last_hidden_state is new to current stage
+        hs_indices_end_idx = cur_kv_len + cur_hs_len
+        left_indices_in_input = left_indices_after_cache[left_indices_after_cache < hs_indices_end_idx] - hs_indices_start_idx  # prune last_hidden_state, tree_mask, tree_pos_ids
+        # left_indices_in_hs = left_indices_in_hs.to(last_hidden_state.device)
 
-        if left_indices_in_hs.numel() > 0:
-            assert torch.max(left_indices_in_hs) < hidden_state.size(-2), f'stage{stage} left_indices_in_hs={left_indices_in_hs} is out of range'
-        hidden_state = hidden_state[..., left_indices_in_hs, :]  # todo: bug occurs when hidden_state is empty tensor
+        if left_indices_in_input.numel() > 0:
+            assert torch.max(left_indices_in_input) < last_hidden_state.size(-2), f'stage{stage} left_indices_in_input={left_indices_in_input} is out of range'
+        last_hidden_state = last_hidden_state[..., left_indices_in_input.to(last_hidden_state.device), :]  # todo: bug occurs when hidden_state is empty tensor
 
     # prune tree_mask
     if tree_mask is not None:
