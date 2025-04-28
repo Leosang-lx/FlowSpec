@@ -841,6 +841,23 @@ def draft_stage_pruning(
     # pruned-only
     return left_draft_tokens, tree_mask, tree_pos_ids, transformed_ri, accepted_tokens
 
+def last_hs_pruning(
+    hidden_state,
+    left_indices,
+    global_accept_len,
+    accept_len,
+):
+    if hidden_state is not None:
+        cur_hs_len = hidden_state.size(-2)
+
+        hs_indices_start_idx = cur_kv_len - cur_hs_len  # [update]: idx should minus 1 additionally
+        left_indices_in_hs = left_indices_in_cache[(left_indices_in_cache >= hs_indices_start_idx) & (left_indices_in_cache < cur_kv_len)] - hs_indices_start_idx
+        left_indices_in_hs = left_indices_in_hs.to(hidden_state.device)
+
+        if left_indices_in_hs.numel() > 0:
+            assert torch.max(left_indices_in_hs) < hidden_state.size(-2), f'stage{stage} left_indices_in_hs={left_indices_in_hs} is out of range'
+        hidden_state = hidden_state[..., left_indices_in_hs, :]  # todo: bug occurs when hidden_state is empty tensor    
+    
 
 def token_pruning(
         past_key_values_data_list,
