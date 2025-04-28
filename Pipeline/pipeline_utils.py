@@ -595,26 +595,24 @@ def fill_pipeline_stages(
     config = stage_model.config
     device = stage_model.stage_base_model.device
     comm = stage_model.comm
-    print(f'Stage {config.stage} fill_pipeline_stages')
+    # print(f'Stage {config.stage} fill_pipeline_stages')
     dist.barrier()
 
     # draft stage 0
     if config.is_draft_stage:  # [IMPORTANT] lens_split = world_size = 5
         cum_subseq_lens = torch.cumsum(lens_split, dim=-1)
+        print(f'Stage {config.stage} cum_subseq_lens: {cum_subseq_lens}')
         for i, cum_seq_len in enumerate(cum_subseq_lens):  # send 5 times
             start_ids = 0 if i == 0 else cum_subseq_lens[i-1]
             draft_tokens_split = draft_tokens[..., start_ids:cum_seq_len]
             tree_pos_ids_split = tree_pos_ids[..., start_ids:cum_seq_len]
             tree_mask_split = tree_mask[..., start_ids:cum_seq_len, :cum_seq_len]
-            print(f'Stage {config.stage} {i}th send_appended')
-            # print(f'-- draft_tokens_split: {draft_tokens_split.shape}')
-            # print(f'-- tree_pos_ids_split: {tree_pos_ids_split.shape}')
-            # print(f'-- tree_mask_split: {tree_mask_split.shape}')
+            
             comm.send_appended(draft_tokens_split, tree_pos_ids_split, tree_mask_split.contiguous())
         return
     
     # following stages 1-4
-    for i in range(config.total_stage - config.stage - 1):
+    for i in range(config.total_stage - config.stage):
         print(f'Stage {config.stage} recv_appended {i}')
         appended_input, subseq_pos_ids, tree_mask = comm.recv_appended(device)
         # set the tree mask for the current stage
@@ -633,14 +631,10 @@ def fill_pipeline_stages(
                 position_ids=subseq_pos_ids,
             )
 
-        if i < config.total_stage - config.stage:  # send for the last time
-            print(f'Stage {config.stage} {i}th send_appended')
-            # print(f'-- sub_hidden_state: {sub_hidden_state.shape}')
-            # print(f'-- subseq_pos_ids: {subseq_pos_ids.shape}')
-            # print(f'-- tree_mask: {tree_mask.shape}')
-            comm.send_appended(sub_hidden_state, subseq_pos_ids, tree_mask)
-            # comm.sendto(sub_hidden_state.cpu(), config.next_rank)
-        
+        if config.is_last_stage:
+            comm.sendto(sub_hidden_state, config.next_rank)
+        else:
+            comm.send_appended(sub_hidden_state, subseq_pos_ids, tree_mask)        
 
 # def fill_pipeline_stages(
 #         stage_model,
@@ -788,7 +782,7 @@ def map_retrieve_indices(retrieve_indices, a, b):
     return result.view(retrieve_indices.shape)
 
 
-def pruning(draft_tokens, retrieve_indices, best_candidate, accept_len, new_token, subseq_ri_cum_depths):
+def cal_pruning_info(draft_tokens, retrieve_indices, best_candidate, accept_len, new_token, subseq_ri_cum_depths):
     """
     Prune the token tree on the retrieve_indices
     :param retrieve_indices:
@@ -804,7 +798,7 @@ def pruning(draft_tokens, retrieve_indices, best_candidate, accept_len, new_toke
     if accept_len == retrieve_indices.size(-1) or retrieve_indices[best_candidate, accept_len] == -1:  # the next token of the accepted
         # truncate: reach the global leaf: occurs in the eagenerate_pruned_pipeline()
         # print('- leaf has been reached')
-        return accepted_indices
+        return accepted_indices, True
 
     # judge whether the new token follows the tree
     matched_candidates = find_prefix_match(retrieve_indices, accepted_indices)  # non-zero
@@ -812,13 +806,13 @@ def pruning(draft_tokens, retrieve_indices, best_candidate, accept_len, new_toke
     next_tokens_draft = draft_tokens[0, next_indices_draft]
     # found the paths with prefix of "accept_tokens + new_token"
 
-    same_indices = torch.nonzero(next_tokens_draft == new_token.cpu()).squeeze(1)
+    same_indices = torch.nonzero(next_tokens_draft.cpu() == new_token.cpu()).squeeze(1)
     if same_indices.numel() == 0:
         # truncate: unmatched token
         # print(f'- - no match token found in the tree, accept_len/global_depth={accept_len}/{cur_path_depth}')
         # print(f'- - next_tokens_draft={next_tokens_draft.unique()}')
         # print(f'- - new_token={new_token}')
-        return accepted_indices
+        return accepted_indices, True
 
     # pruning
     left_candidates = matched_candidates[same_indices]
@@ -834,16 +828,8 @@ def pruning(draft_tokens, retrieve_indices, best_candidate, accept_len, new_toke
     left_indices_from_zero = torch.arange(left_indices_global.size(-1) - accept_len, dtype=torch.long)
 
     left_indices = left_indices_global[left_indices_global < draft_tokens.size(-1)]
-    left_draft_tokens = draft_tokens[:, left_indices[accept_len:]]
 
-    # cut the subseq_ri_cum_depths
-    left_ri_cum_depths = subseq_ri_cum_depths[1:, left_candidates] - accept_len  # if two same cum_depths, mean the latter is cut completely
-    # todo: what happen when only one path is left? Or is it possible?
-
-    # map the left_retrieve_indices to left_indices_from_zero
-    transformed_ri = map_retrieve_indices(left_retrieve_indices, left_indices_global[accept_len:], left_indices_from_zero)
-
-    return left_draft_tokens, transformed_ri, left_indices, left_ri_cum_depths
+    return left_indices, False
 
 
 # [update] draft stage pruning
@@ -972,7 +958,7 @@ def token_pruning(
     # prune last_hidden_state
     # the last_hidden_state here are the output of the current stage_model
     if last_hidden_state is not None:
-        cur_hs_len = last_hidden_state.size(-2)
+        cur_hs_len = last_hidden_state.size(1) 
 
         hs_indices_start_idx = cur_kv_len  # [update]: last_hidden_state is new to current stage
         hs_indices_end_idx = cur_kv_len + cur_hs_len
@@ -980,22 +966,27 @@ def token_pruning(
         # left_indices_in_hs = left_indices_in_hs.to(last_hidden_state.device)
 
         if left_indices_in_input.numel() > 0:
-            assert torch.max(left_indices_in_input) < last_hidden_state.size(-2), f'stage{stage} left_indices_in_input={left_indices_in_input} is out of range'
-        last_hidden_state = last_hidden_state[..., left_indices_in_input.to(last_hidden_state.device), :]  # todo: bug occurs when hidden_state is empty tensor
+            assert torch.max(left_indices_in_input) < last_hidden_state.size(1), f'stage{stage} left_indices_in_input={left_indices_in_input} is out of range'
+        if len(last_hidden_state.shape) == 3:
+            last_hidden_state = last_hidden_state[..., left_indices_in_input.to(last_hidden_state.device), :]  # todo: bug occurs when hidden_state is empty tensor
+        else:
+            last_hidden_state = last_hidden_state[..., left_indices_in_input.to(last_hidden_state.device)]  # todo: bug occurs when hidden_state is empty tensor
 
     # prune tree_mask
     if tree_mask is not None:
         tree_mask_cpu = tree_mask.cpu()
-        tree_mask_left_indices = left_indices[accept_len:]
+        local_tree_mask_left_indices = left_indices_in_input
+        global_tree_mask_left_indices = left_indices[accept_len:]
+        global_tree_mask_left_indices = global_tree_mask_left_indices[global_tree_mask_left_indices < tree_mask_cpu.size(-1)]
         # assert torch.max(tree_mask_left_indices) < tree_mask_cpu.size(-1), f'stage{stage} tree_mask_left_indices={tree_mask_left_indices} is out of range'
-        tree_mask = tree_mask_cpu[..., tree_mask_left_indices[:, None], tree_mask_left_indices].to(tree_mask.device)
+        tree_mask = tree_mask_cpu[..., local_tree_mask_left_indices[:, None], global_tree_mask_left_indices].to(tree_mask.device)
 
     # prune tree_pos_ids
     if tree_pos_ids is not None:
         tree_pos_ids_cpu = tree_pos_ids.cpu()
-        tree_pos_ids = tree_pos_ids_cpu[tree_mask_left_indices].to(tree_pos_ids.device)
+        tree_pos_ids = tree_pos_ids_cpu[local_tree_mask_left_indices].to(tree_pos_ids.device)
 
-    return past_key_values_data_list, current_length_data, lens_split, hidden_state, tree_mask, tree_pos_ids
+    return past_key_values_data_list, current_length_data, last_hidden_state, tree_mask, tree_pos_ids
 
 
 def get_parent_indices(tree_mask: torch.Tensor) -> torch.Tensor:
