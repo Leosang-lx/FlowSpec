@@ -24,6 +24,7 @@ class CommHandler:
     ):
         self.rank = rank
         self.world_size = world_size
+        self.next_rank = 0 if rank == world_size - 1 else rank + 1
         self.last_rank = world_size - 1 if rank == 0 else rank - 1
         self.backend = backend
         self.enable_async_send_recv = enable_async_send_recv
@@ -159,6 +160,22 @@ class CommHandler:
         if device is not None:
             data = data.to(device)
         return data
+
+    def send_appended(self, appended_input, tree_pos_ids, tree_mask):
+        """
+        appended_input can be input_ids or sub_hidden_state
+        """ 
+        self.sendto(appended_input.cpu(), self.next_rank)
+        self.sendto(tree_pos_ids.cpu(), self.next_rank)
+        self.sendto(tree_mask.cpu(), self.next_rank)
+
+    def recv_appended(self, device=None):
+        appended_input = self.recvfrom(self.last_rank)
+        tree_pos_ids = self.recvfrom(self.last_rank)
+        tree_mask = self.recvfrom(self.last_rank)
+        if device is not None:
+            return appended_input.to(device), tree_pos_ids.to(device), tree_mask.to(device)
+        return appended_input, tree_pos_ids, tree_mask
 
     def multi_sendto(self, data):
         """
