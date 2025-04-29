@@ -93,6 +93,7 @@ class StageEaModel(nn.Module):
             depth=5,
             top_k=10,
             threshold=1.0,
+            init_comm=True,
             **kwargs,
     ):  
         model_config = StageEaConfig.from_pretrained(stage_base_model_path)
@@ -168,12 +169,13 @@ class StageEaModel(nn.Module):
             stage_base_model,
             stage_base_model_path,
             model_config,
-            ea_layer
+            ea_layer,
             # total_token,
             # depth,
             # top_k,
             # threshold,
             # ea_layer_state_dict
+            init_comm=init_comm
         )
 
         if total_token == -1:
@@ -742,8 +744,8 @@ class StageEaModel(nn.Module):
         
         while True:
             i += 1
-            if config.is_draft_stage:
-                print(f'Stage {config.stage} {i}th turn')
+            # if config.is_draft_stage:
+                # print(f'Stage {config.stage} {i}th turn')
             ###################################################
             # recv pruning info
             ###################################################
@@ -759,7 +761,7 @@ class StageEaModel(nn.Module):
                         tree_mask = comm.recvfrom(config.last_rank, device=device)
                         assert sub_hidden_state.size(1) == tree_mask.size(-2) == tree_position_ids.size(-1), f'Stage {config.stage} {i}th turn recv pruning info: sub_hidden_state: {sub_hidden_state.shape}, tree_mask: {tree_mask.shape}, tree_position_ids: {tree_position_ids.shape}'
             
-            dist.barrier()
+            # dist.barrier()
             ###################################################
             # broadcast pruning info
             ###################################################
