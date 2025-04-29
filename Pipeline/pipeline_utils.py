@@ -601,7 +601,6 @@ def fill_pipeline_stages(
     # draft stage 0
     if config.is_draft_stage:  # [IMPORTANT] lens_split = world_size = 5
         cum_subseq_lens = torch.cumsum(lens_split, dim=-1)
-        print(f'Stage {config.stage} cum_subseq_lens: {cum_subseq_lens}')
         for i, cum_seq_len in enumerate(cum_subseq_lens):  # send 5 times
             start_ids = 0 if i == 0 else cum_subseq_lens[i-1]
             draft_tokens_split = draft_tokens[..., start_ids:cum_seq_len]
@@ -613,7 +612,6 @@ def fill_pipeline_stages(
     
     # following stages 1-4
     for i in range(config.total_stage - config.stage):
-        print(f'Stage {config.stage} recv_appended {i}')
         appended_input, subseq_pos_ids, tree_mask = comm.recv_appended(device)
         # set the tree mask for the current stage
         stage_model.stage_base_model.model.tree_mask = tree_mask
@@ -964,6 +962,8 @@ def token_pruning(
         hs_indices_end_idx = cur_kv_len + cur_hs_len
         left_indices_in_input = left_indices_after_cache[left_indices_after_cache < hs_indices_end_idx] - hs_indices_start_idx  # prune last_hidden_state, tree_mask, tree_pos_ids
         # left_indices_in_hs = left_indices_in_hs.to(last_hidden_state.device)
+        if left_indices_in_input.numel() > 0:
+            assert tree_pos_ids.size(0) == tree_mask.size(2) > max(left_indices_in_input), f'last_hidden_state.shape={last_hidden_state} tree_pos_ids.shape={tree_pos_ids.shape}, tree_mask.shape={tree_mask.shape}, left_indices_in_input={left_indices_in_input}'
 
         if left_indices_in_input.numel() > 0:
             assert torch.max(left_indices_in_input) < last_hidden_state.size(1), f'stage{stage} left_indices_in_input={left_indices_in_input} is out of range'
@@ -971,7 +971,7 @@ def token_pruning(
             last_hidden_state = last_hidden_state[..., left_indices_in_input.to(last_hidden_state.device), :]  # todo: bug occurs when hidden_state is empty tensor
         else:
             last_hidden_state = last_hidden_state[..., left_indices_in_input.to(last_hidden_state.device)]  # todo: bug occurs when hidden_state is empty tensor
-
+        
     # prune tree_mask
     if tree_mask is not None:
         tree_mask_cpu = tree_mask.cpu()
@@ -984,6 +984,7 @@ def token_pruning(
     # prune tree_pos_ids
     if tree_pos_ids is not None:
         tree_pos_ids_cpu = tree_pos_ids.cpu()
+        
         tree_pos_ids = tree_pos_ids_cpu[local_tree_mask_left_indices].to(tree_pos_ids.device)
 
     return past_key_values_data_list, current_length_data, last_hidden_state, tree_mask, tree_pos_ids

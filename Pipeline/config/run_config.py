@@ -24,13 +24,13 @@ class Config:
     max_new_tokens: int = 512
 
     # draft config
-    total_token: int = 100
-    subseq_token: int = 20
+    total_token: int = 160
+    subseq_token: int = 32
     depth: int = 7
     # expand draft config
     expand_total_token: int = 64
     expand_subseq_token: int = subseq_token
-    expand_depth: int = 3
+    expand_depth: int = 5
     expand_threshold: int = subseq_token
     
     # pipeline config
