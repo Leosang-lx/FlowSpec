@@ -660,9 +660,10 @@ class Model(nn.Module):
     @torch.no_grad()
     def topK_genrate(self, hidden_states, input_ids, head, logits_processor,
                      total_tokens=None, depth=None, top_k=None,
-                     return_hidden=False, return_old=False, save_cache=False):
+                     return_last=False,
+                     log=False):
         """
-        Important: save_cache should be used together with kv-cache pruning after receiving each verification result
+        past_key_values **after draft-many** includes draft tokens
         """
 
         input_ids = input_ids.to(hidden_states.device)
@@ -714,11 +715,6 @@ class Model(nn.Module):
         topk_cs_index = torch.arange(top_k, device=self.embed_tokens.weight.device)
         # print(f"topk_cs_index.device={topk_cs_index.device}")
 
-        # [MODIFIED] return last_hidden_state in draft_generation for tree expansion
-        if return_hidden:
-            hidden_state_cum = []
-            hidden_state_cum.append(last_hidden)  # last_hidden: the hidden_state of the sampled token from the base model
-
         # 4
         for i in range(depth):
             self.tree_mask = tree_mask
@@ -726,9 +722,6 @@ class Model(nn.Module):
             # with Timer("draft one"):
             out_hidden, past_key_values = self(input_hidden, input_ids=input_ids, past_key_values=past_key_values,
                                                position_ids=position_ids, use_cache=True)
-            # [MODIFIED] save cache for later tree expansion
-            if save_cache:
-                self.stable_kv = past_key_values  # shape like tuple(tuple(Tensor))
 
             len_posi += 1
 
@@ -751,11 +744,19 @@ class Model(nn.Module):
             topk_cs_index, topk_cs_p = topk_cs.indices, topk_cs.values
             scores = topk_cs_p
 
+            if log:
+                print(f'topK_genrate depth {i}:')
+                print(f'-- out_hidden: {out_hidden.shape}')
+                print(f'-- input_ids: {input_ids.shape}')
+                print(f'-- last_p: {last_p.shape}')
+                print(f'-- topk_p: {topk_p.shape}')
+                print(f'-- scores: {scores.shape}')
+                print(f'-- ss_token: {sum([i.numel() for i in ss_token])}')
+
             out_ids = topk_cs_index // top_k
             # print(f"out_ids.device={out_ids.device}")
             input_hidden = out_hidden[:, out_ids]
-            if return_hidden:
-                hidden_state_cum.append(input_hidden)
+
 
             # with Timer("2index"):
             #     in_ids = topk_cs_index % top_k
@@ -773,6 +774,14 @@ class Model(nn.Module):
             # if self.threshold < 0 and cu_scores.max() < self.threshold:
             #     break
 
+        if return_last:
+            last_depth = i
+            current_state = (
+                i,
+                input_ids, input_hidden, past_key_values,
+                tree_mask, len_posi, top_k,
+                topk_cs_index, scores, ss_token, scores_list, parents_list
+            )
         # del parents_list,scores_list,ss_token
         # return draft_tokens, mask_index,tree_mask,tree_position_ids
 
@@ -787,17 +796,6 @@ class Model(nn.Module):
         top_scores = torch.topk(scores_list, total_tokens, dim=-1)
         top_scores_index = top_scores.indices
         top_scores_index = torch.sort(top_scores_index).values
-
-        if save_cache:  # todo: verify the correctness
-            past_key_values = ((
-                torch.cat(k[:, -all_draft_size], k[:, -all_draft_size:][:, top_scores_index]),
-                torch.cat(v[:, -all_draft_size], v[:, -all_draft_size:][:, top_scores_index])
-                ) for k, v in past_key_values)
-
-        if return_hidden:
-            draft_hidden = torch.cat(hidden_state_cum, dim=-2)  # cat the draft tree hidden on the sequence dimension
-            if not return_old:
-                draft_hidden = draft_hidden[:, top_scores_index]  # select the hidden related to the selected draft tokens
 
         draft_tokens = ss_token_list[top_scores_index]
         draft_tokens = torch.cat((sample_token, draft_tokens), dim=0)
@@ -832,6 +830,8 @@ class Model(nn.Module):
 
         tree_mask = tree_mask.float()[None, None]
         draft_tokens = draft_tokens[None]
+
+
 
         del parents_list, scores_list, ss_token, ss_token_list, draft_parents
 
@@ -872,11 +872,77 @@ class Model(nn.Module):
         retrieve_indices = torch.tensor(retrieve_indices, dtype=torch.long)
         del mask_index, mask_index_list, noleaf_index, noleaf_num, leaf_num, max_depth, rid
         tree_position_ids = tree_position_ids.to(hidden_states.device)
-
-        if return_hidden:
-            return draft_tokens, retrieve_indices, tree_mask, tree_position_ids, draft_hidden
-
+        
+        if return_last:
+            return draft_tokens, retrieve_indices, tree_mask, tree_position_ids, current_state
         return draft_tokens, retrieve_indices, tree_mask, tree_position_ids
+    
+    def expand_last(self, last_tree, last_state, head, expand_depth=1, return_last=False, log=True):
+        """
+        Expand the current tree with probs of all draft tokens
+        """
+        print(type(last_tree))
+        draft_tokens, retrieve_indices, tree_mask, tree_position_ids = last_tree
+        last_depth, \
+        input_ids, input_hidden, past_key_values, \
+        tree_mask, len_posi, top_k, \
+        topk_cs_index, scores, ss_token, scores_list, parents_list = last_state
+
+        for i in range(last_depth, last_depth + expand_depth):
+            self.tree_mask = tree_mask
+            position_ids = len_posi + self.position_ids
+            # with Timer("draft one"):
+            out_hidden, past_key_values = self(input_hidden, input_ids=input_ids, past_key_values=past_key_values,
+                                               position_ids=position_ids, use_cache=True)
+
+            len_posi += 1
+
+            # with Timer("sort1"):
+            bias1 = top_k if i > 0 else 0
+            bias2 = max(0, i - 1)
+            bias = 1 + top_k ** 2 * bias2 + bias1
+            parents = (topk_cs_index + bias)
+            parents_list.append(parents)
+
+            last_headout = head(out_hidden[0])
+            last_p = self.logsoftmax(last_headout)
+
+            top = torch.topk(last_p, top_k, dim=-1)
+            topk_index, topk_p = top.indices, top.values
+
+            cu_scores = topk_p + scores[:, None]
+
+            topk_cs = torch.topk(cu_scores.view(-1), top_k, dim=-1)
+            topk_cs_index, topk_cs_p = topk_cs.indices, topk_cs.values
+            scores = topk_cs_p
+
+            if log:
+                print(f'topK_genrate depth {i}:')
+                print(f'-- out_hidden: {out_hidden.shape}')
+                print(f'-- input_ids: {input_ids.shape}')
+                print(f'-- last_p: {last_p.shape}')
+                print(f'-- topk_p: {topk_p.shape}')
+                print(f'-- scores: {scores.shape}')
+                print(f'-- ss_token: {sum([i.numel() for i in ss_token])}')
+
+            out_ids = topk_cs_index // top_k
+            # print(f"out_ids.device={out_ids.device}")
+            input_hidden = out_hidden[:, out_ids]
+
+
+            # with Timer("2index"):
+            #     in_ids = topk_cs_index % top_k
+            #     input_ids = topk_index[out_ids, in_ids][None]
+            # with Timer("1index"):
+            input_ids = topk_index.view(-1)[topk_cs_index][None]
+            # print(input_ids.equal(input_ids0))
+
+            ss_token.append(topk_index)
+            scores_list.append(cu_scores)
+            # print(f"tree_mask.device={tree_mask.device}, self.tree_mask_init.device={self.tree_mask_init.device}")
+            # print(f"out_ids.device={out_ids.device}, input_ids.device={input_ids.device}")
+            tree_mask = torch.cat((tree_mask[:, :, out_ids], self.tree_mask_init), dim=3)
+
 
     @torch.no_grad()
     def acc(self, data, head, max_length=5):
