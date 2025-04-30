@@ -11,7 +11,6 @@ class Config:
     
     # model config
     base_model_dir: str = f'/home/liux/big_file/pipeline_model/meta-llama/Llama-2-7b-chat-hf/new_stage_model_series_0+8+8+8+8_fp16'
-    # base_model_dir: str = f'/home/liux/LLM/pipeline_model/meta-llama/Llama-2-7b-chat-hf/stage_model_series_8+8+8+8'
     EAGLE_model_path: str = "/home/liux/LLM/models_hf/yuhuili/EAGLE-llama2-chat-7B"
     
     # base_model_dir: str = f"/home/nvidia/LLM/pipeline_model/meta-llama/Llama-2-7b-chat-hf/stage_model_series_6+9+9+8_half"
@@ -19,25 +18,36 @@ class Config:
     
     # run config
     your_message: str = "Hello"
-    log: bool = True
+    log: bool = False
     temperature: float = 0.0
     max_new_tokens: int = 512
 
-    # draft config
-    init_total_token: int = 320
-    init_topk: int = 10
-    init_depth: int = 12
-    init_subseq_token: int = 64
-    
-    # expand draft config
-    expand_total_token: int = 128
-    expand_topk: int = 5 # now must be the same as init_topk
-    expand_depth: int = 8
-    expand_subseq_token: int = 64
-    
     # pipeline config
     pipeline_type: str = "continuous"
     
+    if pipeline_type == "naive":
+        init_total_token: int = 64
+        init_topk: int = 10
+        init_depth: int = 6
+    
+    if pipeline_type == "pruned":
+        init_total_token: int = 160
+        init_topk: int = 10
+        init_depth: int = 8
+    
+    if pipeline_type == "continuous":
+        # draft config
+        init_total_token: int = 160
+        init_topk: int = 10
+        init_depth: int = 8
+        init_subseq_token: int = 32
+        
+        # expand draft config
+        expand_total_token: int = 64
+        expand_topk: int = 10 # now must be the same as init_topk
+        expand_depth: int = 6
+        expand_subseq_token: int = 64
+        
     # device config
     device: str = "cuda"
     low_cpu_mem_usage: bool = True

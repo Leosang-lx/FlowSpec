@@ -313,8 +313,8 @@ class StageEaModel(nn.Module):
             input_len = input_ids.shape[1]
             new_token = 0
             token = gen_token(logits=orig[:, -1], logits_processor=logits_processor)
-            input_len = input_ids.shape[1]
-            new_token = 0
+            global skip_count 
+            skip_count = 0
         elif self.is_first_stage:
             # ensure input_ids at the first stage
             # max_length = max_length - self.ea_layer.total_tokens - 10 # 这一步在旧版本中就是没有用的
@@ -390,6 +390,7 @@ class StageEaModel(nn.Module):
             if not log:
                 return input_ids
             else:
+                print(f'skip_count: {skip_count}')
                 return input_ids, new_token, idx_spec, turns_cnt
 
     # inner loop
@@ -708,6 +709,7 @@ class StageEaModel(nn.Module):
                     total_tokens=run_config.init_total_token,
                     depth=run_config.init_depth,
                     top_k=run_config.init_topk,
+                    prof=prof,
             )
             # todo: 好像没必要在这里移到gpu？因为要传给其他stages
             # update tree_position_ids
@@ -743,7 +745,6 @@ class StageEaModel(nn.Module):
             #     sub_hidden_state, lens_split, tree_mask, tree_position_ids = outputs
         
         i = -1
-        
         while True:
             i += 1
             # if config.is_draft_stage:
@@ -751,7 +752,7 @@ class StageEaModel(nn.Module):
             ###################################################
             # recv from last stage
             ###################################################
-            with prof.time_context(f"Stage {config.stage}: recv from last stage", cpu=True) if prof is not None else nullcontext():
+            with prof.time_context(f"Stage {config.stage}: part0, recv from last stage", cpu=True) if prof is not None else nullcontext():
                 sub_hidden_state = comm.recvfrom(config.last_rank, device=device)
                 if sub_hidden_state.size(-1) == 1 and sub_hidden_state.item() == -1:
                     hs_len = 0
@@ -765,7 +766,7 @@ class StageEaModel(nn.Module):
             ###################################################
             # broadcast pruning info
             ###################################################
-            with prof.time_context(f"Stage {config.stage}: pruning", cpu=False) if prof is not None else nullcontext():  
+            with prof.time_context(f"Stage {config.stage}: part1,broadcast pruning info", cpu=False) if prof is not None else nullcontext():  
                 skip_pruning = False  
                 if config.is_draft_stage:  # last stage正常pruning
                     if hs_len > 0:
@@ -808,20 +809,24 @@ class StageEaModel(nn.Module):
                         pruning_info = torch.cat((torch.tensor((new_sampled_token, accept_length), dtype=torch.long), left_indices), dim=0).contiguous()
                             
                         if not truncate:  # not truncate: async pruning info broadcast
-                            broadcast_pruning_info_task = comm.executor.submit(
-                                comm.broadcast_send,
-                                pruning_info
-                            )
+                            # broadcast_pruning_info_task = comm.executor.submit(
+                            #     comm.broadcast_send,
+                            #     pruning_info
+                            # )
+                            comm.broadcast_send(pruning_info)
                         else:  # truncate: sync pruning info broadcast
                             comm.broadcast_send(pruning_info)
                             lens_split = tree_mask = tree_position_ids = None
                     
                     else:
                         skip_pruning = True
-                        broadcast_pruning_info_task = comm.executor.submit(
-                            comm.broadcast_send,
-                            torch.tensor([[-1]], dtype=torch.long)
-                        )  
+                        global skip_count 
+                        skip_count += 1
+                        # broadcast_pruning_info_task = comm.executor.submit(
+                        #     comm.broadcast_send,
+                        #     torch.tensor([[-1]], dtype=torch.long)
+                        # )  
+                        comm.broadcast_send(torch.tensor([[-1]], dtype=torch.long))
                 else:
                     with prof.time_context(f"Stage {config.stage}: wait broadcast_pruning", cpu=True) if prof is not None else nullcontext():
                         pruning_info = comm.broadcast_recv(0)
@@ -838,162 +843,165 @@ class StageEaModel(nn.Module):
             #####################################
             # pruning, in this part both draft and first stage do the waiting draft pruning, others are token pruning
             #####################################
-            if not skip_pruning:
-                if config.is_draft_stage:
-                    accept_length_this_round += accept_length
-                    if not truncate:
-                        with prof.time_context(f"Stage {config.stage}: draft_stage_pruning", cpu=True) if prof is not None else nullcontext():
-                            # [update] update lens_split in the draft stage
-                            draft_tokens, tree_mask, tree_position_ids, retrieve_indices, accepted_tokens, subseq_ri_cum_depths, left_indices, lens_split = draft_stage_pruning(
-                                    left_indices, accept_length, draft_tokens, tree_mask, tree_position_ids, retrieve_indices, subseq_ri_cum_depths, lens_split
-                            )
-                        input_ids = torch.cat((input_ids, accepted_tokens), dim=-1)
-                        waiting_draft = (draft_tokens.size(-1) - torch.sum(lens_split)).item()
-                        
-                else:
-                    if truncate:
-                        sub_hidden_state = tree_mask = tree_position_ids = None 
-                        
-                    with prof.time_context(f"Stage {config.stage}: token_pruning", cpu=True) if prof is not None else nullcontext():
-                        past_key_values_data, current_length_data, sub_hidden_state, tree_mask, tree_position_ids = token_pruning(
-                            past_key_values_data,
-                            current_length_data,
-                            None,
-                            sub_hidden_state,
-                            tree_mask,
-                            tree_position_ids,
-                            left_indices,
-                            global_accept_len,
-                            accept_length,
-                            config.stage
-                        )
-                        global_accept_len += accept_length
-                        
-                if truncate:
-                        if config.is_draft_stage:
-                            accept_hidden_states.append(sub_hidden_state)
-                            token = torch.tensor([[new_sampled_token]], dtype=torch.long, device=input_ids.device)
-                            accepted_tokens = draft_tokens[:, left_indices]
+            with prof.time_context(f"Stage {config.stage}: part2, pruning", cpu=False) if prof is not None else nullcontext():  
+                if not skip_pruning:
+                    if config.is_draft_stage:
+                        accept_length_this_round += accept_length
+                        if not truncate:
+                            with prof.time_context(f"Stage {config.stage}: draft_stage_pruning", cpu=True) if prof is not None else nullcontext():
+                                # [update] update lens_split in the draft stage
+                                draft_tokens, tree_mask, tree_position_ids, retrieve_indices, accepted_tokens, subseq_ri_cum_depths, left_indices, lens_split = draft_stage_pruning(
+                                        left_indices, accept_length, draft_tokens, tree_mask, tree_position_ids, retrieve_indices, subseq_ri_cum_depths, lens_split
+                                )
                             input_ids = torch.cat((input_ids, accepted_tokens), dim=-1)
-                        break
-            else:  
-                accept_length = 0
-                if config.is_draft_stage:  # [update]: drop the first row as it has been processed
-                    lens_split = lens_split[1:]
-                    subseq_ri_cum_depths = subseq_ri_cum_depths[1:]
-                    
+                            waiting_draft = (draft_tokens.size(-1) - torch.sum(lens_split)).item()
+                            
+                    else:
+                        if truncate:
+                            sub_hidden_state = tree_mask = tree_position_ids = None 
+                            
+                        with prof.time_context(f"Stage {config.stage}: token_pruning", cpu=True) if prof is not None else nullcontext():
+                            past_key_values_data, current_length_data, sub_hidden_state, tree_mask, tree_position_ids = token_pruning(
+                                past_key_values_data,
+                                current_length_data,
+                                None,
+                                sub_hidden_state,
+                                tree_mask,
+                                tree_position_ids,
+                                left_indices,
+                                global_accept_len,
+                                accept_length,
+                                config.stage
+                            )
+                            global_accept_len += accept_length
+                            
+                    if truncate:
+                            if config.is_draft_stage:
+                                accept_hidden_states.append(sub_hidden_state)
+                                token = torch.tensor([[new_sampled_token]], dtype=torch.long, device=input_ids.device)
+                                accepted_tokens = draft_tokens[:, left_indices]
+                                input_ids = torch.cat((input_ids, accepted_tokens), dim=-1)
+                            break
+                else:  
+                    accept_length = 0
+                    if config.is_draft_stage:  # [update]: drop the first row as it has been processed
+                        lens_split = lens_split[1:]
+                        subseq_ri_cum_depths = subseq_ri_cum_depths[1:]
+            # print(f'Stage {config.stage} {i}th turn pruning')
+            # dist.barrier()
             ####################################
             # 前向: draft stage topk, others forward
             #################################### 
-            hs_len = sub_hidden_state.size(1) if hs_len > 0 else 0
+            with prof.time_context(f"Stage {config.stage}: part3, forward", cpu=False) if prof is not None else nullcontext():
+                hs_len = sub_hidden_state.size(1) if hs_len > 0 else 0
+                
+                if config.is_draft_stage:
+                    cur_draft_depth = (retrieve_indices != -1).sum(dim=1).max()
+                    pruned = accept_hidden_states or hs_len
+                    
+                    if pruned:
+                        with prof.time_context(f"Stage {config.stage}: tree_expansion", cpu=False) if prof is not None else nullcontext():
+                            # new_token不需要通过hidden_state生成，直接根据剪枝的token生成，新token就是剪枝后新树的根节点
+                            input_ids_ea = torch.cat((input_ids, draft_tokens[:, :1]), dim=-1)
+                            
+                            if hs_len > 0:
+                                accept_hidden_states.append(sub_hidden_state)
+                            accepted_hidden_state = torch.cat(accept_hidden_states, dim=-2)
+                            accept_hidden_states = []
+                            # print(f'stage{config.stage} {i}th input_ids_ea: {input_ids_ea.shape}, accepted_hidden_state: {accepted_hidden_state.shape}')
+
+                            with prof.profile_context(f"Stage {config.stage}: topK_genrate", device=f"cuda:{device}") if prof is not None else nullcontext():
+                                draft_tokens2, retrieve_indices2, tree_mask2, tree_position_ids2 = self.ea_layer.topK_genrate(
+                                    accepted_hidden_state,
+                                    input_ids_ea,
+                                    self.stage_base_model.lm_head,
+                                    logits_processor,
+                                    total_tokens=run_config.expand_total_token,
+                                    # depth=max(cur_draft_depth + 2, run_config.expand_depth),  # todo: test best tree settings
+                                    depth=run_config.expand_depth,
+                                    top_k=run_config.expand_topk,
+                                    prof=prof,
+                                    # total_tokens=80
+                                )  # get a little more appended tokens
+                            tree_position_ids2 = tree_position_ids2 + input_ids.size(-1)
+                            assert draft_tokens.size(-1) == tree_position_ids.size(0), f'draft_tokens != tree_pos_ids: {draft_tokens.size(-1)} and {tree_position_ids.size(0)}'
+
+                            with prof.time_context(f"Stage {config.stage}: merge_two_tree", cpu=True) if prof is not None else nullcontext():
+                                # [update] operate on CPU
+                                origin_device = draft_tokens.device
+                                draft_tokens, retrieve_indices, tree_mask, tree_position_ids, lens_split, subseq_ri_cum_depths = merge_two_tree(
+                                    (draft_tokens.cpu(), retrieve_indices.cpu(), tree_mask.cpu(), tree_position_ids.cpu()),
+                                    (draft_tokens2.cpu(), retrieve_indices2.cpu(), tree_mask2.cpu(), tree_position_ids2.cpu()),
+                                    lens_split,
+                                    subseq_ri_cum_depths
+                                )
+                                draft_tokens = draft_tokens.to(origin_device)
+                                tree_mask = tree_mask.to(origin_device)
+                                tree_position_ids = tree_position_ids.to(origin_device)
+                            
+                            assert draft_tokens.size(-1) == tree_position_ids.size(0), f'draft_tokens != tree_pos_ids: {draft_tokens.size(-1)} and {tree_position_ids.size(0)}'
+                            
+                        waiting_draft = lens_split[-1].item()
+
+                        appended_draft_len = min(waiting_draft, run_config.expand_subseq_token)  # todo: set set_subseq_len = 16?
+                        lens_split[-1] = appended_draft_len
+
+                    else:
+                        appended_draft_len = min(waiting_draft, run_config.expand_subseq_token)
+                        lens_split = torch.cat((lens_split, torch.tensor([appended_draft_len], dtype=torch.long)))
+                        
+                    waiting_draft -= appended_draft_len
+                    cur_subseq_ri_cum_depth = subseq_ri_cum_depths[-1].clone()
+                    
+                    if appended_draft_len > 0:
+                        existing_draft_len = torch.sum(lens_split[:-1])  # log: existing_draft_len: 0; appended_draft_len: 10; input_draft_end_idx: 10???
+                        input_draft_end_idx = existing_draft_len + appended_draft_len
+
+                        retrieve_indices_filled = torch.cat((retrieve_indices, torch.full((retrieve_indices.size(0), 1), -1, dtype=torch.long)), dim=1)
+
+                        for j in range(existing_draft_len, input_draft_end_idx):
+                            row_indices = torch.arange(retrieve_indices.size(0), dtype=torch.long)
+                            cum_ri_leaves = retrieve_indices_filled[row_indices, cur_subseq_ri_cum_depth]
+                            cur_subseq_ri_cum_depth[cum_ri_leaves == j] += 1
             
-            if config.is_draft_stage:
-                cur_draft_depth = (retrieve_indices != -1).sum(dim=1).max()
-                pruned = accept_hidden_states or hs_len
-                
-                if pruned:
-                    with prof.time_context(f"Stage {config.stage}: tree_expansion", cpu=False) if prof is not None else nullcontext():
-                        # new_token不需要通过hidden_state生成，直接根据剪枝的token生成，新token就是剪枝后新树的根节点
-                        input_ids_ea = torch.cat((input_ids, draft_tokens[:, :1]), dim=-1)
-                        
-                        if hs_len > 0:
-                            accept_hidden_states.append(sub_hidden_state)
-                        accepted_hidden_state = torch.cat(accept_hidden_states, dim=-2)
-                        accept_hidden_states = []
-                        # print(f'stage{config.stage} {i}th input_ids_ea: {input_ids_ea.shape}, accepted_hidden_state: {accepted_hidden_state.shape}')
-
-                        with prof.profile_context(f"Stage {config.stage}: topK_genrate", device=f"cuda:{device}") if prof is not None else nullcontext():
-                            draft_tokens2, retrieve_indices2, tree_mask2, tree_position_ids2 = self.ea_layer.topK_genrate(
-                                accepted_hidden_state,
-                                input_ids_ea,
-                                self.stage_base_model.lm_head,
-                                logits_processor,
-                                total_tokens=run_config.expand_total_token,
-                                # depth=max(cur_draft_depth + 2, run_config.expand_depth),  # todo: test best tree settings
-                                depth=run_config.expand_depth,
-                                top_k=run_config.expand_topk,
-                                # total_tokens=80
-                            )  # get a little more appended tokens
-                        tree_position_ids2 = tree_position_ids2 + input_ids.size(-1)
-                        assert draft_tokens.size(-1) == tree_position_ids.size(0), f'draft_tokens != tree_pos_ids: {draft_tokens.size(-1)} and {tree_position_ids.size(0)}'
-
-                        with prof.time_context(f"Stage {config.stage}: merge_two_tree", cpu=True) if prof is not None else nullcontext():
-                            # [update] operate on CPU
-                            origin_device = draft_tokens.device
-                            draft_tokens, retrieve_indices, tree_mask, tree_position_ids, lens_split, subseq_ri_cum_depths = merge_two_tree(
-                                (draft_tokens.cpu(), retrieve_indices.cpu(), tree_mask.cpu(), tree_position_ids.cpu()),
-                                (draft_tokens2.cpu(), retrieve_indices2.cpu(), tree_mask2.cpu(), tree_position_ids2.cpu()),
-                                lens_split,
-                                subseq_ri_cum_depths
-                            )
-                            draft_tokens = draft_tokens.to(origin_device)
-                            tree_mask = tree_mask.to(origin_device)
-                            tree_position_ids = tree_position_ids.to(origin_device)
-                        
-                        assert draft_tokens.size(-1) == tree_position_ids.size(0), f'draft_tokens != tree_pos_ids: {draft_tokens.size(-1)} and {tree_position_ids.size(0)}'
-                        
-                    waiting_draft = lens_split[-1].item()
-
-                    appended_draft_len = min(waiting_draft, run_config.expand_subseq_token)  # todo: set set_subseq_len = 16?
-                    lens_split[-1] = appended_draft_len
-
-                else:
-                    appended_draft_len = min(waiting_draft, run_config.expand_subseq_token)
-                    lens_split = torch.cat((lens_split, torch.tensor([appended_draft_len], dtype=torch.long)))
-                    
-                waiting_draft -= appended_draft_len
-                cur_subseq_ri_cum_depth = subseq_ri_cum_depths[-1].clone()
-                
-                if appended_draft_len > 0:
-                    existing_draft_len = torch.sum(lens_split[:-1])  # log: existing_draft_len: 0; appended_draft_len: 10; input_draft_end_idx: 10???
-                    input_draft_end_idx = existing_draft_len + appended_draft_len
-
-                    retrieve_indices_filled = torch.cat((retrieve_indices, torch.full((retrieve_indices.size(0), 1), -1, dtype=torch.long)), dim=1)
-
-                    for j in range(existing_draft_len, input_draft_end_idx):
-                        row_indices = torch.arange(retrieve_indices.size(0), dtype=torch.long)
-                        cum_ri_leaves = retrieve_indices_filled[row_indices, cur_subseq_ri_cum_depth]
-                        cur_subseq_ri_cum_depth[cum_ri_leaves == j] += 1
-        
-                    appended_draft_tokens = draft_tokens[..., existing_draft_len:input_draft_end_idx]
-                    appended_tree_position_ids = tree_position_ids[existing_draft_len:input_draft_end_idx]
-                    appended_tree_mask = tree_mask[..., existing_draft_len:input_draft_end_idx, :input_draft_end_idx]
-                    comm.sendto(appended_draft_tokens, config.next_rank)
-                    comm.sendto(appended_tree_position_ids, config.next_rank)
-                    comm.sendto(appended_tree_mask, config.next_rank)
-                else:
-                    comm.sendto(torch.tensor([[-1]], dtype=torch.long), config.next_rank)
-                    
-                subseq_ri_cum_depths = torch.cat((subseq_ri_cum_depths, cur_subseq_ri_cum_depth.unsqueeze(0)), dim=0)
-                broadcast_pruning_info_task.result()
-                
-            else:
-                if hs_len > 0:
-                    self.stage_base_model.model.tree_mask = tree_mask
-                    assert tree_position_ids.size(0) == tree_mask.size(2)==sub_hidden_state.size(1), f'tree_position_ids.size(0) != tree_mask.size(2): {tree_position_ids.size(0)} and {tree_mask.size(2)}'
-                    if config.is_first_stage:  # recv input for first stage forward
-                        with prof.time_context(f"Stage {config.stage}: forward", cpu=False) if prof is not None else nullcontext():
-                            outputs, sub_hidden_state = self(
-                                input_ids=sub_hidden_state,
-                                past_key_values=past_key_values,
-                                position_ids=tree_position_ids
-                            )     
+                        appended_draft_tokens = draft_tokens[..., existing_draft_len:input_draft_end_idx]
+                        appended_tree_position_ids = tree_position_ids[existing_draft_len:input_draft_end_idx]
+                        appended_tree_mask = tree_mask[..., existing_draft_len:input_draft_end_idx, :input_draft_end_idx]
+                        comm.sendto(appended_draft_tokens, config.next_rank)
+                        comm.sendto(appended_tree_position_ids, config.next_rank)
+                        comm.sendto(appended_tree_mask, config.next_rank)
                     else:
-                        with prof.time_context(f"Stage {config.stage}: forward", cpu=False) if prof is not None else nullcontext():
-                            outputs, sub_hidden_state = self(
-                                inputs_embeds=sub_hidden_state,
-                                past_key_values=past_key_values,
-                                position_ids=tree_position_ids
-                            )
-                    if config.is_last_stage:
-                        comm.sendto(sub_hidden_state, config.next_rank)
-                    else:
-                        comm.sendto(sub_hidden_state, config.next_rank)
-                        comm.sendto(tree_position_ids, config.next_rank)
-                        comm.sendto(tree_mask, config.next_rank)
-                else:
-                    comm.sendto(torch.tensor([[-1]], dtype=torch.long), config.next_rank)
+                        comm.sendto(torch.tensor([[-1]], dtype=torch.long), config.next_rank)
+                        
+                    subseq_ri_cum_depths = torch.cat((subseq_ri_cum_depths, cur_subseq_ri_cum_depth.unsqueeze(0)), dim=0)
+                    # broadcast_pruning_info_task.result()
                     
+                else:
+                    if hs_len > 0:
+                        self.stage_base_model.model.tree_mask = tree_mask
+                        assert tree_position_ids.size(0) == tree_mask.size(2)==sub_hidden_state.size(1), f'tree_position_ids.size(0) != tree_mask.size(2): {tree_position_ids.size(0)} and {tree_mask.size(2)}'
+                        if config.is_first_stage:  # recv input for first stage forward
+                            with prof.time_context(f"Stage {config.stage}: forward", cpu=False) if prof is not None else nullcontext():
+                                outputs, sub_hidden_state = self(
+                                    input_ids=sub_hidden_state,
+                                    past_key_values=past_key_values,
+                                    position_ids=tree_position_ids
+                                )     
+                        else:
+                            with prof.time_context(f"Stage {config.stage}: forward", cpu=False) if prof is not None else nullcontext():
+                                outputs, sub_hidden_state = self(
+                                    inputs_embeds=sub_hidden_state,
+                                    past_key_values=past_key_values,
+                                    position_ids=tree_position_ids
+                                )
+                        if config.is_last_stage:
+                            comm.sendto(sub_hidden_state, config.next_rank)
+                        else:
+                            comm.sendto(sub_hidden_state, config.next_rank)
+                            comm.sendto(tree_position_ids, config.next_rank)
+                            comm.sendto(tree_mask, config.next_rank)
+                    else:
+                        comm.sendto(torch.tensor([[-1]], dtype=torch.long), config.next_rank)
         #####################################
         # truncate: 一个round结束
         #####################################
