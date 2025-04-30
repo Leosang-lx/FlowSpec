@@ -44,8 +44,9 @@ def main(args):
         # max_memory={"cpu": "1GB"},
         use_safetensors=True,
         device_map=f"cuda:{device}",
-        total_token=run_config.total_token,
-        depth=run_config.depth,
+        total_token=run_config.init_total_token,
+        depth=run_config.init_depth,
+        top_k=run_config.init_topk,
     )
 
     # check shared_weight
