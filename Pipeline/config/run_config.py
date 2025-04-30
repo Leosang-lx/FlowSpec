@@ -19,7 +19,7 @@ class Config:
     
     # run config
     your_message: str = "Hello"
-    log: bool = True
+    log: bool = False
     temperature: float = 0.0
     max_new_tokens: int = 512
 

@@ -72,7 +72,7 @@ for i in range(5):
     merge_two_tree(tree1, tree2, lens_split1, subseq_ri_cum_depths1)
 
 for i in range(10):
-    with prof.time_context(f"merge two trees", cpu=True) if prof is not None else nullcontext():
+    with prof.time_context(f"merge two trees", cpu=True):
         new_tree = merge_two_tree(tree1, tree2, lens_split1, subseq_ri_cum_depths1, prof=prof)
 
 prof.print_all_events()
