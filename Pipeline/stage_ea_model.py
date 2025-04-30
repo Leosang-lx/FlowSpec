@@ -915,7 +915,6 @@ class StageEaModel(nn.Module):
                                 # total_tokens=80
                             )  # get a little more appended tokens
                         tree_position_ids2 = tree_position_ids2 + input_ids.size(-1)
-
                         assert draft_tokens.size(-1) == tree_position_ids.size(0), f'draft_tokens != tree_pos_ids: {draft_tokens.size(-1)} and {tree_position_ids.size(0)}'
 
                         with prof.time_context(f"Stage {config.stage}: merge_two_tree", cpu=True) if prof is not None else nullcontext():

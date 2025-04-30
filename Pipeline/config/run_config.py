@@ -19,7 +19,7 @@ class Config:
     
     # run config
     your_message: str = "Hello"
-    log: bool = False
+    log: bool = True
     temperature: float = 0.0
     max_new_tokens: int = 512
 
@@ -30,9 +30,9 @@ class Config:
     init_subseq_token: int = 64
     
     # expand draft config
-    expand_total_token: int = 64
-    expand_topk: int = 10 # now must be the same as init_topk
-    expand_depth: int = 6
+    expand_total_token: int = 128
+    expand_topk: int = 5 # now must be the same as init_topk
+    expand_depth: int = 8
     expand_subseq_token: int = 64
     
     # pipeline config
