@@ -673,6 +673,9 @@ class Model(nn.Module):
             depth = self.depth
         if top_k is None:
             top_k = self.top_k
+        elif top_k != self.top_k:
+            self.top_k = top_k
+            self.init_tree()
         # print(f'top_k: {top_k}')
 
         sample_token = input_ids[:, -1]
