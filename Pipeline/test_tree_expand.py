@@ -13,7 +13,7 @@ EAGLE_model_path = cache_dir + EAGLE_model_path
 
 config = AutoConfig.from_pretrained(base_model_path)
 
-print(config)
+# print(config)
 
 model = EaModel.from_pretrained(
     base_model_path=base_model_path,
@@ -41,22 +41,37 @@ draft_tokens, retrieve_indices, tree_mask, tree_position_ids, last_state = model
     input_ids_ea,
     model.base_model.lm_head,
     None,
-    total_tokens=40,
-    depth=5,
+    total_tokens=20,
+    depth=3,
     log=True,
     return_last=True
 )
+print(f'========Draft tokens========')
+print(f'draft_tokens: {draft_tokens}')
+print(f'retrieve_indices: {retrieve_indices}')
+# print(f'tree_mask: {tree_mask}')
+print(f'tree_position_ids: {tree_position_ids}')
 
 last_tree = draft_tokens, retrieve_indices, tree_mask, tree_position_ids
 
-draft_tokens, retrieve_indices, tree_mask, tree_position_ids, expand_size, last_state = model.ea_layer.expand_last(
+draft_tokens, retrieve_indices, tree_mask, tree_position_ids, last_state = model.ea_layer.expand_last(
     last_tree,
     last_state,
     model.base_model.lm_head,
+    None,
+    hidden_states.device,
     expand_depth=1,
+    expand_size=10,
     return_last=True
 )
 
+print(f'========Expanded tokens========')
+print(f'draft_tokens: {draft_tokens}')
+print(f'retrieve_indices: {retrieve_indices}')
+# print(f'tree_mask: {tree_mask}')
+print(f'tree_position_ids: {tree_position_ids}')
+print(f'expand_size: {20}')
+# print(f'last_state: {last_state}')
 
 
 
