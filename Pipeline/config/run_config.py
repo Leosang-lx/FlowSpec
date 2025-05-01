@@ -23,7 +23,7 @@ class Config:
     max_new_tokens: int = 512
 
     # pipeline config
-    pipeline_type: str = "continuous"
+    pipeline_type: str = "pruned"
     
     if pipeline_type == "naive":
         init_total_token: int = 64
@@ -31,9 +31,9 @@ class Config:
         init_depth: int = 6
     
     if pipeline_type == "pruned":
-        init_total_token: int = 160
+        init_total_token: int = 64
         init_topk: int = 10
-        init_depth: int = 8
+        init_depth: int = 6
     
     if pipeline_type == "continuous":
         # draft config
