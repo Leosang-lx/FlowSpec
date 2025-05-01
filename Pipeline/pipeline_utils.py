@@ -234,19 +234,49 @@ def pipeline_prefill(
             )
             sub_hidden_state = outputs[0]
             comm.sendto(sub_hidden_state.cpu(), config.next_rank)
+            
+def pipeline_prefill_new(
+        stage_model,
+        input_ids=None,
+        stage_past_key_values=None,
+):
+    config = stage_model.config
+    device = stage_model.stage_base_model.device
+    comm = stage_model.comm  # update
+        
+    if config.is_draft_stage:  # assume 4 subseqs
+        seq_splits, _ = split_sequence_close_equal_len(input_ids, config.n_split)
+        
+        for subseq in seq_splits:
+            comm.sendto(subseq.cpu(), config.next_rank)
+            
+        hidden_state_splits = []
+        orig = ()
+        for i in range(config.n_split):
+            hidden_state_split = comm.recvfrom(config.last_rank, device=device).to(device)
+            hidden_state_splits.append(hidden_state_split)
+            orig = orig + (stage_model.stage_base_model.lm_head(hidden_state_split),)
 
-    # if config.is_first_stage:
-    #     orig = ()
+        hidden_state = torch.concat(hidden_state_splits, dim=-2)
+        orig = torch.concat(orig, dim=-2)
 
-    #     for i, hidden_state_split in enumerate(hidden_state_splits):
-    #         hidden_state_split = comm.recvfrom(config.last_rank, device=device)
-    #         hidden_state_splits[i] = hidden_state_split.to(device)
-    #         orig = orig + (stage_base_model.lm_head(hidden_state_splits[i]),)
+        return orig, hidden_state
 
-    #     hidden_state = torch.concat(hidden_state_splits, dim=-2)
-    #     orig = torch.concat(orig, dim=-2)
+    for i in range(config.total_stage-1):
+        last_hidden_state = comm.recvfrom(config.last_rank, device=device)
+        if config.is_first_stage:
+            _, sub_hidden_state = stage_model(
+                input_ids=last_hidden_state,
+                past_key_values=stage_past_key_values,
+            )
+            comm.sendto(sub_hidden_state.cpu(), config.next_rank)
+        else:
+            _, sub_hidden_state = stage_model(
+                inputs_embeds=last_hidden_state,
+                past_key_values=stage_past_key_values,
+            )
+            comm.sendto(sub_hidden_state.cpu(), config.next_rank)
 
-    #     return orig, hidden_state
     
 
 def prefill_pipeline0(stage_model, stage_past_key_values=None, input_ids = None):

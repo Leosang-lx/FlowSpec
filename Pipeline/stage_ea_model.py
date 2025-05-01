@@ -309,25 +309,27 @@ class StageEaModel(nn.Module):
         # [update] prefill: draft stage recv hidden_state and return orig
         if self.is_draft_stage:
             # [update] get input_ids from the first stage
-            input_ids, orig, hidden_state = pipeline_prefill(self)
+            input_ids = input_ids.clone()
             input_len = input_ids.shape[1]
+            orig, hidden_state = pipeline_prefill_new(self, input_ids=input_ids)
+            
             new_token = 0
             token = gen_token(logits=orig[:, -1], logits_processor=logits_processor)
             global skip_count 
             skip_count = 0
-        elif self.is_first_stage:
-            # ensure input_ids at the first stage
-            # max_length = max_length - self.ea_layer.total_tokens - 10 # 这一步在旧版本中就是没有用的
-            assert input_ids is not None and input_ids.shape[0] == 1, 'First stage must have valid "input_ids"'
-            # Avoid modifying the input_ids in-place
-            input_ids = input_ids.clone()
-            input_len = input_ids.shape[1]
+        # elif self.is_first_stage:
+        #     # ensure input_ids at the first stage
+        #     # max_length = max_length - self.ea_layer.total_tokens - 10 # 这一步在旧版本中就是没有用的
+        #     # assert input_ids is not None and input_ids.shape[0] == 1, 'First stage must have valid "input_ids"'
+        #     # Avoid modifying the input_ids in-place
+        #     # input_ids = input_ids.clone()
+          
 
-            # [prefill]
-            # with profiler.profile_context(f"Stage {config.stage}: pipeline_prefill", device=f"cuda:{device}") if profiler is not None else nullcontext():
-            pipeline_prefill(self, input_ids, past_key_values)
+        #     # [prefill]
+        #     # with profiler.profile_context(f"Stage {config.stage}: pipeline_prefill", device=f"cuda:{device}") if profiler is not None else nullcontext():
+        #     pipeline_prefill_new(self, stage_past_key_values=past_key_values)
         else:
-            pipeline_prefill(self, stage_past_key_values=past_key_values)
+            pipeline_prefill_new(self, stage_past_key_values=past_key_values)
         dist.barrier()
         should_stop = torch.tensor(0, dtype=torch.int32)
 
@@ -352,7 +354,7 @@ class StageEaModel(nn.Module):
                 outputs = pipeline_forward(
                     kv_cache=kv_cache,
                     logits_processor=logits_processor,
-                    input_ids=input_ids,
+                    # input_ids=input_ids,
                     # token=token,
                     # hidden_state=hidden_state,
                     # new_token=new_token,
@@ -528,7 +530,7 @@ class StageEaModel(nn.Module):
             # if config.is_draft_stage:
             #     print(f'Stage {config.stage} {i}th turn')
             ###################################################
-            # recv from last stage
+            # Partially: recv from last stage
             ###################################################
             with prof.time_context(f"Stage {config.stage}: part0, recv from last stage", cpu=True) if prof is not None else nullcontext():
                 if config.is_draft_stage or config.stage > i+1:
@@ -549,7 +551,7 @@ class StageEaModel(nn.Module):
                     tree_position_ids = None
                     
             ###################################################
-            # broadcast pruning info
+            # All: broadcast pruning info
             ###################################################
             with prof.time_context(f"Stage {config.stage}: part1,broadcast pruning info", cpu=False) if prof is not None else nullcontext():  
                 skip_pruning = False  
@@ -624,7 +626,7 @@ class StageEaModel(nn.Module):
                         truncate = new_sampled_token != -1
 
             #####################################
-            # pruning, in this part both draft and first stage do the waiting draft pruning, others are token pruning
+            # All: pruning, in this part both draft and first stage do the waiting draft pruning, others are token pruning
             #####################################
             with prof.time_context(f"Stage {config.stage}: part2, pruning", cpu=False) if prof is not None else nullcontext():  
                 if not skip_pruning:
@@ -673,7 +675,7 @@ class StageEaModel(nn.Module):
             # print(f'Stage {config.stage} {i}th turn pruning')
             # dist.barrier()
             ####################################
-            # 前向: draft stage topk, others forward
+            # Partially: draft stage topk, others forward
             #################################### 
             with prof.time_context(f"Stage {config.stage}: part3, forward", cpu=False) if prof is not None else nullcontext():
                 if config.is_draft_stage or config.stage > i+1:
