@@ -51,6 +51,7 @@ print(f'draft_tokens: {draft_tokens}')
 print(f'retrieve_indices: {retrieve_indices}')
 # print(f'tree_mask: {tree_mask}')
 print(f'tree_position_ids: {tree_position_ids}')
+print(f'retrieve_position_ids: {tree_position_ids[retrieve_indices]}')
 
 last_tree = draft_tokens, retrieve_indices, tree_mask, tree_position_ids
 
@@ -72,8 +73,9 @@ print(f'retrieve_indices: {retrieve_indices}')
 print(f'tree_position_ids: {tree_position_ids}')
 print(f'expand_size: {20}')
 # print(f'last_state: {last_state}')
+print(f'retrieve_position_ids: {tree_position_ids[retrieve_indices]}')
 
-
+assert draft_tokens.size(-1) == retrieve_indices.max()+1 == tree_mask.size(-1) == tree_mask.size(-2) == tree_position_ids.size(-1)
 
 
 print(tokenizer.decode(draft_tokens[0]))

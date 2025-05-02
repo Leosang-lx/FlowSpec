@@ -804,7 +804,6 @@ class Model(nn.Module):
         draft_tokens = torch.cat((sample_token, draft_tokens), dim=0)
 
         draft_parents = torch.cat(parents_list, dim=0)[top_scores_index // top_k].long()
-        print(f'draft_parents: {draft_parents}')
 
         if log:
             print(f'draft_parents: {draft_parents}')
@@ -814,9 +813,6 @@ class Model(nn.Module):
         # mask_index[(top_scores_index[mask_index]!=draft_parents - 1)]=-1
         mask_index[draft_parents == 0] = -1
         mask_index = mask_index + 1
-        print(f'mask_index:')
-        for i in range(len(mask_index)):
-            print(f'{i+1} parent: {mask_index[i]}')
         mask_index_list = mask_index.tolist()
         # with Timer("mask"):
         tree_mask = torch.eye(total_tokens + 1).bool()
@@ -924,6 +920,7 @@ class Model(nn.Module):
             topk_index, topk_p = top.indices, top.values
 
             cu_scores = topk_p + scores[:, None]
+            print(f'scores: {scores}')
 
             topk_cs = torch.topk(cu_scores.view(-1), top_k, dim=-1)
             topk_cs_index, topk_cs_p = topk_cs.indices, topk_cs.values
@@ -964,7 +961,7 @@ class Model(nn.Module):
                 tree_mask, len_posi, top_k,
                 topk_cs_index, scores, ss_token, scores_list, parents_list
             )
-
+        print(f'scores_list: {scores_list}')
         scores_list = torch.cat(scores_list, dim=0).view(-1)
         ss_token_list = torch.cat(ss_token, dim=0).view(-1)
 
@@ -1056,6 +1053,7 @@ class Model(nn.Module):
 
         rid = 0
         position_ids_list = tree_position_ids.tolist()
+        tree_position_ids = tree_position_ids[inv_indices]
 
         for i in range(total_tokens + 1):
             if i not in noleaf_index:
@@ -1088,7 +1086,18 @@ class Model(nn.Module):
         print(f'appended_top_scores_index: {appended_top_scores_index.shape}')
         print(f'ss_token_list: {ss_token_list.shape}')
         # print(f'merged_top_scores_index: {merged_top_scores_index}')
-        
+
+        print(f'last_top_scores_index: {last_top_scores_index}')
+        parents_list = torch.cat(parents_list, dim=0)
+        for i in appended_top_scores_index:
+            parent = parents_list[i // top_k] -1 
+            print(f'{i} parent: {parent}')
+            try:
+                assert parent in last_top_scores_index
+            except Exception as e:
+                print(f'{i} scores {scores_list[i]}')
+                print(f'{parent} scores {scores_list[parent]}')
+                raise e
 
         if return_last:
             return draft_tokens, retrieve_indices, tree_mask, tree_position_ids, current_state

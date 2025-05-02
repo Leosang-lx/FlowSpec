@@ -135,7 +135,9 @@ def split_close_equal(total_size, n) -> list:
         return [base_size for _ in range(n)]
     else:
         # leave the smaller one on the front
-        return [base_size if i >= reminder else base_size + 1 for i in range(n)]
+        split_lens = [base_size if i >= reminder else base_size + 1 for i in range(n)]
+        split_lens.reverse()
+        return split_lens
 
 
 def split_sequence_close_equal_len(sequence: torch.Tensor, split_cnt: Union[int, Iterable[int], list]): #  tuple is for tree partition

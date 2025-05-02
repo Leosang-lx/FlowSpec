@@ -33,7 +33,7 @@ def gen_stage_model_config_series(split_cnt: int, base_ea_config) -> StageEaConf
         has_draft_model = stage == 0
         # [update] only the first stage has embedding and lm_head
         has_embedding = stage == 1
-        has_lm_head = stage == 0 or stage == split_cnt
+        has_lm_head = stage == 0
 
         stage_model_config = StageEaConfig(
             ea_config=base_ea_config,
@@ -117,7 +117,7 @@ if __name__ == '__main__':
         torch_dtype=torch.float16
     )
     
-    stage_model_config_series = gen_stage_model_config_series(4, base_ea_config)
+    stage_model_config_series = gen_stage_model_config_series(3, base_ea_config)
     
     stage_model_save_dir = '/home/liux/big_file/pipeline_model/meta-llama/Llama-2-7b-chat-hf'
     for config in stage_model_config_series:
