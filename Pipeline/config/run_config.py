@@ -53,8 +53,13 @@ class Config:
         # expand draft config
         expand_total_token: int = 64
         expand_topk: int = 10 # now must be the same as init_topk
-        expand_depth: int = 6
-        expand_subseq_token: int = 64
+        expand_depth: int = 8
+        expand_subseq_token: int = -1
+        
+        none_expand: bool = False
+        if none_expand:
+            none_expand_depth: int = 3
+            none_expand_size: int = 32
         
     # device config
     device: str = "cuda"

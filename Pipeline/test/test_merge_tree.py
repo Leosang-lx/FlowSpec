@@ -30,7 +30,7 @@ model = EaModel.from_pretrained(
     depth=3
 )
 
-print('stage_model_draft loaded')
+print('EaMoel loaded')
 model.eval()
 
 prompt = "Hello, how are you?"

@@ -664,229 +664,606 @@ class Model(nn.Module):
     @torch.no_grad()
     def topK_genrate(self, hidden_states, input_ids, head, logits_processor,
                      total_tokens=None, depth=None, top_k=None,
-                     return_hidden=False, return_old=False, save_cache=False, prof=None):
+                     return_last=False,
+                     log=False):
         """
-        Important: save_cache should be used together with kv-cache pruning after receiving each verification result
+        past_key_values **after draft-many** includes draft tokens
         """
-        with prof.time_context(f"Stage 0: topK_generate prepare", cpu=False) if prof is not None else nullcontext():
-            input_ids = input_ids.to(hidden_states.device)
-            # [MODIFIED] custom tree scale
-            if total_tokens is None:
-                total_tokens = self.total_tokens
-            if depth is None:
-                depth = self.depth
-            if top_k is None:
-                top_k = self.top_k
-            elif top_k != self.top_k:
-                self.top_k = top_k
-                self.init_tree()
+        
+        input_ids = input_ids.to(hidden_states.device)
+        # [MODIFIED] custom tree scale
+        if total_tokens is None:
+            total_tokens = self.total_tokens
+        if depth is None:
+            depth = self.depth
+        if top_k is None:
+            top_k = self.top_k
+        elif top_k != self.top_k:
+            self.top_k = top_k
+            self.init_tree()
             # print(f'top_k: {top_k}')
 
-            sample_token = input_ids[:, -1]
+        sample_token = input_ids[:, -1]
 
-            scores_list = []
-            parents_list = []
-            ss_token = []
+        scores_list = []
+        parents_list = []
+        ss_token = []
 
-            input_ids = input_ids[:, 1:] # liux: (maybe)base model has generate 1 token before, drop the first one
-            input_ids = input_ids.to(hidden_states.device)
+        input_ids = input_ids[:, 1:] # liux: (maybe)base model has generate 1 token before, drop the first one
+        input_ids = input_ids.to(hidden_states.device)
 
-            len_posi = input_ids.shape[1]
+        len_posi = input_ids.shape[1]
         self.reset()
 
         # with Timer("draft many"):
-        with prof.time_context(f"Stage 0: topK_generate draft many", cpu=False) if prof is not None else nullcontext():
-            with prof.time_context(f"Stage 0: topK_generate draft one", cpu=False) if prof is not None else nullcontext():
-                if hasattr(self, "stable_kv") and self.stable_kv is not None:
-                    kv_len = self.stable_kv[0][0].shape[2]
-                    # print(f'kv_len in topk_genrate: {kv_len}')
-                    out_hidden, past_key_values = self(hidden_states, input_ids=input_ids[:, kv_len:],
-                                                    past_key_values=self.stable_kv, use_cache=True)
-                else:
-                    out_hidden, past_key_values = self(hidden_states, input_ids=input_ids, use_cache=True)
-            self.stable_kv = past_key_values
-            last_hidden = out_hidden[:, -1]
+        if hasattr(self, "stable_kv") and self.stable_kv is not None:
+            kv_len = self.stable_kv[0][0].shape[2]
+            # print(f'kv_len in topk_genrate: {kv_len}')
+            out_hidden, past_key_values = self(hidden_states, input_ids=input_ids[:, kv_len:],
+                                               past_key_values=self.stable_kv, use_cache=True)
+        else:
+            out_hidden, past_key_values = self(hidden_states, input_ids=input_ids, use_cache=True)
+        self.stable_kv = past_key_values
+        last_hidden = out_hidden[:, -1]
 
-            last_headout = head(last_hidden)
+        last_headout = head(last_hidden)
 
+        last_p = self.logsoftmax(last_headout)
+        top = torch.topk(last_p, top_k, dim=-1)
+        topk_index, topk_p = top.indices, top.values
+        scores = topk_p[0]
+        scores_list.append(scores[None])
+        parents_list.append(torch.zeros(1, dtype=torch.long, device=scores.device))
+        ss_token.append(topk_index)
+        input_ids = topk_index
+        input_hidden = last_hidden[None].repeat(1, top_k, 1)
+        self.tree_mask_init = self.tree_mask_init.to(self.embed_tokens.weight.device)
+        tree_mask = self.tree_mask_init
+        topk_cs_index = torch.arange(top_k, device=self.embed_tokens.weight.device)
+        # print(f"topk_cs_index.device={topk_cs_index.device}")
+
+        # 4
+        for i in range(depth):
+            self.tree_mask = tree_mask
+            position_ids = len_posi + self.position_ids
+            # with Timer("draft one"):
+            out_hidden, past_key_values = self(input_hidden, input_ids=input_ids, past_key_values=past_key_values,
+                                               position_ids=position_ids, use_cache=True)
+
+            len_posi += 1
+
+            # with Timer("sort1"):
+            bias1 = top_k if i > 0 else 0
+            bias2 = max(0, i - 1)
+            bias = 1 + top_k ** 2 * bias2 + bias1
+            parents = (topk_cs_index + bias)
+            parents_list.append(parents)
+
+            last_headout = head(out_hidden[0])
             last_p = self.logsoftmax(last_headout)
+
             top = torch.topk(last_p, top_k, dim=-1)
             topk_index, topk_p = top.indices, top.values
-            scores = topk_p[0]
-            scores_list.append(scores[None])
-            parents_list.append(torch.zeros(1, dtype=torch.long, device=scores.device))
+
+            cu_scores = topk_p + scores[:, None]
+
+            topk_cs = torch.topk(cu_scores.view(-1), top_k, dim=-1)
+            topk_cs_index, topk_cs_p = topk_cs.indices, topk_cs.values
+            scores = topk_cs_p
+
+            # if log:
+            #     print(f'topK_genrate depth {i}:')
+            #     print(f'-- out_hidden: {out_hidden.shape}')
+            #     print(f'-- input_ids: {input_ids.shape}')
+            #     print(f'-- last_p: {last_p.shape}')
+            #     print(f'-- topk_p: {topk_p.shape}')
+            #     print(f'-- scores: {scores.shape}')
+            #     print(f'-- ss_token: {sum([i.numel() for i in ss_token])}')
+
+            out_ids = topk_cs_index // top_k
+            # print(f"out_ids.device={out_ids.device}")
+            input_hidden = out_hidden[:, out_ids]
+
+
+            # with Timer("2index"):
+            #     in_ids = topk_cs_index % top_k
+            #     input_ids = topk_index[out_ids, in_ids][None]
+            # with Timer("1index"):
+            input_ids = topk_index.view(-1)[topk_cs_index][None]
+            # print(input_ids.equal(input_ids0))
+
             ss_token.append(topk_index)
-            input_ids = topk_index
-            input_hidden = last_hidden[None].repeat(1, top_k, 1)
-            self.tree_mask_init = self.tree_mask_init.to(self.embed_tokens.weight.device)
-            tree_mask = self.tree_mask_init
-            topk_cs_index = torch.arange(top_k, device=self.embed_tokens.weight.device)
-            # print(f"topk_cs_index.device={topk_cs_index.device}")
-
-            # [MODIFIED] return last_hidden_state in draft_generation for tree expansion
-            if return_hidden:
-                hidden_state_cum = []
-                hidden_state_cum.append(last_hidden)  # last_hidden: the hidden_state of the sampled token from the base model
-
-            # 4
-            for i in range(depth):
-                self.tree_mask = tree_mask
-                position_ids = len_posi + self.position_ids
-                # with Timer("draft one"):
-                with prof.time_context(f"Stage 0: topK_generate draft one", cpu=False) if prof is not None else nullcontext():
-                    out_hidden, past_key_values = self(input_hidden, input_ids=input_ids, past_key_values=past_key_values,
-                                                    position_ids=position_ids, use_cache=True)
-                # [MODIFIED] save cache for later tree expansion
-                if save_cache:
-                    self.stable_kv = past_key_values  # shape like tuple(tuple(Tensor))
-
-                len_posi += 1
-
-                # with Timer("sort1"):
-                bias1 = top_k if i > 0 else 0
-                bias2 = max(0, i - 1)
-                bias = 1 + top_k ** 2 * bias2 + bias1
-                parents = (topk_cs_index + bias)
-                parents_list.append(parents)
-
-                last_headout = head(out_hidden[0])
-                last_p = self.logsoftmax(last_headout)
-
-                top = torch.topk(last_p, top_k, dim=-1)
-                topk_index, topk_p = top.indices, top.values
-
-                cu_scores = topk_p + scores[:, None]
-
-                topk_cs = torch.topk(cu_scores.view(-1), top_k, dim=-1)
-                topk_cs_index, topk_cs_p = topk_cs.indices, topk_cs.values
-                scores = topk_cs_p
-
-                out_ids = topk_cs_index // top_k
-                # print(f"out_ids.device={out_ids.device}")
-                input_hidden = out_hidden[:, out_ids]
-                if return_hidden:
-                    hidden_state_cum.append(input_hidden)
-
-                # with Timer("2index"):
-                #     in_ids = topk_cs_index % top_k
-                #     input_ids = topk_index[out_ids, in_ids][None]
-                # with Timer("1index"):
-                input_ids = topk_index.view(-1)[topk_cs_index][None]
-                # print(input_ids.equal(input_ids0))
-
-                ss_token.append(topk_index)
-                scores_list.append(cu_scores)
-                # print(f"tree_mask.device={tree_mask.device}, self.tree_mask_init.device={self.tree_mask_init.device}")
-                # print(f"out_ids.device={out_ids.device}, input_ids.device={input_ids.device}")
-                tree_mask = torch.cat((tree_mask[:, :, out_ids], self.tree_mask_init), dim=3)
+            scores_list.append(cu_scores)
+            # print(f"tree_mask.device={tree_mask.device}, self.tree_mask_init.device={self.tree_mask_init.device}")
+            # print(f"out_ids.device={out_ids.device}, input_ids.device={input_ids.device}")
+            tree_mask = torch.cat((tree_mask[:, :, out_ids], self.tree_mask_init), dim=3)
 
             # if self.threshold < 0 and cu_scores.max() < self.threshold:
             #     break
 
+        current_state = None
+        if return_last:
+            last_depth = i + 1
+            current_state = (
+                last_depth, #total_tokens,
+                input_ids, input_hidden, past_key_values,
+                tree_mask, len_posi, top_k,
+                topk_cs_index, scores, ss_token, scores_list, parents_list,
+            )
         # del parents_list,scores_list,ss_token
         # return draft_tokens, mask_index,tree_mask,tree_position_ids
 
         # with Timer("post"):
-        with prof.time_context(f"Stage 0: topK_generate post", cpu=False) if prof is not None else nullcontext():
-            scores_list = torch.cat(scores_list, dim=0).view(-1)
-            ss_token_list = torch.cat(ss_token, dim=0).view(-1)
 
-            all_draft_size = scores_list.size(-1)
-            # print(f'All draft: {all_draft_size}')
+        scores_list = torch.cat(scores_list, dim=0).view(-1)
+        ss_token_list = torch.cat(ss_token, dim=0).view(-1)
 
-            top_scores = torch.topk(scores_list, total_tokens, dim=-1)
-            top_scores_index = top_scores.indices
-            top_scores_index = torch.sort(top_scores_index).values
+        # all_draft_size = scores_list.size(-1)
+        # print(f'All draft: {all_draft_size}')
 
-            if save_cache:  # todo: verify the correctness
-                past_key_values = ((
-                    torch.cat(k[:, -all_draft_size], k[:, -all_draft_size:][:, top_scores_index]),
-                    torch.cat(v[:, -all_draft_size], v[:, -all_draft_size:][:, top_scores_index])
-                    ) for k, v in past_key_values)
+        top_scores = torch.topk(scores_list, total_tokens, dim=-1)
+        top_scores_index = top_scores.indices
+        top_scores_index = torch.sort(top_scores_index).values
 
-            if return_hidden:
-                draft_hidden = torch.cat(hidden_state_cum, dim=-2)  # cat the draft tree hidden on the sequence dimension
-                if not return_old:
-                    draft_hidden = draft_hidden[:, top_scores_index]  # select the hidden related to the selected draft tokens
+        if return_last:
+            current_state = current_state + (top_scores_index,)
 
-            draft_tokens = ss_token_list[top_scores_index]
-            draft_tokens = torch.cat((sample_token, draft_tokens), dim=0)
+        draft_tokens = ss_token_list[top_scores_index]
+        draft_tokens = torch.cat((sample_token, draft_tokens), dim=0)
 
-            draft_parents = torch.cat(parents_list, dim=0)[top_scores_index // top_k].long()
-            mask_index = torch.searchsorted(top_scores_index, draft_parents - 1, right=False)
-            # mask_index[(top_scores_index[mask_index]!=draft_parents - 1)]=-1
-            mask_index[draft_parents == 0] = -1
-            mask_index = mask_index + 1
-            mask_index_list = mask_index.tolist()
-            # with Timer("mask"):
-            tree_mask = torch.eye(total_tokens + 1).bool()
-            tree_mask[:, 0] = True
-            for i in range(total_tokens):
-                tree_mask[i + 1].add_(tree_mask[mask_index_list[i]])
+        draft_parents = torch.cat(parents_list, dim=0)[top_scores_index // top_k].long()
+        # print(f'draft_parents: {draft_parents}')
 
-            # with Timer("mask1"):
-            #     tree_mask0 = [[False for _ in range(total_tokens + 1)] for _ in range(total_tokens + 1)]
-            #     tree_mask0[0][0] = True
-            #     for i in range(total_tokens):
-            #         #tree_mask0[i + 1][0]=True
-            #         tree_mask0[i + 1][i + 1] = True
-            #         p=mask_index_list[i]
-            #         tree_mask0[i + 1][p] = True
-            #         while p:
-            #             p=mask_index_list[p-1]
-            #             tree_mask0[i + 1][p] = True
-            #     tree_mask0 = torch.tensor(tree_mask0, dtype=torch.bool)
-            #
-            # print(tree_mask0.equal(tree_mask))
-            tree_position_ids = torch.sum(tree_mask, dim=1) - 1
+        if log:
+            print(f'draft_parents: {draft_parents}')
+            print(f'ss_token_list: {ss_token_list.shape}')
 
-            tree_mask = tree_mask.float()[None, None]
-            draft_tokens = draft_tokens[None]
+        mask_index = torch.searchsorted(top_scores_index, draft_parents - 1, right=False)
+        # mask_index[(top_scores_index[mask_index]!=draft_parents - 1)]=-1
+        mask_index[draft_parents == 0] = -1
+        mask_index = mask_index + 1
+        # print(f'mask_index:')
+        # for i in range(len(mask_index)):
+        #     print(f'{i+1} parent: {mask_index[i]}')
+        mask_index_list = mask_index.tolist()
+        # with Timer("mask"):
+        tree_mask = torch.eye(total_tokens + 1).bool()
+        tree_mask[:, 0] = True
+        for i in range(total_tokens):
+            tree_mask[i + 1].add_(tree_mask[mask_index_list[i]])
 
-            del parents_list, scores_list, ss_token, ss_token_list, draft_parents
+        # with Timer("mask1"):
+        #     tree_mask0 = [[False for _ in range(total_tokens + 1)] for _ in range(total_tokens + 1)]
+        #     tree_mask0[0][0] = True
+        #     for i in range(total_tokens):
+        #         #tree_mask0[i + 1][0]=True
+        #         tree_mask0[i + 1][i + 1] = True
+        #         p=mask_index_list[i]
+        #         tree_mask0[i + 1][p] = True
+        #         while p:
+        #             p=mask_index_list[p-1]
+        #             tree_mask0[i + 1][p] = True
+        #     tree_mask0 = torch.tensor(tree_mask0, dtype=torch.bool)
+        #
+        # print(tree_mask0.equal(tree_mask))
+        tree_position_ids = torch.sum(tree_mask, dim=1) - 1
 
-            # with Timer("retrieve"):
+        tree_mask = tree_mask.float()[None, None]
+        draft_tokens = draft_tokens[None]
 
-            max_depth = torch.max(tree_position_ids) + 1
-            noleaf_index = torch.unique(mask_index).tolist()
-            noleaf_num = len(noleaf_index) - 1
-            leaf_num = total_tokens - noleaf_num
 
-            retrieve_indices = torch.zeros(leaf_num, max_depth.item(), dtype=torch.long) - 1
-            retrieve_indices = retrieve_indices.tolist()
 
-            rid = 0
-            position_ids_list = tree_position_ids.tolist()
+        del parents_list, scores_list, ss_token, ss_token_list, draft_parents
 
-            for i in range(total_tokens + 1):
-                if i not in noleaf_index:
-                    cid = i
-                    depth = position_ids_list[i]
-                    for j in reversed(range(depth + 1)):
-                        retrieve_indices[rid][j] = cid
-                        cid = mask_index_list[cid - 1]
-                    rid += 1
+        # with Timer("retrieve"):
 
-            if logits_processor is not None:
-                maxitem = total_tokens + 5
+        max_depth = torch.max(tree_position_ids) + 1
+        noleaf_index = torch.unique(mask_index).tolist()
+        noleaf_num = len(noleaf_index) - 1
+        leaf_num = total_tokens - noleaf_num
 
-                def custom_sort(lst):
-                    # sort_keys=[len(list)]
-                    sort_keys = []
-                    for i in range(len(lst)):
-                        sort_keys.append(lst[i] if lst[i] >= 0 else maxitem)
-                    return sort_keys
+        retrieve_indices = torch.zeros(leaf_num, max_depth.item(), dtype=torch.long) - 1
+        retrieve_indices = retrieve_indices.tolist()
 
-                retrieve_indices = sorted(retrieve_indices, key=custom_sort)
+        rid = 0
+        position_ids_list = tree_position_ids.tolist()
 
-            retrieve_indices = torch.tensor(retrieve_indices, dtype=torch.long)
-            del mask_index, mask_index_list, noleaf_index, noleaf_num, leaf_num, max_depth, rid
-            tree_position_ids = tree_position_ids.to(hidden_states.device)
+        for i in range(total_tokens + 1):
+            if i not in noleaf_index:
+                cid = i
+                depth = position_ids_list[i]
+                for j in reversed(range(depth + 1)):
+                    retrieve_indices[rid][j] = cid
+                    cid = mask_index_list[cid - 1]
+                rid += 1
 
-        if return_hidden:
-            return draft_tokens, retrieve_indices, tree_mask, tree_position_ids, draft_hidden
+        if logits_processor is not None:
+            maxitem = total_tokens + 5
 
-        return draft_tokens, retrieve_indices, tree_mask, tree_position_ids
+            def custom_sort(lst):
+                # sort_keys=[len(list)]
+                sort_keys = []
+                for i in range(len(lst)):
+                    sort_keys.append(lst[i] if lst[i] >= 0 else maxitem)
+                return sort_keys
+
+            retrieve_indices = sorted(retrieve_indices, key=custom_sort)
+
+        retrieve_indices = torch.tensor(retrieve_indices, dtype=torch.long)
+        del mask_index, mask_index_list, noleaf_index, noleaf_num, leaf_num, max_depth, rid
+        tree_position_ids = tree_position_ids.to(hidden_states.device)
+        
+        return draft_tokens, retrieve_indices, tree_mask, tree_position_ids, current_state
+    
+    @torch.no_grad()
+    def expand_last_new(self, last_tree, last_state, head, logits_processor, device,
+                    expand_depth=1, expand_size=20,
+                    return_last=False, log=False):
+        """
+        Expand the current tree with probs of all draft tokens
+        """
+        last_draft_tokens, last_retrieve_indices, last_tree_mask, last_tree_position_ids = last_tree
+        last_depth, last_total_tokens, \
+        input_ids, input_hidden, past_key_values, \
+        tree_mask, len_posi, top_k, \
+        topk_cs_index, scores, ss_token, scores_list, parents_list, last_top_scores_index = last_state
+        
+        total_tokens = last_total_tokens + expand_size
+        sample_token = input_ids[:, -1]
+
+        for i in range(last_depth, last_depth + expand_depth):
+            self.tree_mask = tree_mask
+            position_ids = len_posi + self.position_ids
+            # with Timer("draft one"):
+            out_hidden, past_key_values = self(input_hidden, input_ids=input_ids, past_key_values=past_key_values,
+                                               position_ids=position_ids, use_cache=True)
+
+            len_posi += 1
+
+            # with Timer("sort1"):
+            bias1 = top_k if i > 0 else 0
+            bias2 = max(0, i - 1)
+            bias = 1 + top_k ** 2 * bias2 + bias1
+            parents = (topk_cs_index + bias)
+            parents_list.append(parents)
+
+            last_headout = head(out_hidden[0])
+            last_p = self.logsoftmax(last_headout)
+
+            top = torch.topk(last_p, top_k, dim=-1)
+            topk_index, topk_p = top.indices, top.values
+
+            cu_scores = topk_p + scores[:, None]
+
+            topk_cs = torch.topk(cu_scores.view(-1), top_k, dim=-1)
+            topk_cs_index, topk_cs_p = topk_cs.indices, topk_cs.values
+            scores = topk_cs_p
+
+            # if log:
+            #     print(f'topK_genrate depth {i}:')
+            #     print(f'-- out_hidden: {out_hidden.shape}')
+            #     print(f'-- input_ids: {input_ids.shape}')
+            #     print(f'-- last_p: {last_p.shape}')
+            #     print(f'-- topk_p: {topk_p.shape}')
+            #     print(f'-- scores: {scores.shape}')
+            #     print(f'-- ss_token: {sum([i.numel() for i in ss_token])}')
+
+            out_ids = topk_cs_index // top_k
+            # print(f"out_ids.device={out_ids.device}")
+            input_hidden = out_hidden[:, out_ids]
+
+
+            # with Timer("2index"):
+            #     in_ids = topk_cs_index % top_k
+            #     input_ids = topk_index[out_ids, in_ids][None]
+            # with Timer("1index"):
+            input_ids = topk_index.view(-1)[topk_cs_index][None]
+            # print(input_ids.equal(input_ids0))
+
+            ss_token.append(topk_index)
+            scores_list.append(cu_scores)
+            # print(f"tree_mask.device={tree_mask.device}, self.tree_mask_init.device={self.tree_mask_init.device}")
+            # print(f"out_ids.device={out_ids.device}, input_ids.device={input_ids.device}")
+            tree_mask = torch.cat((tree_mask[:, :, out_ids], self.tree_mask_init), dim=3)
+        
+        current_state = None
+        if return_last:
+            last_depth = i + 1
+            current_state = (
+                last_depth, total_tokens,
+                input_ids, input_hidden, past_key_values,
+                tree_mask, len_posi, top_k,
+                topk_cs_index, scores, ss_token, scores_list, parents_list,
+            )
+        # del parents_list,scores_list,ss_token
+        # return draft_tokens, mask_index,tree_mask,tree_position_ids
+
+        # with Timer("post"):
+
+        scores_list = torch.cat(scores_list, dim=0).view(-1)
+        ss_token_list = torch.cat(ss_token, dim=0).view(-1)
+
+        # all_draft_size = scores_list.size(-1)
+        # print(f'All draft: {all_draft_size}')
+
+        top_scores = torch.topk(scores_list, total_tokens, dim=-1)
+        top_scores_index = top_scores.indices
+        top_scores_index = torch.sort(top_scores_index).values
+
+        if return_last:
+            current_state = current_state + (top_scores_index,)
+
+        draft_tokens = ss_token_list[top_scores_index]
+        draft_tokens = torch.cat((sample_token, draft_tokens), dim=0)
+
+        draft_parents = torch.cat(parents_list, dim=0)[top_scores_index // top_k].long()
+        # print(f'draft_parents: {draft_parents}')
+
+        if log:
+            print(f'draft_parents: {draft_parents}')
+            print(f'ss_token_list: {ss_token_list.shape}')
+
+        mask_index = torch.searchsorted(top_scores_index, draft_parents - 1, right=False)
+        # mask_index[(top_scores_index[mask_index]!=draft_parents - 1)]=-1
+        mask_index[draft_parents == 0] = -1
+        mask_index = mask_index + 1
+        # print(f'mask_index:')
+        # for i in range(len(mask_index)):
+        #     print(f'{i+1} parent: {mask_index[i]}')
+        mask_index_list = mask_index.tolist()
+        # with Timer("mask"):
+        tree_mask = torch.eye(total_tokens + 1).bool()
+        tree_mask[:, 0] = True
+        for i in range(total_tokens):
+            tree_mask[i + 1].add_(tree_mask[mask_index_list[i]])
+
+        # with Timer("mask1"):
+        #     tree_mask0 = [[False for _ in range(total_tokens + 1)] for _ in range(total_tokens + 1)]
+        #     tree_mask0[0][0] = True
+        #     for i in range(total_tokens):
+        #         #tree_mask0[i + 1][0]=True
+        #         tree_mask0[i + 1][i + 1] = True
+        #         p=mask_index_list[i]
+        #         tree_mask0[i + 1][p] = True
+        #         while p:
+        #             p=mask_index_list[p-1]
+        #             tree_mask0[i + 1][p] = True
+        #     tree_mask0 = torch.tensor(tree_mask0, dtype=torch.bool)
+        #
+        # print(tree_mask0.equal(tree_mask))
+        tree_position_ids = torch.sum(tree_mask, dim=1) - 1
+
+        tree_mask = tree_mask.float()[None, None]
+        draft_tokens = draft_tokens[None]
+
+
+
+        del parents_list, scores_list, ss_token, ss_token_list, draft_parents
+
+        # with Timer("retrieve"):
+
+        max_depth = torch.max(tree_position_ids) + 1
+        noleaf_index = torch.unique(mask_index).tolist()
+        noleaf_num = len(noleaf_index) - 1
+        leaf_num = total_tokens - noleaf_num
+
+        retrieve_indices = torch.zeros(leaf_num, max_depth.item(), dtype=torch.long) - 1
+        retrieve_indices = retrieve_indices.tolist()
+
+        rid = 0
+        position_ids_list = tree_position_ids.tolist()
+
+        for i in range(total_tokens + 1):
+            if i not in noleaf_index:
+                cid = i
+                depth = position_ids_list[i]
+                for j in reversed(range(depth + 1)):
+                    retrieve_indices[rid][j] = cid
+                    cid = mask_index_list[cid - 1]
+                rid += 1
+
+        if logits_processor is not None:
+            maxitem = total_tokens + 5
+
+            def custom_sort(lst):
+                # sort_keys=[len(list)]
+                sort_keys = []
+                for i in range(len(lst)):
+                    sort_keys.append(lst[i] if lst[i] >= 0 else maxitem)
+                return sort_keys
+
+            retrieve_indices = sorted(retrieve_indices, key=custom_sort)
+
+        retrieve_indices = torch.tensor(retrieve_indices, dtype=torch.long)
+        del mask_index, mask_index_list, noleaf_index, noleaf_num, leaf_num, max_depth, rid
+        tree_position_ids = tree_position_ids.to(device)
+        
+        return draft_tokens, retrieve_indices, tree_mask, tree_position_ids, current_state
+    
+    @torch.no_grad()
+    def expand_last(self, last_tree, last_state, head, logits_processor, device,
+                    expand_depth=1, expand_size=20,
+                    return_last=True, log=False):
+        """
+        Expand the current tree with probs of all draft tokens
+        """
+        last_draft_tokens, last_retrieve_indices, last_tree_mask, last_tree_position_ids = last_tree
+        last_depth, \
+        input_ids, input_hidden, past_key_values, \
+        tree_mask, len_posi, top_k, \
+        topk_cs_index, scores, ss_token, scores_list, parents_list, last_top_scores_index = last_state
+
+        for i in range(last_depth, last_depth + expand_depth):
+            self.tree_mask = tree_mask
+            position_ids = len_posi + self.position_ids
+            # with Timer("draft one"):
+            out_hidden, past_key_values = self(input_hidden, input_ids=input_ids, past_key_values=past_key_values,
+                                               position_ids=position_ids, use_cache=True)
+
+            len_posi += 1
+
+            # with Timer("sort1"):
+            bias1 = top_k if i > 0 else 0
+            bias2 = max(0, i - 1)
+            bias = 1 + top_k ** 2 * bias2 + bias1
+            parents = (topk_cs_index + bias)
+            parents_list.append(parents)
+
+            last_headout = head(out_hidden[0])
+            last_p = self.logsoftmax(last_headout)
+
+            top = torch.topk(last_p, top_k, dim=-1)
+            topk_index, topk_p = top.indices, top.values
+
+            cu_scores = topk_p + scores[:, None]
+
+            topk_cs = torch.topk(cu_scores.view(-1), top_k, dim=-1)
+            topk_cs_index, topk_cs_p = topk_cs.indices, topk_cs.values
+            scores = topk_cs_p
+
+            # if log:
+            #     print(f'topK_genrate depth {i}:')
+            #     print(f'-- out_hidden: {out_hidden.shape}')
+            #     print(f'-- input_ids: {input_ids.shape}')
+            #     print(f'-- last_p: {last_p.shape}')
+            #     print(f'-- topk_p: {topk_p.shape}')
+            #     print(f'-- scores: {scores.shape}')
+            #     print(f'-- ss_token: {sum([i.numel() for i in ss_token])}')
+
+            out_ids = topk_cs_index // top_k
+            # print(f"out_ids.device={out_ids.device}")
+            input_hidden = out_hidden[:, out_ids]
+
+
+            # with Timer("2index"):
+            #     in_ids = topk_cs_index % top_k
+            #     input_ids = topk_index[out_ids, in_ids][None]
+            # with Timer("1index"):
+            input_ids = topk_index.view(-1)[topk_cs_index][None]
+            # print(input_ids.equal(input_ids0))
+
+            ss_token.append(topk_index)
+            scores_list.append(cu_scores)
+            # print(f"tree_mask.device={tree_mask.device}, self.tree_mask_init.device={self.tree_mask_init.device}")
+            # print(f"out_ids.device={out_ids.device}, input_ids.device={input_ids.device}")
+            tree_mask = torch.cat((tree_mask[:, :, out_ids], self.tree_mask_init), dim=3)
+
+        current_state = None
+        if return_last:
+            last_depth = i + 1
+            current_state = (
+                last_depth,
+                input_ids, input_hidden, past_key_values,
+                tree_mask, len_posi, top_k,
+                topk_cs_index, scores, ss_token, scores_list, parents_list
+            )
+
+        scores_list = torch.cat(scores_list, dim=0).view(-1)
+        ss_token_list = torch.cat(ss_token, dim=0).view(-1)
+
+        # all_draft_size = scores_list.size(-1)
+        # mask last_selected
+        last_selected_mask = torch.ones_like(scores_list, dtype=torch.bool)
+        last_selected_mask[last_top_scores_index] = False
+        masked_scores_list = scores_list[last_selected_mask]
+        
+        # scores_list[last_top_scores_index] = -torch.inf
+        # appended_top_scores = torch.topk(scores_list, expand_size, dim=-1)
+
+        valid_indices = torch.nonzero(last_selected_mask).squeeze()
+        appended_top_scores = torch.topk(masked_scores_list, expand_size, dim=-1)
+        appended_top_scores_index = appended_top_scores.indices
+        appended_top_scores_index = valid_indices[appended_top_scores_index]  # map to original indices
+        appended_top_scores_index = torch.sort(appended_top_scores_index).values
+        # print(f'appended_top_scores_index: {appended_top_scores_index}')
+
+        last_size = last_draft_tokens.size(-1)
+
+        merged_top_indices = torch.cat((last_top_scores_index, appended_top_scores_index), dim=-1)
+        if return_last:
+            current_state = current_state + (merged_top_indices,)
+
+        merged_sorted_top_indices, merged_indices_origin = torch.sort(merged_top_indices)
+        merged_indices_origin = F.pad((merged_indices_origin+1).cpu(), (1, 0), value=0)
+
+        # 构造反向索引
+        inv_indices = torch.zeros(merged_indices_origin.size(0), dtype=torch.long)
+        inv_indices[merged_indices_origin] = torch.arange(merged_indices_origin.size(0), dtype=torch.long)
+
+        draft_tokens_new = torch.cat((last_draft_tokens[:, 0], ss_token_list[merged_sorted_top_indices]), dim=-1)
+        draft_tokens_new = draft_tokens_new[inv_indices]
+
+        draft_tokens = torch.cat((last_draft_tokens[0], ss_token_list[appended_top_scores_index]), dim=-1)
+        assert torch.equal(draft_tokens, draft_tokens_new)
+
+        # print(f'parents_list: {parents_list}')
+        draft_parents = torch.cat(parents_list, dim=0)[merged_sorted_top_indices // top_k].long()
+
+        mask_index = torch.searchsorted(merged_sorted_top_indices, draft_parents - 1, right=False)
+        # mask_index = mask_index[torch.sort(merged_indices_origin).values]
+        mask_index[draft_parents == 0] = -1
+        mask_index = mask_index + 1
+
+        # print(f'mask_index: {mask_index}')
+        mask_index_list = mask_index.tolist()
+
+        total_tokens = last_size + expand_size - 1
+        tree_mask = torch.eye(total_tokens + 1).bool()
+        tree_mask[:, 0] = True
+        for i in range(total_tokens):
+            tree_mask[i + 1].add_(tree_mask[mask_index_list[i]])
+
+        tree_position_ids = torch.sum(tree_mask, dim=1) - 1
+        # tree_position_ids = tree_position_ids[inv_indices]
+        tree_mask = tree_mask[inv_indices]
+        tree_mask = tree_mask[:, inv_indices]
+        tree_mask = tree_mask.float()[None, None]
+
+        assert torch.equal(tree_mask[0, 0, :last_size, :last_size], last_tree_mask[0, 0])
+        draft_tokens = draft_tokens[None]
+
+        # [retrieve_indices]
+        max_depth = torch.max(tree_position_ids) + 1
+        noleaf_index = torch.unique(mask_index).tolist()
+        noleaf_num = len(noleaf_index) - 1
+        leaf_num = total_tokens - noleaf_num
+
+        retrieve_indices = torch.zeros(leaf_num, max_depth.item(), dtype=torch.long) - 1
+        retrieve_indices = retrieve_indices.tolist()
+
+        rid = 0
+        position_ids_list = tree_position_ids.tolist()
+        tree_position_ids = tree_position_ids[inv_indices]
+
+        for i in range(total_tokens + 1):
+            if i not in noleaf_index:
+                cid = i
+                depth = position_ids_list[i]
+                for j in reversed(range(depth + 1)):
+                    retrieve_indices[rid][j] = cid
+                    cid = mask_index_list[cid - 1]
+                rid += 1
+
+        if logits_processor is not None:
+            maxitem = total_tokens + 5
+
+            def custom_sort(lst):
+                # sort_keys=[len(list)]
+                sort_keys = []
+                for i in range(len(lst)):
+                    sort_keys.append(lst[i] if lst[i] >= 0 else maxitem)
+                return sort_keys
+
+            retrieve_indices = sorted(retrieve_indices, key=custom_sort)
+
+        retrieve_indices = torch.tensor(retrieve_indices, dtype=torch.long)
+        from pipeline_utils import map_retrieve_indices
+        retrieve_indices = map_retrieve_indices(retrieve_indices, torch.arange(draft_tokens.size(-1)), merged_indices_origin)
+        del mask_index, mask_index_list, noleaf_index, noleaf_num, leaf_num, max_depth, rid
+        tree_position_ids = tree_position_ids.to(device)
+        
+        return draft_tokens, retrieve_indices, tree_mask, tree_position_ids, current_state
+
 
     @torch.no_grad()
     def acc(self, data, head, max_length=5):
