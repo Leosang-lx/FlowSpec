@@ -4,11 +4,11 @@ from dataclasses import dataclass
 class Config:
     
     # run config
-    mode = "demo" # "eval" or "demo"
+    mode = "eval" # "eval" or "demo"
     pipeline_type: str = "continuous"
     warmup = True
-    warmup_repeat = 5
-    test_repeat = 10
+    warmup_repeat = 3
+    test_repeat = 2 # this refer to num of choices in the eval set
     
     log: bool = False
     temperature: float = 0.0
@@ -58,8 +58,8 @@ class Config:
         
         none_expand: bool = False
         if none_expand:
-            none_expand_depth: int = 3
             none_expand_size: int = 32
+            none_expand_depth: int = 3
         
     # device config
     device: str = "cuda"

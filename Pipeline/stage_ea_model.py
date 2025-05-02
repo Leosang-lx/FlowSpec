@@ -752,7 +752,7 @@ class StageEaModel(nn.Module):
                     return_last=run_config.none_expand,
             )
             if run_config.none_expand:
-                last_ea_tree = (draft_tokens, retrieve_indices, tree_mask, tree_position_ids, last_ea_state)
+                last_ea_tree = (draft_tokens, retrieve_indices, tree_mask, tree_position_ids)
                 
             tree_position_ids = tree_position_ids + input_ids.size(-1)
             
@@ -961,14 +961,14 @@ class StageEaModel(nn.Module):
                                     # total_tokens=80
                                 )  # get a little more appended tokens
                             if run_config.none_expand:
-                                last_ea_tree = (draft_tokens2, retrieve_indices2, tree_mask2, tree_position_ids2, last_ea_state)
+                                last_ea_tree = (draft_tokens2, retrieve_indices2, tree_mask2, tree_position_ids2)
                             assert retrieve_indices2.size(-1) > max(tree_position_ids2), f'retrieve_indices2.size(-1) > max(tree_position_ids2): {retrieve_indices2.size(-1)} and {max(tree_position_ids2)}'
                             tree_position_ids2 = tree_position_ids2 + input_ids.size(-1)
                             assert draft_tokens.size(-1) == tree_position_ids.size(0), f'draft_tokens != tree_pos_ids: {draft_tokens.size(-1)} and {tree_position_ids.size(0)}'
 
-                            with prof.time_context(f"Stage {config.stage}: merge_two_tree", cpu=True) if prof is not None else nullcontext():
+                            origin_device = draft_tokens.device
+                            with prof.time_context(f"Stage {config.stage}: merge_two_tree", cpu=False) if prof is not None else nullcontext():
                                 # [update] operate on CPU
-                                origin_device = draft_tokens.device
                                 draft_tokens, retrieve_indices, tree_mask, tree_position_ids, lens_split, subseq_ri_cum_depths = merge_two_tree(
                                     (draft_tokens.cpu(), retrieve_indices.cpu(), tree_mask.cpu(), tree_position_ids.cpu()),
                                     (draft_tokens2.cpu(), retrieve_indices2.cpu(), tree_mask2.cpu(), tree_position_ids2.cpu()),
@@ -981,37 +981,38 @@ class StageEaModel(nn.Module):
                                 
                         waiting_draft = lens_split[-1].item()
 
-                        appended_draft_len = min(waiting_draft, run_config.expand_subseq_token)  if run_config.expand_subseq_token != -1 else waiting_draft
+                        appended_draft_len = min(waiting_draft, run_config.expand_subseq_token) if run_config.expand_subseq_token != -1 else waiting_draft
                         lens_split[-1] = appended_draft_len
 
                     else:
                         if run_config.none_expand and (last_ea_state is not None):
-                            with prof.time_context(f"Stage {config.stage}: expand_last", cpu=False) if prof is not None else nullcontext():
-                                draft_tokens2, retrieve_indices2, tree_mask2, tree_position_ids2, last_ea_state = self.ea_layer.expand_last(
-                                    last_ea_tree,
-                                    last_ea_state,
-                                    self.stage_base_model.lm_head,
-                                    logits_processor,
-                                    device,
-                                    expand_depth=run_config.none_expand_depth,
-                                    expand_size=run_config.none_expand_size,
-                                    return_last=run_config.none_expand,
-                                )
+                            with prof.time_context(f"Stage {config.stage}: tree_expand_last", cpu=False) if prof is not None else nullcontext():
+                                with prof.time_context(f"Stage {config.stage}: expand_last", cpu=False) if prof is not None else nullcontext():
+                                    draft_tokens2, retrieve_indices2, tree_mask2, tree_position_ids2, last_ea_state = self.ea_layer.expand_last(
+                                        last_ea_tree,
+                                        last_ea_state,
+                                        self.stage_base_model.lm_head,
+                                        logits_processor,
+                                        device,
+                                        expand_depth=run_config.none_expand_depth,
+                                        expand_size=run_config.none_expand_size,
+                                        return_last=run_config.none_expand,
+                                    )
                                 last_ea_tree = (draft_tokens2, retrieve_indices2, tree_mask2, tree_position_ids2)
                                 tree_position_ids2 = tree_position_ids2 + input_ids.size(-1)
                                 
-                                with prof.time_context(f"Stage {config.stage}: merge_two_tree", cpu=True) if prof is not None else nullcontext():
+                                origin_device = draft_tokens.device
+                                with prof.time_context(f"Stage {config.stage}: merge_two_tree", cpu=False) if prof is not None else nullcontext():
                                     # [update] operate on CPU
-                                    origin_device = draft_tokens.device
                                     draft_tokens, retrieve_indices, tree_mask, tree_position_ids, lens_split, subseq_ri_cum_depths = merge_two_tree(
                                         (draft_tokens.cpu(), retrieve_indices.cpu(), tree_mask.cpu(), tree_position_ids.cpu()),
                                         (draft_tokens2.cpu(), retrieve_indices2.cpu(), tree_mask2.cpu(), tree_position_ids2.cpu()),
                                         lens_split,
                                         subseq_ri_cum_depths
                                     )
-                                    draft_tokens = draft_tokens.to(origin_device)
-                                    tree_mask = tree_mask.to(origin_device)
-                                    tree_position_ids = tree_position_ids.to(origin_device)
+                                draft_tokens = draft_tokens.to(origin_device)
+                                tree_mask = tree_mask.to(origin_device)
+                                tree_position_ids = tree_position_ids.to(origin_device)
                                     
                                 waiting_draft = lens_split[-1].item()
 
