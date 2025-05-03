@@ -4,11 +4,11 @@ from dataclasses import dataclass
 class Config:
     
     # run config
-    mode = "eval" # "eval" or "demo"
+    mode = "demo" # "eval" or "demo"
     pipeline_type: str = "continuous"
     warmup = True
-    warmup_repeat = 3
-    test_repeat = 2 # this refer to num of choices in the eval set
+    warmup_repeat = 10
+    test_repeat = 10 # this refer to num of choices in the eval set
     
     log: bool = False
     temperature: float = 0.0
@@ -56,7 +56,7 @@ class Config:
         expand_depth: int = 8
         expand_subseq_token: int = -1
         
-        none_expand: bool = False
+        none_expand: bool = True
         if none_expand:
             none_expand_size: int = 32
             none_expand_depth: int = 3
