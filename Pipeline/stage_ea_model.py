@@ -409,11 +409,16 @@ class StageEaModel(nn.Module):
     ):  
         if self.is_draft_stage:
             input_ids_ea = torch.cat((input_ids, token.to(input_ids.device)), dim=1)
-            draft_tokens, retrieve_indices, tree_mask, tree_position_ids = self.ea_layer.topK_genrate(
+            draft_tokens, retrieve_indices, tree_mask, tree_position_ids, last_ea_state = self.ea_layer.topK_genrate(
                 hidden_state,
                 input_ids_ea,
                 self.stage_base_model.lm_head,
-                logits_processor
+                logits_processor,
+                total_tokens=run_config.init_total_token,
+                depth=run_config.init_depth,
+                top_k=run_config.init_topk,
+                return_last=False,
+                # prof=prof,
             )
             seqs_split, lens_split = split_sequence_close_equal_len(
                 draft_tokens,
@@ -432,8 +437,9 @@ class StageEaModel(nn.Module):
             logits, hidden_state = outputs
             logits = logits[0, retrieve_indices]
 
-            padding = (torch.zeros(1, 1, dtype=torch.long) - 1).to(self.stage_base_model.device)
-            draft_tokens = torch.cat((draft_tokens, padding), dim=1)
+            # padding = (torch.zeros(1, 1, dtype=torch.long) - 1).to(self.stage_base_model.device)
+            # draft_tokens = torch.cat((draft_tokens, padding), dim=1)
+            draft_tokens = F.pad(draft_tokens, (0, 1), value=-1)
 
             candidates = draft_tokens[0, retrieve_indices]
             best_candidate, accept_length, sample_p = evaluate_posterior(
@@ -443,7 +449,7 @@ class StageEaModel(nn.Module):
             
         # [update_inference_inputs]
         if self.is_draft_stage:
-            candidates = draft_tokens[0, retrieve_indices]
+            candidates = draft_tokens[0, retrieve_indices].to(input_ids.device)
             update_inputs_params = (
                 self,
                 None, # past_key_values_data
@@ -483,7 +489,7 @@ class StageEaModel(nn.Module):
         if config.is_draft_stage:
             input_ids_ea = torch.cat((input_ids, token.to(input_ids.device)), dim=1)
 
-            draft_tokens, retrieve_indices, tree_mask, tree_position_ids = self.ea_layer.topK_genrate(
+            draft_tokens, retrieve_indices, tree_mask, tree_position_ids, last_ea_state = self.ea_layer.topK_genrate(
                     hidden_state,
                     input_ids_ea,
                     self.stage_base_model.lm_head,
@@ -491,7 +497,8 @@ class StageEaModel(nn.Module):
                     total_tokens=run_config.init_total_token,
                     depth=run_config.init_depth,
                     top_k=run_config.init_topk,
-                    prof=prof,
+                    return_last=False,
+                    # prof=prof,
             )
             # todo: 好像没必要在这里移到gpu？因为要传给其他stages
             # update tree_position_ids
@@ -566,7 +573,7 @@ class StageEaModel(nn.Module):
                             sub_retrieve_indices = get_subtree_retrieve_indices(retrieve_indices, subseq_ri_cum_depths[0])
                             # subseq_ri_cum_depths = subseq_ri_cum_depths[1:]  # remove the first subseq
                             subtree_logits = subseq_logits[0, sub_retrieve_indices]
-                            candidates = sub_draft_tokens[0, sub_retrieve_indices]
+                            candidates = sub_draft_tokens[0, sub_retrieve_indices].to(input_ids.device)
                         
                         with prof.time_context(f"Stage {config.stage}: evaluate_posterior", cpu=False) if prof is not None else nullcontext():
                             best_candidate, accept_length, sample_p = evaluate_posterior(
@@ -582,7 +589,7 @@ class StageEaModel(nn.Module):
                             
                         sub_hidden_state = sub_hidden_state[:, retrieve_indices[best_candidate, :accept_length]]
                         
-                        with prof.time_context(f"Stage {config.stage}: last-stage pruning", cpu=False) if prof is not None else nullcontext():
+                        with prof.time_context(f"Stage {config.stage}: last-stage pruning", cpu=True) if prof is not None else nullcontext():
                             left_indices, truncate = cal_pruning_info(draft_tokens, retrieve_indices, best_candidate, accept_length, token, subseq_ri_cum_depths)
                             
                         if truncate:  # start new speculation round
@@ -638,6 +645,7 @@ class StageEaModel(nn.Module):
                                 draft_tokens, tree_mask, tree_position_ids, retrieve_indices, accepted_tokens, subseq_ri_cum_depths, left_indices, lens_split = draft_stage_pruning(
                                         left_indices, accept_length, draft_tokens, tree_mask, tree_position_ids, retrieve_indices, subseq_ri_cum_depths, lens_split
                                 )
+                            accepted_tokens = accepted_tokens.to(input_ids.device)
                             input_ids = torch.cat((input_ids, accepted_tokens), dim=-1)
                             
                     else:
@@ -664,7 +672,7 @@ class StageEaModel(nn.Module):
                         if config.is_draft_stage:
                             accept_hidden_states.append(sub_hidden_state)
                             token = torch.tensor([[new_sampled_token]], dtype=torch.long, device=input_ids.device)
-                            accepted_tokens = draft_tokens[:, left_indices]
+                            accepted_tokens = draft_tokens[:, left_indices].to(input_ids.device)
                             input_ids = torch.cat((input_ids, accepted_tokens), dim=-1)
                         break
                 else:  
@@ -894,6 +902,7 @@ class StageEaModel(nn.Module):
                                 draft_tokens, tree_mask, tree_position_ids, retrieve_indices, accepted_tokens, subseq_ri_cum_depths, left_indices, lens_split = draft_stage_pruning(
                                         left_indices, accept_length, draft_tokens, tree_mask, tree_position_ids, retrieve_indices, subseq_ri_cum_depths, lens_split
                                 )
+                            accepted_tokens = accepted_tokens.to(input_ids.device)
                             input_ids = torch.cat((input_ids, accepted_tokens), dim=-1)
                             waiting_draft = (draft_tokens.size(-1) - torch.sum(lens_split)).item()
                             
@@ -920,7 +929,7 @@ class StageEaModel(nn.Module):
                             if config.is_draft_stage:
                                 accept_hidden_states.append(sub_hidden_state)
                                 token = torch.tensor([[new_sampled_token]], dtype=torch.long, device=input_ids.device)
-                                accepted_tokens = draft_tokens[:, left_indices]
+                                accepted_tokens = draft_tokens[:, left_indices].to(input_ids.device)
                                 input_ids = torch.cat((input_ids, accepted_tokens), dim=-1)
                             break
                 else:  
@@ -941,14 +950,15 @@ class StageEaModel(nn.Module):
                     if pruned:
                         with prof.time_context(f"Stage {config.stage}: tree_expansion", cpu=False) if prof is not None else nullcontext():
                             # new_token不需要通过hidden_state生成，直接根据剪枝的token生成，新token就是剪枝后新树的根节点
-                            input_ids_ea = torch.cat((input_ids, draft_tokens[:, :1]), dim=-1)
+                            new_ea_token = draft_tokens[:, :1].to(input_ids.device)
+                            input_ids_ea = torch.cat((input_ids, new_ea_token), dim=-1)
                             
                             if hs_len > 0:
                                 accept_hidden_states.append(sub_hidden_state)
                             accepted_hidden_state = torch.cat(accept_hidden_states, dim=-2)
                             accept_hidden_states = []
 
-                            with prof.profile_context(f"Stage {config.stage}: topK_genrate", device=f"cuda:{device}") if prof is not None else nullcontext():
+                            with prof.time_context(f"Stage {config.stage}: topK_genrate", cpu=False) if prof is not None else nullcontext():
                                 draft_tokens2, retrieve_indices2, tree_mask2, tree_position_ids2, last_ea_state = self.ea_layer.topK_genrate(
                                     accepted_hidden_state,
                                     input_ids_ea,
@@ -969,7 +979,7 @@ class StageEaModel(nn.Module):
                             assert draft_tokens.size(-1) == tree_position_ids.size(0), f'draft_tokens != tree_pos_ids: {draft_tokens.size(-1)} and {tree_position_ids.size(0)}'
 
                             origin_device = draft_tokens.device
-                            with prof.time_context(f"Stage {config.stage}: merge_two_tree", cpu=False) if prof is not None else nullcontext():
+                            with prof.time_context(f"Stage {config.stage}: topk merge_two_tree", cpu=True) if prof is not None else nullcontext():
                                 # [update] operate on CPU
                                 draft_tokens, retrieve_indices, tree_mask, tree_position_ids, lens_split, subseq_ri_cum_depths = merge_two_tree(
                                     (draft_tokens.cpu(), retrieve_indices.cpu(), tree_mask.cpu(), tree_position_ids.cpu()),
@@ -1005,7 +1015,7 @@ class StageEaModel(nn.Module):
                                 tree_position_ids2 = tree_position_ids2 + input_ids.size(-1)
                                 
                                 origin_device = draft_tokens.device
-                                with prof.time_context(f"Stage {config.stage}: merge_two_tree", cpu=False) if prof is not None else nullcontext():
+                                with prof.time_context(f"Stage {config.stage}: expand_last merge_two_tree", cpu=True) if prof is not None else nullcontext():
                                     # [update] operate on CPU
                                     draft_tokens, retrieve_indices, tree_mask, tree_position_ids, lens_split, subseq_ri_cum_depths = merge_two_tree(
                                         (draft_tokens.cpu(), retrieve_indices.cpu(), tree_mask.cpu(), tree_position_ids.cpu()),

@@ -18,8 +18,8 @@ class Config:
     base_model_dir: str = f'/home/liux/big_file/pipeline_model/meta-llama/Llama-2-7b-chat-hf/new_stage_model_series_0+8+8+8+8_fp16'
     EAGLE_model_path: str = "/home/liux/LLM/models_hf/yuhuili/EAGLE-llama2-chat-7B"
     
-    # base_model_dir: str = f"/home/nvidia/LLM/pipeline_model/meta-llama/Llama-2-7b-chat-hf/stage_model_series_6+9+9+8_half"
-    # EAGLE_model_path: str = "/home/nvidia/LLM/models_hf/yuhuili/EAGLE-llama2-chat-7B"
+    # base_model_dir: str = f"/home/nvidia/LLM/pipeline_model/meta-llama/Llama-2-7b-chat-hf/new_stage_model_series_0+8+8+8+8_fp16"
+    # EAGLE_model_path: str = f"/home/nvidia/LLM/models_hf/yuhuili/EAGLE-llama2-chat-7B"
     
     # eval config
     if mode == "eval":
@@ -52,14 +52,14 @@ class Config:
         
         # expand draft config
         expand_total_token: int = 64
-        expand_topk: int = 10 # now must be the same as init_topk
-        expand_depth: int = 8
+        expand_topk: int =10 # now must be the same as init_topk
+        expand_depth: int =6
         expand_subseq_token: int = -1
         
-        none_expand: bool = True
+        none_expand: bool = False
         if none_expand:
-            none_expand_size: int = 32
-            none_expand_depth: int = 3
+            none_expand_size: int = 48
+            none_expand_depth: int = 1
         
     # device config
     device: str = "cuda"
