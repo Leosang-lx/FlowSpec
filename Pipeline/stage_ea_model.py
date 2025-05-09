@@ -311,7 +311,7 @@ class StageEaModel(nn.Module):
             # [update] get input_ids from the first stage
             input_ids = input_ids.clone()
             input_len = input_ids.shape[1]
-            orig, hidden_state = pipeline_prefill_new(self, input_ids=input_ids)
+            orig, hidden_state = pipeline_prefill_new(self, input_ids=input_ids, prof=profiler)
             
             new_token = 0
             token = gen_token(logits=orig[:, -1], logits_processor=logits_processor)
@@ -319,8 +319,8 @@ class StageEaModel(nn.Module):
             skip_count = 0
 
         else:
-            pipeline_prefill_new(self, stage_past_key_values=past_key_values)
-        dist.barrier()
+            pipeline_prefill_new(self, stage_past_key_values=past_key_values, prof=profiler)
+        # dist.barrier()
         should_stop = torch.tensor(0, dtype=torch.int32)
 
         turns_cnt = 0
@@ -348,7 +348,7 @@ class StageEaModel(nn.Module):
                     # token=token,
                     # hidden_state=hidden_state,
                     # new_token=new_token,
-                    log=log,
+                    # log=log,
                     prof=profiler
                 )
             else:
@@ -506,7 +506,8 @@ class StageEaModel(nn.Module):
                 retrieve_indices=retrieve_indices,
                 tree_mask=tree_mask,
                 tree_pos_ids=tree_position_ids,
-                subseq_ri_cum_depths=subseq_ri_cum_depths
+                subseq_ri_cum_depths=subseq_ri_cum_depths,
+                prof=prof
             )
             accept_hidden_states = []
             global_accept_len = input_ids.size(-1)
@@ -516,7 +517,7 @@ class StageEaModel(nn.Module):
             past_key_values, past_key_values_data, current_length_data = kv_cache
             global_accept_len = current_length_data[0].item()
 
-            outputs = fill_pipeline_stages(self, past_key_values)
+            outputs = fill_pipeline_stages(self, past_key_values, prof=prof)
             
             # if config.is_last_stage:
             #     sub_hidden_state, lens_split, draft_tokens, retrieve_indices, tree_mask, tree_position_ids, subseq_ri_cum_depths = outputs
@@ -767,7 +768,8 @@ class StageEaModel(nn.Module):
                 retrieve_indices=retrieve_indices,
                 tree_mask=tree_mask,
                 tree_pos_ids=tree_position_ids,
-                subseq_ri_cum_depths=subseq_ri_cum_depths
+                subseq_ri_cum_depths=subseq_ri_cum_depths,
+                prof=prof
             )
             waiting_draft = 0
             accept_hidden_states = []
@@ -778,7 +780,7 @@ class StageEaModel(nn.Module):
             past_key_values, past_key_values_data, current_length_data = kv_cache
             global_accept_len = current_length_data[0].item()
 
-            outputs = fill_pipeline_stages(self, past_key_values)
+            outputs = fill_pipeline_stages(self, past_key_values, prof=prof)
 
             # if config.is_last_stage:
             #     sub_hidden_state, lens_split, draft_tokens, retrieve_indices, tree_mask, tree_position_ids, subseq_ri_cum_depths = outputs
@@ -808,7 +810,8 @@ class StageEaModel(nn.Module):
             # broadcast pruning info
             ###################################################
             # with prof.time_context(f"Stage {config.stage}: part1,broadcast pruning info", cpu=False) if prof is not None else nullcontext():  
-                skip_pruning = False  
+            with nullcontext():
+                skip_pruning = False
                 if config.is_draft_stage:  # last stage正常pruning
                     if hs_len > 0:
                         with prof.time_context(f"Stage {config.stage}: verification and pruning", cpu=False) if prof is not None else nullcontext():
@@ -1003,7 +1006,7 @@ class StageEaModel(nn.Module):
                                     expand_depth=run_config.none_expand_depth,
                                     expand_size=run_config.none_expand_size,
                                     return_last=run_config.none_expand,
-                                    prof=prof
+                                    # prof=prof
                                 )
                                 last_ea_tree = (draft_tokens2, retrieve_indices2, tree_mask2, tree_position_ids2)
                                 tree_position_ids2 = tree_position_ids2 + input_ids.size(-1)
@@ -1059,15 +1062,14 @@ class StageEaModel(nn.Module):
                     if hs_len > 0:
                         self.stage_base_model.model.tree_mask = tree_mask
                         assert tree_position_ids.size(0) == tree_mask.size(2)==sub_hidden_state.size(1), f'tree_position_ids.size(0) != tree_mask.size(2): {tree_position_ids.size(0)} and {tree_mask.size(2)}'
-                        if config.is_first_stage:  # recv input for first stage forward
-                            with prof.time_context(f"Stage {config.stage}: forward", cpu=False) if prof is not None else nullcontext():
+                        with prof.time_context(f"Stage {config.stage}: forward", cpu=False) if prof is not None else nullcontext():
+                            if config.is_first_stage:  # recv input for first stage forward
                                 outputs, sub_hidden_state = self(
                                     input_ids=sub_hidden_state,
                                     past_key_values=past_key_values,
                                     position_ids=tree_position_ids
                                 )     
-                        else:
-                            with prof.time_context(f"Stage {config.stage}: forward", cpu=False) if prof is not None else nullcontext():
+                            else:
                                 outputs, sub_hidden_state = self(
                                     inputs_embeds=sub_hidden_state,
                                     past_key_values=past_key_values,

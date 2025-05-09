@@ -8,9 +8,10 @@ class Config:
     pipeline_type: str = "continuous"
     warmup = True
     warmup_repeat = 10
-    test_repeat = 1 # this refer to num of choices in the eval set
+    test_repeat = 10 # this refer to num of choices in the eval set
     
     log: bool = False
+    save_timestamps: bool = False
     temperature: float = 0.0
     max_new_tokens: int = 512
     
@@ -62,7 +63,7 @@ class Config:
         none_expand: bool = False
         if none_expand:
             none_expand_size: int = 48
-            none_expand_depth: int = 1
+            none_expand_depth: int = 2
         
     # device config
     device: str = "cuda"

@@ -133,8 +133,9 @@ def main():
     
     dist.barrier()
     # if rank == 0 or rank == world_size - 1:
-    assert is_strictly_ascending(prof.cumulative_time_events[0]['timestamp'])
-    save_as(prof.cumulative_time_events, f'records/{get_time_str()}-rank{rank}-ws{world_size}.rec')
+    if run_config.save_timestamps:
+        assert is_strictly_ascending(prof.cumulative_time_events[0]['timestamp'])
+        save_as(prof.cumulative_time_events, f'records/{get_time_str()}-rank{rank}-ws{world_size}.rec')
 
     prof.print_all_events()
     

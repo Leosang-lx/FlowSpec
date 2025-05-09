@@ -247,6 +247,7 @@ def pipeline_prefill_new(
         stage_model,
         input_ids=None,
         stage_past_key_values=None,
+        prof=None
 ):
     config = stage_model.config
     device = stage_model.stage_base_model.device
@@ -261,7 +262,8 @@ def pipeline_prefill_new(
         hidden_state_splits = []
         orig = ()
         for i in range(config.n_split):
-            hidden_state_split = comm.recvfrom(config.last_rank, device=device).to(device)
+            with prof.time_context(f"Stage {config.stage}: recv from last stage", cpu=True) if prof is not None else nullcontext():
+                hidden_state_split = comm.recvfrom(config.last_rank, device=device).to(device)
             hidden_state_splits.append(hidden_state_split)
             orig = orig + (stage_model.stage_base_model.lm_head(hidden_state_split),)
 
@@ -271,19 +273,22 @@ def pipeline_prefill_new(
         return orig, hidden_state
 
     for i in range(config.total_stage-1):
-        last_hidden_state = comm.recvfrom(config.last_rank, device=device)
-        if config.is_first_stage:
-            _, sub_hidden_state = stage_model(
-                input_ids=last_hidden_state,
-                past_key_values=stage_past_key_values,
-            )
-            comm.sendto(sub_hidden_state.cpu(), config.next_rank)
-        else:
-            _, sub_hidden_state = stage_model(
-                inputs_embeds=last_hidden_state,
-                past_key_values=stage_past_key_values,
-            )
-            comm.sendto(sub_hidden_state.cpu(), config.next_rank)
+        with prof.time_context(f"Stage {config.stage}: recv from last stage", cpu=True) if prof is not None else nullcontext():
+            last_hidden_state = comm.recvfrom(config.last_rank, device=device)
+
+        with prof.time_context(f"Stage {config.stage}: prefill forward", cpu=False) if prof is not None else nullcontext():
+            if config.is_first_stage:
+                _, sub_hidden_state = stage_model(
+                    input_ids=last_hidden_state,
+                    past_key_values=stage_past_key_values,
+                )
+                comm.sendto(sub_hidden_state.cpu(), config.next_rank)
+            else:
+                _, sub_hidden_state = stage_model(
+                    inputs_embeds=last_hidden_state,
+                    past_key_values=stage_past_key_values,
+                )
+                comm.sendto(sub_hidden_state.cpu(), config.next_rank)
 
     
 
@@ -629,12 +634,15 @@ def fill_pipeline_stages(
     tree_mask=None,
     tree_pos_ids=None,
     subseq_ri_cum_depths=None,
+    prof=None,
 ):
     config = stage_model.config
     device = stage_model.stage_base_model.device
     comm = stage_model.comm
     # print(f'Stage {config.stage} fill_pipeline_stages')
-    dist.barrier()
+
+
+    # dist.barrier()
 
     # draft stage 0
     if config.is_draft_stage:  # [IMPORTANT] lens_split = world_size = 5
@@ -650,22 +658,24 @@ def fill_pipeline_stages(
     
     # following stages 1-4
     for i in range(config.total_stage - config.stage):
-        appended_input, subseq_pos_ids, tree_mask = comm.recv_appended(device)
+        with prof.time_context(f"Stage {config.stage}: recv from last stage", cpu=True) if prof is not None else nullcontext():
+            appended_input, subseq_pos_ids, tree_mask = comm.recv_appended(device)
         # set the tree mask for the current stage
         stage_model.stage_base_model.model.tree_mask = tree_mask
 
-        if config.is_first_stage:            
-            outputs, sub_hidden_state = stage_model(
-                input_ids=appended_input,
-                past_key_values=stage_past_key_values,
-                position_ids=subseq_pos_ids,
-            )
-        else:
-            outputs, sub_hidden_state = stage_model(
-                inputs_embeds=appended_input,
-                past_key_values=stage_past_key_values,
-                position_ids=subseq_pos_ids,
-            )
+        with prof.time_context(f"Stage {config.stage}: draft init forward", cpu=False) if prof is not None else nullcontext():
+            if config.is_first_stage:            
+                outputs, sub_hidden_state = stage_model(
+                    input_ids=appended_input,
+                    past_key_values=stage_past_key_values,
+                    position_ids=subseq_pos_ids,
+                )
+            else:
+                outputs, sub_hidden_state = stage_model(
+                    inputs_embeds=appended_input,
+                    past_key_values=stage_past_key_values,
+                    position_ids=subseq_pos_ids,
+                )
 
         if config.is_last_stage:
             comm.sendto(sub_hidden_state, config.next_rank)
