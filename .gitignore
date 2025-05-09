@@ -5,4 +5,5 @@ __pycache__/
 *.lprof
 test.py
 Pipeline/test.py
-records/
+*.rec
+*.pdf
