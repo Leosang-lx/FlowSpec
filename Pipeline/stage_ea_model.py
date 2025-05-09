@@ -997,7 +997,7 @@ class StageEaModel(nn.Module):
                         if run_config.none_expand and (last_ea_state is not None):
                             with prof.time_context(f"Stage {config.stage}: tree_expand_last", cpu=False) if prof is not None else nullcontext():
                                 # with prof.time_context(f"Stage {config.stage}: expand_last", cpu=False) if prof is not None else nullcontext():
-                                draft_tokens2, retrieve_indices2, tree_mask2, tree_position_ids2, last_ea_state = self.ea_layer.expand_last_new(
+                                draft_tokens2, retrieve_indices2, tree_mask2, tree_position_ids2, last_ea_state = self.ea_layer.expand_last(
                                     last_ea_tree,
                                     last_ea_state,
                                     self.stage_base_model.lm_head,
@@ -1025,6 +1025,8 @@ class StageEaModel(nn.Module):
                                 tree_position_ids = tree_position_ids.to(origin_device)
                                     
                                 waiting_draft = lens_split[-1].item()
+
+                                # print(f'Stage {config.stage}: expand_last waiting_draft: {waiting_draft}')
 
                                 appended_draft_len = min(waiting_draft, run_config.expand_subseq_token)  if run_config.expand_subseq_token != -1 else waiting_draft
                                 lens_split[-1] = appended_draft_len

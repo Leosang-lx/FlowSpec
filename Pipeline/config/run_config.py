@@ -43,9 +43,9 @@ class Config:
         init_depth: int = 6
     
     if pipeline_type == "pruned":
-        init_total_token: int = 64
+        init_total_token: int = 160
         init_topk: int = 10
-        init_depth: int = 6
+        init_depth: int = 8
     
     if pipeline_type == "continuous":
         # draft config
@@ -56,14 +56,14 @@ class Config:
         
         # expand draft config
         expand_total_token: int = 64
-        expand_topk: int =10 # now must be the same as init_topk
-        expand_depth: int =6
+        expand_topk: int = 10 # now must be the same as init_topk
+        expand_depth: int = 6
         expand_subseq_token: int = -1
         
-        none_expand: bool = False
+        none_expand: bool = True
         if none_expand:
             none_expand_size: int = 48
-            none_expand_depth: int = 2
+            none_expand_depth: int = 0
         
     # device config
     device: str = "cuda"

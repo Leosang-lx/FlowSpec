@@ -30,7 +30,7 @@ def main():
     rank = int(os.environ['RANK'])
     world_size = int(os.environ['WORLD_SIZE'])
     # device = rank % torch.cuda.device_count()
-    device = 1
+    device = 0
     torch.cuda.set_device(device)
     print(f'rank={rank}, world_size={world_size}, device={device}')
     
@@ -96,7 +96,7 @@ def main():
             outputs = run(
                     stage_model, 
                     input_ids if rank == 0 else None, 
-                    run_config.log if rank == 0 else False, 
+                    # run_config.log if rank == 0 else False, 
                     None
                 )
 
