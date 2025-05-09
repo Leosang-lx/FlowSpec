@@ -851,12 +851,26 @@ class Model(nn.Module):
                 parents_list = parents_list.numpy()
             
             top_scores_index = top_scores_index.numpy()
-            top_scores_index = np.sort(top_scores_index)
 
+            # [update]
             if return_last:
                 current_state = current_state + (top_scores_index,)
 
-            draft_tokens = ss_token_list[top_scores_index]
+            draft_tokens = ss_token_list[top_scores_index]  # [update]
+            top_orig_indices = np.argsort(top_scores_index)  # 保留原始顺序
+            top_scores_index = top_scores_index[top_orig_indices]
+            # top_scores_index = np.sort(top_scores_index)
+            
+            top_orig_indices = np.pad(top_orig_indices+1, (1, 0), mode='constant', constant_values=0)
+
+            # 构造反向索引
+            inv_indices = np.zeros(top_orig_indices.size, dtype=np.int64)
+            inv_indices[top_orig_indices] = np.arange(top_orig_indices.size, dtype=np.int64)
+
+            # if return_last:
+            #     current_state = current_state + (top_scores_index,)
+
+            # draft_tokens = ss_token_list[top_scores_index]
             sample_token = sample_token.cpu().numpy()
             draft_tokens = np.concatenate((sample_token, draft_tokens))
 
@@ -895,10 +909,12 @@ class Model(nn.Module):
             # print(tree_mask0.equal(tree_mask))
                 tree_position_ids = np.sum(tree_mask, axis=1) - 1
 
+                # [update]
+                tree_mask = tree_mask[inv_indices]
+                tree_mask = tree_mask[:, inv_indices]
+
                 tree_mask = tree_mask.astype(float)[None, None]
                 draft_tokens = draft_tokens[None]
-
-
 
             del parents_list, scores_list, ss_token, ss_token_list, draft_parents
 
@@ -945,6 +961,11 @@ class Model(nn.Module):
                 tree_position_ids = torch.tensor(tree_position_ids, dtype=torch.long)
             
                 del mask_index, mask_index_list, noleaf_index, noleaf_num, leaf_num, max_depth, rid
+
+                from pipeline_utils import map_retrieve_indices
+                retrieve_indices = map_retrieve_indices(retrieve_indices, torch.arange(draft_tokens.size(-1)), torch.from_numpy(top_orig_indices))
+                # retrieve_indices = map_retrieve_indices(retrieve_indices, top_orig_indices, top_scores_index)
+                tree_position_ids = tree_position_ids[inv_indices]
             
         return draft_tokens, retrieve_indices, tree_mask, tree_position_ids, current_state
     
@@ -1179,6 +1200,7 @@ class Model(nn.Module):
             draft_tokens = ss_token_list[top_scores_index]
             sample_token = sample_token.cpu().numpy()
             draft_tokens = np.concatenate((sample_token, draft_tokens))
+            
 
             draft_parents = parents_list[top_scores_index // top_k].astype(np.int64)
             # print(f'draft_parents: {draft_parents}')
