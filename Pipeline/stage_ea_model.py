@@ -70,7 +70,7 @@ class StageEaModel(nn.Module):
         # [MODIFIED] initialize comm handler
         # print(f"start init comm handler")
         if init_comm:
-            self.comm = CommHandler(rank=config.stage, world_size=config.total_stage)
+            self.comm = CommHandler(rank=config.stage, world_size=config.total_stage, timeout=run_config.timeout)
             # print(f"init comm handler")
             self.comm.init_PG()
             self.comm.start_threads()
@@ -317,17 +317,7 @@ class StageEaModel(nn.Module):
             token = gen_token(logits=orig[:, -1], logits_processor=logits_processor)
             global skip_count 
             skip_count = 0
-        # elif self.is_first_stage:
-        #     # ensure input_ids at the first stage
-        #     # max_length = max_length - self.ea_layer.total_tokens - 10 # 这一步在旧版本中就是没有用的
-        #     # assert input_ids is not None and input_ids.shape[0] == 1, 'First stage must have valid "input_ids"'
-        #     # Avoid modifying the input_ids in-place
-        #     # input_ids = input_ids.clone()
-          
 
-        #     # [prefill]
-        #     # with profiler.profile_context(f"Stage {config.stage}: pipeline_prefill", device=f"cuda:{device}") if profiler is not None else nullcontext():
-        #     pipeline_prefill_new(self, stage_past_key_values=past_key_values)
         else:
             pipeline_prefill_new(self, stage_past_key_values=past_key_values)
         dist.barrier()
@@ -749,17 +739,18 @@ class StageEaModel(nn.Module):
         if config.is_draft_stage:
             input_ids_ea = torch.cat((input_ids, token.to(input_ids.device)), dim=1)
 
-            draft_tokens, retrieve_indices, tree_mask, tree_position_ids, last_ea_state = self.ea_layer.topK_genrate(
-                    hidden_state,
-                    input_ids_ea,
-                    self.stage_base_model.lm_head,
-                    logits_processor,
-                    total_tokens=run_config.init_total_token,
-                    depth=run_config.init_depth,
-                    top_k=run_config.init_topk,
-                    return_last=run_config.none_expand,
-                    prof=prof
-            )
+            with prof.time_context(f"Stage {config.stage}: topK_genrate", cpu=False) if prof is not None else nullcontext():
+                draft_tokens, retrieve_indices, tree_mask, tree_position_ids, last_ea_state = self.ea_layer.topK_genrate(
+                        hidden_state,
+                        input_ids_ea,
+                        self.stage_base_model.lm_head,
+                        logits_processor,
+                        total_tokens=run_config.init_total_token,
+                        depth=run_config.init_depth,
+                        top_k=run_config.init_topk,
+                        return_last=run_config.none_expand,
+                        # prof=prof
+                )
             if run_config.none_expand:
                 last_ea_tree = (draft_tokens, retrieve_indices, tree_mask, tree_position_ids)
                 
@@ -816,14 +807,15 @@ class StageEaModel(nn.Module):
             ###################################################
             # broadcast pruning info
             ###################################################
-            with prof.time_context(f"Stage {config.stage}: part1,broadcast pruning info", cpu=False) if prof is not None else nullcontext():  
+            # with prof.time_context(f"Stage {config.stage}: part1,broadcast pruning info", cpu=False) if prof is not None else nullcontext():  
                 skip_pruning = False  
                 if config.is_draft_stage:  # last stage正常pruning
                     if hs_len > 0:
-                        with prof.time_context(f"Stage {config.stage}: lm_head", cpu=False) if prof is not None else nullcontext():
+                        with prof.time_context(f"Stage {config.stage}: verification and pruning", cpu=False) if prof is not None else nullcontext():
+                        # with prof.time_context(f"Stage {config.stage}: lm_head", cpu=False) if prof is not None else nullcontext():
                             subseq_logits = self.stage_base_model.lm_head(sub_hidden_state)
                         
-                        with prof.time_context(f"Stage {config.stage}: get subseq", cpu=False) if prof is not None else nullcontext():
+                        # with prof.time_context(f"Stage {config.stage}: get subseq", cpu=False) if prof is not None else nullcontext():
                             sub_draft_tokens = draft_tokens[:, :lens_split[0]]
                             sub_draft_tokens = F.pad(sub_draft_tokens, (0, 1), value=-1)
                             sub_retrieve_indices = get_subtree_retrieve_indices(retrieve_indices, subseq_ri_cum_depths[0])
@@ -832,20 +824,20 @@ class StageEaModel(nn.Module):
                             
                             candidates = sub_draft_tokens[0, sub_retrieve_indices]
                         
-                        with prof.time_context(f"Stage {config.stage}: evaluate_posterior", cpu=False) if prof is not None else nullcontext():
+                        # with prof.time_context(f"Stage {config.stage}: evaluate_posterior", cpu=False) if prof is not None else nullcontext():
                             best_candidate, accept_length, sample_p = evaluate_posterior(
                                 subtree_logits, candidates, logits_processor
                             )
                         
-                        accept_length += 1
-                        token = gen_token(prob=sample_p, logits_processor=logits_processor)  # device=cuda
+                            accept_length += 1
+                            token = gen_token(prob=sample_p, logits_processor=logits_processor)  # device=cuda
 
-                        cur_draft_depth = subseq_ri_cum_depths[0, best_candidate]
-                        if log:
-                            print(f'- {i}th turn, accept_len/local_depth: {accept_length}/{cur_draft_depth}')
-                            
-                        sub_hidden_state = sub_hidden_state[:, retrieve_indices[best_candidate, :accept_length]]
-                        with prof.time_context(f"Stage {config.stage}: last-stage pruning", cpu=False) if prof is not None else nullcontext():
+                            cur_draft_depth = subseq_ri_cum_depths[0, best_candidate]
+                            if log:
+                                print(f'- {i}th turn, accept_len/local_depth: {accept_length}/{cur_draft_depth}')
+                                
+                            sub_hidden_state = sub_hidden_state[:, retrieve_indices[best_candidate, :accept_length]]
+                        # with prof.time_context(f"Stage {config.stage}: last-stage pruning", cpu=False) if prof is not None else nullcontext():
                             left_indices, truncate = cal_pruning_info(draft_tokens, retrieve_indices, best_candidate, accept_length, token, subseq_ri_cum_depths)
                             
                         if truncate:  # start new speculation round
@@ -858,11 +850,11 @@ class StageEaModel(nn.Module):
                         pruning_info = torch.cat((torch.tensor((new_sampled_token, accept_length), dtype=torch.long), left_indices), dim=0).contiguous()
                             
                         if not truncate:  # not truncate: async pruning info broadcast
-                            # broadcast_pruning_info_task = comm.executor.submit(
-                            #     comm.broadcast_send,
-                            #     pruning_info
-                            # )
-                            comm.broadcast_send(pruning_info)
+                            broadcast_pruning_info_task = comm.executor.submit(
+                                comm.broadcast_send,
+                                pruning_info
+                            )
+                            # comm.broadcast_send(pruning_info)
                         else:  # truncate: sync pruning info broadcast
                             comm.broadcast_send(pruning_info)
                             lens_split = tree_mask = tree_position_ids = None
@@ -871,11 +863,11 @@ class StageEaModel(nn.Module):
                         skip_pruning = True
                         global skip_count 
                         skip_count += 1
-                        # broadcast_pruning_info_task = comm.executor.submit(
-                        #     comm.broadcast_send,
-                        #     torch.tensor([[-1]], dtype=torch.long)
-                        # )  
-                        comm.broadcast_send(torch.tensor([[-1]], dtype=torch.long))
+                        broadcast_pruning_info_task = comm.executor.submit(
+                            comm.broadcast_send,
+                            torch.tensor([[-1]], dtype=torch.long)
+                        )  
+                        # comm.broadcast_send(torch.tensor([[-1]], dtype=torch.long))
                 else:
                     with prof.time_context(f"Stage {config.stage}: wait broadcast_pruning", cpu=True) if prof is not None else nullcontext():
                         pruning_info = comm.broadcast_recv(0)
@@ -892,7 +884,8 @@ class StageEaModel(nn.Module):
             #####################################
             # pruning, in this part both draft and first stage do the waiting draft pruning, others are token pruning
             #####################################
-            with prof.time_context(f"Stage {config.stage}: part2, pruning", cpu=False) if prof is not None else nullcontext():  
+            # with prof.time_context(f"Stage {config.stage}: part2, pruning", cpu=False) if prof is not None else nullcontext():  
+            with nullcontext():
                 if not skip_pruning:
                     if config.is_draft_stage:
                         accept_length_this_round += accept_length
@@ -940,7 +933,8 @@ class StageEaModel(nn.Module):
             ####################################
             # 前向: draft stage topk, others forward
             #################################### 
-            with prof.time_context(f"Stage {config.stage}: part3, forward", cpu=False) if prof is not None else nullcontext():
+            # with prof.time_context(f"Stage {config.stage}: part3, forward", cpu=False) if prof is not None else nullcontext():
+            with nullcontext():
                 hs_len = sub_hidden_state.size(1) if hs_len > 0 else 0
                 
                 if config.is_draft_stage:
@@ -958,20 +952,20 @@ class StageEaModel(nn.Module):
                             accepted_hidden_state = torch.cat(accept_hidden_states, dim=-2)
                             accept_hidden_states = []
 
-                            with prof.time_context(f"Stage {config.stage}: topK_genrate", cpu=False) if prof is not None else nullcontext():
-                                draft_tokens2, retrieve_indices2, tree_mask2, tree_position_ids2, last_ea_state = self.ea_layer.topK_genrate(
-                                    accepted_hidden_state,
-                                    input_ids_ea,
-                                    self.stage_base_model.lm_head,
-                                    logits_processor,
-                                    total_tokens=run_config.expand_total_token,
-                                    # depth=max(cur_draft_depth + 2, run_config.expand_depth),  # todo: test best tree settings
-                                    depth=run_config.expand_depth,
-                                    top_k=run_config.expand_topk,
-                                    return_last=run_config.none_expand,
-                                    prof=prof
-                                    # total_tokens=80
-                                )  # get a little more appended tokens
+                            # with prof.time_context(f"Stage {config.stage}: topK_genrate", cpu=False) if prof is not None else nullcontext():
+                            draft_tokens2, retrieve_indices2, tree_mask2, tree_position_ids2, last_ea_state = self.ea_layer.topK_genrate(
+                                accepted_hidden_state,
+                                input_ids_ea,
+                                self.stage_base_model.lm_head,
+                                logits_processor,
+                                total_tokens=run_config.expand_total_token,
+                                # depth=max(cur_draft_depth + 2, run_config.expand_depth),  # todo: test best tree settings
+                                depth=run_config.expand_depth,
+                                top_k=run_config.expand_topk,
+                                return_last=run_config.none_expand,
+                                # prof=prof
+                                # total_tokens=80
+                            )  # get a little more appended tokens
                             if run_config.none_expand:
                                 last_ea_tree = (draft_tokens2, retrieve_indices2, tree_mask2, tree_position_ids2)
                             assert retrieve_indices2.size(-1) > max(tree_position_ids2), f'retrieve_indices2.size(-1) > max(tree_position_ids2): {retrieve_indices2.size(-1)} and {max(tree_position_ids2)}'
@@ -979,17 +973,17 @@ class StageEaModel(nn.Module):
                             assert draft_tokens.size(-1) == tree_position_ids.size(0), f'draft_tokens != tree_pos_ids: {draft_tokens.size(-1)} and {tree_position_ids.size(0)}'
 
                             origin_device = draft_tokens.device
-                            with prof.time_context(f"Stage {config.stage}: topk merge_two_tree", cpu=True) if prof is not None else nullcontext():
-                                # [update] operate on CPU
-                                draft_tokens, retrieve_indices, tree_mask, tree_position_ids, lens_split, subseq_ri_cum_depths = merge_two_tree(
-                                    (draft_tokens.cpu(), retrieve_indices.cpu(), tree_mask.cpu(), tree_position_ids.cpu()),
-                                    (draft_tokens2.cpu(), retrieve_indices2.cpu(), tree_mask2.cpu(), tree_position_ids2.cpu()),
-                                    lens_split,
-                                    subseq_ri_cum_depths
-                                )
-                                draft_tokens = draft_tokens.to(origin_device)
-                                tree_mask = tree_mask.to(origin_device)
-                                tree_position_ids = tree_position_ids.to(origin_device)
+                            # with prof.time_context(f"Stage {config.stage}: topk merge_two_tree", cpu=True) if prof is not None else nullcontext():
+                            # [update] operate on CPU
+                            draft_tokens, retrieve_indices, tree_mask, tree_position_ids, lens_split, subseq_ri_cum_depths = merge_two_tree(
+                                (draft_tokens.cpu(), retrieve_indices.cpu(), tree_mask.cpu(), tree_position_ids.cpu()),
+                                (draft_tokens2.cpu(), retrieve_indices2.cpu(), tree_mask2.cpu(), tree_position_ids2.cpu()),
+                                lens_split,
+                                subseq_ri_cum_depths
+                            )
+                            draft_tokens = draft_tokens.to(origin_device)
+                            tree_mask = tree_mask.to(origin_device)
+                            tree_position_ids = tree_position_ids.to(origin_device)
                                 
                         waiting_draft = lens_split[-1].item()
 
@@ -999,30 +993,30 @@ class StageEaModel(nn.Module):
                     else:
                         if run_config.none_expand and (last_ea_state is not None):
                             with prof.time_context(f"Stage {config.stage}: tree_expand_last", cpu=False) if prof is not None else nullcontext():
-                                with prof.time_context(f"Stage {config.stage}: expand_last", cpu=False) if prof is not None else nullcontext():
-                                    draft_tokens2, retrieve_indices2, tree_mask2, tree_position_ids2, last_ea_state = self.ea_layer.expand_last_new(
-                                        last_ea_tree,
-                                        last_ea_state,
-                                        self.stage_base_model.lm_head,
-                                        logits_processor,
-                                        device,
-                                        expand_depth=run_config.none_expand_depth,
-                                        expand_size=run_config.none_expand_size,
-                                        return_last=run_config.none_expand,
-                                        prof=prof
-                                    )
+                                # with prof.time_context(f"Stage {config.stage}: expand_last", cpu=False) if prof is not None else nullcontext():
+                                draft_tokens2, retrieve_indices2, tree_mask2, tree_position_ids2, last_ea_state = self.ea_layer.expand_last_new(
+                                    last_ea_tree,
+                                    last_ea_state,
+                                    self.stage_base_model.lm_head,
+                                    logits_processor,
+                                    device,
+                                    expand_depth=run_config.none_expand_depth,
+                                    expand_size=run_config.none_expand_size,
+                                    return_last=run_config.none_expand,
+                                    prof=prof
+                                )
                                 last_ea_tree = (draft_tokens2, retrieve_indices2, tree_mask2, tree_position_ids2)
                                 tree_position_ids2 = tree_position_ids2 + input_ids.size(-1)
                                 
                                 origin_device = draft_tokens.device
-                                with prof.time_context(f"Stage {config.stage}: expand_last merge_two_tree", cpu=True) if prof is not None else nullcontext():
-                                    # [update] operate on CPU
-                                    draft_tokens, retrieve_indices, tree_mask, tree_position_ids, lens_split, subseq_ri_cum_depths = merge_two_tree(
-                                        (draft_tokens.cpu(), retrieve_indices.cpu(), tree_mask.cpu(), tree_position_ids.cpu()),
-                                        (draft_tokens2.cpu(), retrieve_indices2.cpu(), tree_mask2.cpu(), tree_position_ids2.cpu()),
-                                        lens_split,
-                                        subseq_ri_cum_depths
-                                    )
+                                # with prof.time_context(f"Stage {config.stage}: expand_last merge_two_tree", cpu=True) if prof is not None else nullcontext():
+                                # [update] operate on CPU
+                                draft_tokens, retrieve_indices, tree_mask, tree_position_ids, lens_split, subseq_ri_cum_depths = merge_two_tree(
+                                    (draft_tokens.cpu(), retrieve_indices.cpu(), tree_mask.cpu(), tree_position_ids.cpu()),
+                                    (draft_tokens2.cpu(), retrieve_indices2.cpu(), tree_mask2.cpu(), tree_position_ids2.cpu()),
+                                    lens_split,
+                                    subseq_ri_cum_depths
+                                )
                                 draft_tokens = draft_tokens.to(origin_device)
                                 tree_mask = tree_mask.to(origin_device)
                                 tree_position_ids = tree_position_ids.to(origin_device)

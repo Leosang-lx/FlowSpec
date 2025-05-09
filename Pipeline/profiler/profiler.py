@@ -1,36 +1,71 @@
 import torch
 import time
 import functools
+import pickle
 import gc
 from contextlib import contextmanager
 
 sep = '\n' + '-' * 50 + '\n'
 star = '\n' + '*' * 50 + '\n'
 
+def is_strictly_ascending(arr):
+    return all(arr[i] < arr[i+1] for i in range(len(arr)-1))
+
+def save_as(obj, fname):
+    with open(fname, 'wb') as f:
+        pickle.dump(obj, f)
+
 class Profiler:
     def __init__(self):
         self.time_events = {}
         self.mem_events = {}
-        
+        # [update] for cumulative timing
+        self.test_cnt = 0
+        self.cumulative_time_events = []
+        self.temp_timestamps = None
+        self.temp_events = None
 
     def time_start(self, name, stream=None, cpu=False):
         """
         Start recording time for a named section. Supports multiple starts.
         """
+
+        self.start_tag = 'pipeline' in name
+        if self.start_tag:
+            self.cumulative_time_events.append(
+                {
+                    'timestamp': [],
+                    'events': []
+                }
+            )
+            self.temp_timestamps = self.cumulative_time_events[-1]['timestamp']
+            self.temp_events = self.cumulative_time_events[-1]['events']
+            self.test_cnt += 1
+        else:
+            assert len(self.cumulative_time_events) == self.test_cnt, "cumulative_time_events is not empty"
         if name not in self.time_events:
             self.time_events[name] = {'start': [], 'end': [], 'elapsed': 0.0, 'cpu': cpu}
         assert len(self.time_events[name]['start']) == len(self.time_events[name]['end']), \
             f"Cannot start '{name}' as there are more starts than stops"
         
-        if cpu:
-            start_event = time.perf_counter()
-        else:
-            start_event = torch.cuda.Event(enable_timing=True)
-            if stream is not None:
-                start_event.record(stream)
-            else:
-                start_event.record()
-                
+        # [update] 同步cpu时间
+        if not cpu:
+            torch.cuda.synchronize()
+        start_event = time.perf_counter()
+
+        # if cpu:
+        #     start_event = time.perf_counter()
+        # else:
+        #     start_event = torch.cuda.Event(enable_timing=True)
+        #     if stream is not None:
+        #         start_event.record(stream)
+        #     else:
+        #         start_event.record()
+        
+        # [update] for cumulative timing
+        self.temp_timestamps.append(start_event)
+        # only append the name when enter the event
+        self.temp_events.append(f'{name}')
         self.time_events[name]['start'].append(start_event)
 
     def time_stop(self, name, stream=None, cpu=False):
@@ -41,15 +76,22 @@ class Profiler:
         assert len(self.time_events[name]['start']) - 1 == len(self.time_events[name]['end']), \
             f"Cannot stop '{name}' as there are more stops than starts"
 
-        if cpu:
-            end_event = time.perf_counter()
-        else:
-            end_event = torch.cuda.Event(enable_timing=True)
-            if stream is not None:
-                end_event.record(stream)
-            else:
-                end_event.record()
+        # [update] 同步cpu时间
+        if not cpu:
+            torch.cuda.synchronize()
+        end_event = time.perf_counter()
+
+        # if cpu:
+        #     end_event = time.perf_counter()
+        # else:
+        #     end_event = torch.cuda.Event(enable_timing=True)
+        #     if stream is not None:
+        #         end_event.record(stream)
+        #     else:
+        #         end_event.record()
         
+        # [update] for cumulative timing
+        self.temp_timestamps.append(end_event)
         self.time_events[name]['end'].append(end_event)
         
     def elapsed_time(self, name):
@@ -65,13 +107,13 @@ class Profiler:
         total_time = self.time_events[name]['elapsed']
         total_count = len(self.time_events[name]['start'])
         # Accumulate new times
-        if cpu:
-            for start, end in zip(self.time_events[name]['start'], self.time_events[name]['end']):
-                total_time += (end - start) * 1000  # Convert seconds to ms
-        else:
-            torch.cuda.synchronize()
-            for start, end in zip(self.time_events[name]['start'], self.time_events[name]['end']):
-                total_time += start.elapsed_time(end)
+        # if cpu:
+        for start, end in zip(self.time_events[name]['start'], self.time_events[name]['end']):
+            total_time += (end - start) * 1000  # Convert seconds to ms
+        # else:
+        #     torch.cuda.synchronize()
+        #     for start, end in zip(self.time_events[name]['start'], self.time_events[name]['end']):
+        #         total_time += start.elapsed_time(end)
 
         # Store the accumulated time and clear the events
         self.time_events[name]['elapsed'] = total_time

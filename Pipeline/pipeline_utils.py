@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from queue import deque
 from typing import Union, Iterable, List
 import torch.distributed as dist
+from datetime import datetime
 # from memory_profiler import profile
 # from stage_ea_model import StageEaModel
 from transformers.generation.logits_process import (
@@ -22,6 +23,11 @@ from tools.communicator import *
 from typing import Tuple
 from contextlib import nullcontext
 TOPK = 10  # topk for sparse tree
+
+def get_time_str():
+    now = datetime.now()
+    return f"{now.month:02d}-{now.day:02d}-{now.hour:02d}-{now.minute:02d}"
+
 
 def calculate_model_size_with_buffers(model):
     total_memory = 0

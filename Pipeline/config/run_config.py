@@ -8,11 +8,13 @@ class Config:
     pipeline_type: str = "continuous"
     warmup = True
     warmup_repeat = 10
-    test_repeat = 10 # this refer to num of choices in the eval set
+    test_repeat = 1 # this refer to num of choices in the eval set
     
     log: bool = False
     temperature: float = 0.0
     max_new_tokens: int = 512
+    
+    timeout: int = 15
     
     # model config
     base_model_dir: str = f'/home/liux/big_file/pipeline_model/meta-llama/Llama-2-7b-chat-hf/new_stage_model_series_0+8+8+8+8_fp16'

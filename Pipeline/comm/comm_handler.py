@@ -20,8 +20,10 @@ class CommHandler:
         enable_async_send_recv=True,
         enable_async_broadcast=False,
         max_workers=4,
-        device=None
+        device=None,
+        timeout=60
     ):
+        self.timeout = timeout
         self.rank = rank
         self.world_size = world_size
         self.next_rank = 0 if rank == world_size - 1 else rank + 1
@@ -54,7 +56,7 @@ class CommHandler:
             init_method=init_method,
             rank=self.rank,
             world_size=self.world_size,
-            timeout=timedelta(seconds=60)
+            timeout=timedelta(seconds=self.timeout)
         )
         print(f'Rank {self.rank} initialized')
 
