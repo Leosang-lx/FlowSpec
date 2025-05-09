@@ -8,12 +8,14 @@ class Config:
     pipeline_type: str = "continuous"
     warmup = True
     warmup_repeat = 10
-    test_repeat = 1 # this refer to num of choices in the eval set
+    test_repeat = 10 # this refer to num of choices in the eval set
     
     log: bool = True
     save_timestamps: bool = False
     temperature: float = 0.0
     max_new_tokens: int = 512
+
+    draft_gen_sort_score: bool = True
     
     timeout: int = 15
     
@@ -56,7 +58,7 @@ class Config:
         
         # expand draft config
         expand_total_token: int = 64
-        expand_topk: int = 10 # now must be the same as init_topk
+        expand_topk: int = 10  # now must be the same as init_topk
         expand_depth: int = 6
         expand_subseq_token: int = -1
         

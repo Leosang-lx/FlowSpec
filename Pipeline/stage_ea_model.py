@@ -408,6 +408,7 @@ class StageEaModel(nn.Module):
                 depth=run_config.init_depth,
                 top_k=run_config.init_topk,
                 return_last=False,
+                sort_score=run_config.draft_gen_sort_score,
                 # prof=prof,
             )
             seqs_split, lens_split = split_sequence_close_equal_len(
@@ -488,6 +489,7 @@ class StageEaModel(nn.Module):
                     depth=run_config.init_depth,
                     top_k=run_config.init_topk,
                     return_last=False,
+                    sort_score=run_config.draft_gen_sort_score,
                     # prof=prof,
             )
             # todo: 好像没必要在这里移到gpu？因为要传给其他stages
@@ -750,6 +752,7 @@ class StageEaModel(nn.Module):
                         depth=run_config.init_depth,
                         top_k=run_config.init_topk,
                         return_last=run_config.none_expand,
+                        sort_score=run_config.draft_gen_sort_score,
                         # prof=prof
                 )
             if run_config.none_expand:
@@ -966,9 +969,10 @@ class StageEaModel(nn.Module):
                                 depth=run_config.expand_depth,
                                 top_k=run_config.expand_topk,
                                 return_last=run_config.none_expand,
+                                # sort_score=run_config.draft_gen_sort_score,
                                 # prof=prof
-                                # total_tokens=80
                             )  # get a little more appended tokens
+                            
                             if run_config.none_expand:
                                 last_ea_tree = (draft_tokens2, retrieve_indices2, tree_mask2, tree_position_ids2)
                             assert retrieve_indices2.size(-1) > max(tree_position_ids2), f'retrieve_indices2.size(-1) > max(tree_position_ids2): {retrieve_indices2.size(-1)} and {max(tree_position_ids2)}'
@@ -997,7 +1001,7 @@ class StageEaModel(nn.Module):
                         if run_config.none_expand and (last_ea_state is not None):
                             with prof.time_context(f"Stage {config.stage}: tree_expand_last", cpu=False) if prof is not None else nullcontext():
                                 # with prof.time_context(f"Stage {config.stage}: expand_last", cpu=False) if prof is not None else nullcontext():
-                                draft_tokens2, retrieve_indices2, tree_mask2, tree_position_ids2, last_ea_state = self.ea_layer.expand_last(
+                                draft_tokens2, retrieve_indices2, tree_mask2, tree_position_ids2, last_ea_state = self.ea_layer.expand_last_new(
                                     last_ea_tree,
                                     last_ea_state,
                                     self.stage_base_model.lm_head,

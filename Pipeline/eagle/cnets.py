@@ -701,6 +701,7 @@ class Model(nn.Module):
                      total_tokens=None, depth=None, top_k=None,
                      return_last=False,
                      log=False,
+                     sort_score=False,
                      prof=None):
         """
         past_key_values **after draft-many** includes draft tokens
@@ -853,19 +854,25 @@ class Model(nn.Module):
             top_scores_index = top_scores_index.numpy()
 
             # [update]
-            if return_last:
-                current_state = current_state + (top_scores_index,)
+            if sort_score:
+                draft_tokens = ss_token_list[top_scores_index]
+                if return_last:
+                    current_state = current_state + (top_scores_index,)
 
-            draft_tokens = ss_token_list[top_scores_index]  # [update]
+            # resort the top_scores_index
             top_orig_indices = np.argsort(top_scores_index)  # 保留原始顺序
             top_scores_index = top_scores_index[top_orig_indices]
             # top_scores_index = np.sort(top_scores_index)
-            
-            top_orig_indices = np.pad(top_orig_indices+1, (1, 0), mode='constant', constant_values=0)
 
-            # 构造反向索引
-            inv_indices = np.zeros(top_orig_indices.size, dtype=np.int64)
-            inv_indices[top_orig_indices] = np.arange(top_orig_indices.size, dtype=np.int64)
+            if not sort_score:
+                draft_tokens = ss_token_list[top_scores_index]
+                if return_last:
+                    current_state = current_state + (top_scores_index,)
+            else:
+                top_orig_indices = np.pad(top_orig_indices+1, (1, 0), mode='constant', constant_values=0)
+                # 构造反向索引
+                inv_indices = np.zeros(top_orig_indices.size, dtype=np.int64)
+                inv_indices[top_orig_indices] = np.arange(top_orig_indices.size, dtype=np.int64)
 
             # if return_last:
             #     current_state = current_state + (top_scores_index,)
@@ -910,8 +917,9 @@ class Model(nn.Module):
                 tree_position_ids = np.sum(tree_mask, axis=1) - 1
 
                 # [update]
-                tree_mask = tree_mask[inv_indices]
-                tree_mask = tree_mask[:, inv_indices]
+                if sort_score:
+                    tree_mask = tree_mask[inv_indices]
+                    tree_mask = tree_mask[:, inv_indices]
 
                 tree_mask = tree_mask.astype(float)[None, None]
                 draft_tokens = draft_tokens[None]
@@ -962,10 +970,12 @@ class Model(nn.Module):
             
                 del mask_index, mask_index_list, noleaf_index, noleaf_num, leaf_num, max_depth, rid
 
-                from pipeline_utils import map_retrieve_indices
-                retrieve_indices = map_retrieve_indices(retrieve_indices, torch.arange(draft_tokens.size(-1)), torch.from_numpy(top_orig_indices))
-                # retrieve_indices = map_retrieve_indices(retrieve_indices, top_orig_indices, top_scores_index)
-                tree_position_ids = tree_position_ids[inv_indices]
+                # [update]
+                if sort_score:
+                    from pipeline_utils import map_retrieve_indices
+                    retrieve_indices = map_retrieve_indices(retrieve_indices, torch.arange(draft_tokens.size(-1)), torch.from_numpy(top_orig_indices))
+                    # retrieve_indices = map_retrieve_indices(retrieve_indices, top_orig_indices, top_scores_index)
+                    tree_position_ids = tree_position_ids[inv_indices]
             
         return draft_tokens, retrieve_indices, tree_mask, tree_position_ids, current_state
     
