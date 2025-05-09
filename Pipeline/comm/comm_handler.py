@@ -75,8 +75,8 @@ class CommHandler:
         # recv mark
         rank_mark = [False] * self.world_size
         rank_mark[self.last_rank] = True
-        if self.rank == 0:
-            rank_mark[1] = True  # recv from first stage [only for broadcast]
+        # if self.rank == 0:
+        #     rank_mark[1] = True  # recv from first stage [only for broadcast]
         # if self.rank == self.world_size - 1:
         #     rank_mark[0] = True  # first stage send tree_info to last stage (additionally)
 

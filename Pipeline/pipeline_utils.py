@@ -236,19 +236,49 @@ def pipeline_prefill(
             )
             sub_hidden_state = outputs[0]
             comm.sendto(sub_hidden_state.cpu(), config.next_rank)
+            
+def pipeline_prefill_new(
+        stage_model,
+        input_ids=None,
+        stage_past_key_values=None,
+):
+    config = stage_model.config
+    device = stage_model.stage_base_model.device
+    comm = stage_model.comm  # update
+        
+    if config.is_draft_stage:  # assume 4 subseqs
+        seq_splits, _ = split_sequence_close_equal_len(input_ids, config.n_split)
+        
+        for subseq in seq_splits:
+            comm.sendto(subseq.cpu(), config.next_rank)
+            
+        hidden_state_splits = []
+        orig = ()
+        for i in range(config.n_split):
+            hidden_state_split = comm.recvfrom(config.last_rank, device=device).to(device)
+            hidden_state_splits.append(hidden_state_split)
+            orig = orig + (stage_model.stage_base_model.lm_head(hidden_state_split),)
 
-    # if config.is_first_stage:
-    #     orig = ()
+        hidden_state = torch.concat(hidden_state_splits, dim=-2)
+        orig = torch.concat(orig, dim=-2)
 
-    #     for i, hidden_state_split in enumerate(hidden_state_splits):
-    #         hidden_state_split = comm.recvfrom(config.last_rank, device=device)
-    #         hidden_state_splits[i] = hidden_state_split.to(device)
-    #         orig = orig + (stage_base_model.lm_head(hidden_state_splits[i]),)
+        return orig, hidden_state
 
-    #     hidden_state = torch.concat(hidden_state_splits, dim=-2)
-    #     orig = torch.concat(orig, dim=-2)
+    for i in range(config.total_stage-1):
+        last_hidden_state = comm.recvfrom(config.last_rank, device=device)
+        if config.is_first_stage:
+            _, sub_hidden_state = stage_model(
+                input_ids=last_hidden_state,
+                past_key_values=stage_past_key_values,
+            )
+            comm.sendto(sub_hidden_state.cpu(), config.next_rank)
+        else:
+            _, sub_hidden_state = stage_model(
+                inputs_embeds=last_hidden_state,
+                past_key_values=stage_past_key_values,
+            )
+            comm.sendto(sub_hidden_state.cpu(), config.next_rank)
 
-    #     return orig, hidden_state
     
 
 def prefill_pipeline0(stage_model, stage_past_key_values=None, input_ids = None):
@@ -991,41 +1021,7 @@ def token_pruning(
 
     return past_key_values_data_list, current_length_data, last_hidden_state, tree_mask, tree_pos_ids
 
-
-# def get_parent_indices(tree_mask: torch.Tensor) -> torch.Tensor:
-#     """
-#     Use parent_idx = parent_indices[token_idx] to get the parent of token_idx
-#     Return the parent indices of each token in the tree
-#     INPUT: tree_mask, [tree_size, tree_size]
-#     OUTPUT: parent_indices, [tree_size]
-#     """
-#     if tree_mask.dtype != torch.bool:
-#         tree_mask = tree_mask.to(torch.bool)
-
-#     # get lower triangular mask to avoid including the token itself
-#     n = tree_mask.size(0)
-#     offset = torch.tril(torch.ones(n, n, dtype=torch.bool, device=tree_mask.device), diagonal=-1)
-
-#     masked = tree_mask & offset  # keep the valid parent nodes
-    
-#     # reverse the masked matrix to find the last true value in each row
-#     reversed_masked = torch.flip(masked, dims=[1])
-#     max_values, parent_indices = torch.max(reversed_masked, dim=1)
-    
-#     # convert the indices and handle the invalid values
-#     parent_indices = (n - 1 - parent_indices)  # reverse the indices
-#     parent_indices[~max_values] = -1  # if all are false, set to -1
-#     return parent_indices
-# def get_parent_indices(tree_mask_np):
-#     parent_indices = np.zeros(tree_mask_np.shape[0], dtype=np.int64)
-#     parent_indices[0] = -1  # jump 0
-#     for i in range(1, tree_mask_np.shape[0]):
-#         parent_idx = np.flatnonzero(tree_mask_np[i, :i])[-1]
-#         parent_indices[i] = parent_idx
-#     return parent_indices
-
-
-def get_parent_indices(tree_mask):
+def get_parent_indices_np(tree_mask):
     """
     Compute parent indices for each node in a tree using NumPy.
     
@@ -1036,32 +1032,18 @@ def get_parent_indices(tree_mask):
         np.ndarray: Shape [n], where parent_indices[i] = j means j is the last parent of i, or -1 if no parent.
     """
     n = tree_mask.shape[0]
-
-    # Step 1: Ensure input is boolean
+    
     tree_mask = tree_mask.astype(np.bool_)
-
-    # Step 2: Create lower triangular mask to exclude diagonal (i.e., self)
     offset_mask = np.tri(n, n, k=-1, dtype=np.bool_)
-
-    # Step 3: Apply mask to get only valid parent positions
     masked = np.logical_and(tree_mask, offset_mask)
-
-    # Step 4: Flip columns to find last occurrence (reverse logic)
     flipped_masked = np.fliplr(masked)
-
-    # Step 5: Find first True in each row (which corresponds to last True in original)
     col_indices = np.argmax(flipped_masked, axis=1)
-
-    # Step 6: Convert back to original column indices
     parent_indices = n - 1 - col_indices
-
-    # Step 7: Handle rows with no True values (all False)
     all_false_rows = ~flipped_masked[np.arange(n), col_indices]
     parent_indices[all_false_rows] = -1
 
     return parent_indices
     
-
 def merge_two_tree(
         tree1: Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
         tree2: Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
@@ -1117,7 +1099,7 @@ def merge_two_tree(
         append_indices = torch.tensor(append_indices, dtype=torch.long)
         draft_tokens_merged = torch.cat((draft_tokens1, draft_tokens2[:, append_indices]), dim=1)
         merged_tree_pos_ids = torch.cat((tree_pos_ids1, tree_pos_ids2[append_indices]), dim=0)
-
+    assert draft_tokens_merged.size(-1) == merged_tree_pos_ids.size(0), f'draft_tokens_merged != merged_tree_pos_ids: {draft_tokens_merged.size(-1)} and {merged_tree_pos_ids.size(0)}'
     # [merge tree_mask]
     with prof.time_context(f"merge tree_mask", cpu=True) if prof is not None else nullcontext():
         merged_size = draft_tokens_merged.size(-1)
@@ -1126,7 +1108,7 @@ def merge_two_tree(
         merged_tree_mask[:tree1_size, :tree1_size] = tree_mask1_np
 
         with prof.time_context(f"get parent indices", cpu=True) if prof is not None else nullcontext():
-            parent_indices = get_parent_indices(tree_mask2_np)
+            parent_indices = get_parent_indices_np(tree_mask2_np)
         with prof.time_context(f"iterative merge tree_mask", cpu=True) if prof is not None else nullcontext():
             for i, append_idx in enumerate(append_indices):
                 mapped_idx = index_mapping_2_to_merged[append_idx]
@@ -1142,46 +1124,31 @@ def merge_two_tree(
         leave_paths1 = dict(leave_paths1)
         leave_paths2 = [(tuple(draft_tokens2_np[retrieve_indices2_np[i, :leaf_depths2[i]]]), i) for i in range(retrieve_indices2_np.shape[0])]
         leave_paths2 = dict(leave_paths2)
-        
-
-        # leaf_depths1 = (retrieve_indices1 != -1).sum(dim=1)
-        # for i, leaf_depth in enumerate(leaf_depths1):
-        #     leaf_path = tuple(draft_tokens1[0, retrieve_indices1[i, :leaf_depth]].tolist())
-        #     leave_paths1[leaf_path] = i
-        
-        # leaf_depths2 = (retrieve_indices2 != -1).sum(dim=1)
-        # for i, leaf_depth in enumerate(leaf_depths2):
-        #     leaf_path = tuple(draft_tokens2[0, retrieve_indices2[i, :leaf_depth]].tolist())
-        #     leave_paths2[leaf_path] = i
 
         selected_leaves1 = np.zeros(retrieve_indices1.size(0), dtype=np.bool_)
         selected_leaves2 = np.zeros(retrieve_indices2.size(0), dtype=np.bool_)
         for leaf_path, leaf_path_idx in leave_paths1.items():
-            if leaf_path in leave_paths2:
+            if leaf_path in paths_tree2 and leaf_path not in leave_paths2:
                 pass
             else:
                 selected_leaves1[leaf_path_idx] = True
         
         for leaf_path, leaf_path_idx in leave_paths2.items():
-            if leaf_path not in leave_paths1:
+            if leaf_path not in paths_tree1_idx:
                 selected_leaves2[leaf_path_idx] = True
 
-        # for leaf_path, leaf_path_idx in leave_paths1.items():
-        #     if leaf_path in paths_tree2 and leaf_path not in leave_paths2:
-        #         pass
-        #     else:
-        #         selected_leaves1[leaf_path_idx] = True
-        # for leaf_path, leaf_path_idx in leave_paths2.items():
-        #     if leaf_path not in paths_tree1_idx:
-        #         selected_leaves2[leaf_path_idx] = True
-        #     else:
-        #         pass
-
-        ri_selected1_np = np.full((selected_leaves1.sum(), retrieve_indices2_np.shape[1]), -1, dtype=np.int64)
-        ri_selected1_np[:, :retrieve_indices1_np.shape[1]] = retrieve_indices1_np[selected_leaves1]
-        ri_selected2 = retrieve_indices2[selected_leaves2, :]
-        ri_selected2 = map_retrieve_indices(ri_selected2, torch.arange(index_mapping_2_to_merged.size), torch.from_numpy(index_mapping_2_to_merged))
-        retrieve_indices_merged = torch.cat((torch.from_numpy(ri_selected1_np), ri_selected2), dim=0)
+        tree1_selected_sum = selected_leaves1.sum()
+        tree2_selected_sum = selected_leaves2.sum()
+        merged_selected_sum = tree1_selected_sum + tree2_selected_sum
+        max_depth = max(tree1_depth, tree2_depth)
+        ri_merged = np.full((merged_selected_sum, max_depth), -1, dtype=np.int64)
+        ri_merged[:tree1_selected_sum, :tree1_depth] = retrieve_indices1_np[selected_leaves1]
+        ri2_merged = retrieve_indices2_np[selected_leaves2]
+        valid_mask = ri2_merged != -1
+        ri2_merged[valid_mask] = index_mapping_2_to_merged[ri2_merged[valid_mask]]
+        
+        ri_merged[tree1_selected_sum:merged_selected_sum, :tree2_depth] = ri2_merged
+        retrieve_indices_merged = torch.from_numpy(ri_merged)
     # [merge retrieve_indices] finish
 
     # update lens_split and subseq_ri_cum_depths
