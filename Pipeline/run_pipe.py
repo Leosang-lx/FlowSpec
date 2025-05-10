@@ -2,17 +2,17 @@ from stage_ea_model import StageEaModel
 from stage_ea_config import StageEaConfig
 from fastchat.model import get_conversation_template
 from fastchat.llm_judge.common import load_questions
-from datetime import timedelta
-from pipeline_utils import calculate_model_size_with_buffers
+# from datetime import timedelta
+from pipeline_utils import calculate_model_size_with_buffers, get_time_str
 import torch
 import torch.distributed as dist
 from tqdm import tqdm
-import time
+# import time
 import argparse
 import os
 import warnings
-from torch.profiler import ProfilerActivity
-from profiler.profiler import prof
+# from torch.profiler import ProfilerActivity
+from profiler.profiler import prof, is_strictly_ascending, save_as
 from contextlib import nullcontext
 from config.run_config import config as run_config
 warnings.filterwarnings("ignore", category=UserWarning, message="TypedStorage is deprecated.*")
@@ -92,16 +92,18 @@ def main():
     if run_config.warmup:
         cnt = tqdm(range(run_config.warmup_repeat), desc="Warmup") if rank == 0 else range(run_config.warmup_repeat)
         for _ in cnt:
+            dist.barrier()
             outputs = run(
                     stage_model, 
                     input_ids if rank == 0 else None, 
-                    run_config.log if rank == 0 else False, 
+                    # run_config.log if rank == 0 else False, 
                     None
                 )
 
     # [test generation]
     cnt = tqdm(range(run_config.test_repeat), desc="Test") if rank == 0 else range(run_config.test_repeat)
     for i in cnt:
+        dist.barrier()
         with prof.profile_context(f"Rank {rank}: {run_config.pipeline_type} pipeline", device=f"cuda:{device}"):
             outputs = run(
                     stage_model, 
@@ -124,9 +126,17 @@ def main():
             print('Rounds:', idx+1)
             if len(outputs) == 4:
                 print('Turns:', turns)
+
+        # [update] for cumulative timing
+        # print(prof.cumulative_time_events[0]['timestamp'])
+        # print(prof.cumulative_time_events[0]['events'])
     
     dist.barrier()
     # if rank == 0 or rank == world_size - 1:
+    if run_config.save_timestamps:
+        assert is_strictly_ascending(prof.cumulative_time_events[0]['timestamp'])
+        save_as(prof.cumulative_time_events, f'records/{get_time_str()}-rank{rank}-ws{world_size}.rec')
+
     prof.print_all_events()
     
     # dist.barrier()

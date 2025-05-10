@@ -10,12 +10,18 @@ class Config:
     warmup_repeat = 10
     test_repeat = 10 # this refer to num of choices in the eval set
     
-    log: bool = False
-    temperature: float = 0
+    log: bool = True
+    save_timestamps: bool = False
+    temperature: float = 0.0
     max_new_tokens: int = 512
+
+    draft_gen_sort_score: bool = True
+    
+    timeout: int = 15
     
     # model config
     base_model_dir: str = f'/home/liux/big_file/pipeline_model/meta-llama/Llama-2-7b-chat-hf/new_stage_model_series_0+8+8+8+8_fp16'
+    # base_model_dir: str = f'/home/liux/big_file/pipeline_model/meta-llama/Llama-2-7b-chat-hf/new_stage_model_series_0+10+11+11_fp16'
     EAGLE_model_path: str = "/home/liux/LLM/models_hf/yuhuili/EAGLE-llama2-chat-7B"
     
     # base_model_dir: str = f"/home/nvidia/LLM/pipeline_model/meta-llama/Llama-2-7b-chat-hf/new_stage_model_series_0+8+8+8+8_fp16"
@@ -30,7 +36,7 @@ class Config:
         
     # demo config
     if mode == "demo":
-        your_message: str = "who are you?"
+        your_message: str = "Hello"
     # pipeline config
     if pipeline_type == "naive":
         num_stage: int = 5 # 5 or 4
@@ -40,7 +46,7 @@ class Config:
     
     if pipeline_type == "pruned":
         num_stage: int = 5 # 5 or 4
-        init_total_token: int = 64
+        init_total_token: int = 80
         init_topk: int = 10
         init_depth: int = 6
         init_subseq_token: int = 16
@@ -49,18 +55,18 @@ class Config:
         num_stage: int = 5 # only support 5 stage now
         
         # draft config
-        init_total_token: int = 160
+        init_total_token: int = 80
         init_topk: int = 10
-        init_depth: int = 8
-        init_subseq_token: int = 32
+        init_depth: int = 6
+        init_subseq_token: int = 16
         
         # expand draft config
         expand_total_token: int = 64
         expand_topk: int =10 # now must be the same as init_topk
-        expand_depth: int =3
+        expand_depth: int =6
         expand_subseq_token: int = -1
         
-        none_expand: bool = False
+        none_expand: bool = True
         if none_expand:
             none_expand_size: int = 48
             none_expand_depth: int = 0

@@ -701,6 +701,7 @@ class Model(nn.Module):
                      total_tokens=None, depth=None, top_k=None,
                      return_last=False,
                      log=False,
+                     sort_score=False,
                      prof=None):
         """
         past_key_values **after draft-many** includes draft tokens
@@ -837,8 +838,8 @@ class Model(nn.Module):
             top_scores = torch.topk(scores_list, total_tokens, dim=-1)
             top_scores_index = top_scores.indices.cpu()
             
-            if return_last:
-                current_state = current_state + (top_scores_index,)
+            # if return_last:
+            #     current_state = current_state + (top_scores_index,)
             
             scores_list = scores_list.cpu()
             ss_token_list = ss_token_list.cpu()
@@ -851,14 +852,36 @@ class Model(nn.Module):
                 parents_list = parents_list.numpy()
             
             top_scores_index = top_scores_index.numpy()
-            top_scores_index = np.sort(top_scores_index)
 
-            draft_tokens = ss_token_list[top_scores_index]
+            # [update]
+            if sort_score:
+                draft_tokens = ss_token_list[top_scores_index]
+                if return_last:
+                    current_state = current_state + (top_scores_index,)
+
+            # resort the top_scores_index
+            top_orig_indices = np.argsort(top_scores_index)  # 保留原始顺序
+            top_scores_index = top_scores_index[top_orig_indices]
+            # top_scores_index = np.sort(top_scores_index)
+
+            if not sort_score:
+                draft_tokens = ss_token_list[top_scores_index]
+                if return_last:
+                    current_state = current_state + (top_scores_index,)
+            else:
+                top_orig_indices = np.pad(top_orig_indices+1, (1, 0), mode='constant', constant_values=0)
+                # 构造反向索引
+                inv_indices = np.zeros(top_orig_indices.size, dtype=np.int64)
+                inv_indices[top_orig_indices] = np.arange(top_orig_indices.size, dtype=np.int64)
+
+            # if return_last:
+            #     current_state = current_state + (top_scores_index,)
+
+            # draft_tokens = ss_token_list[top_scores_index]
             sample_token = sample_token.cpu().numpy()
             draft_tokens = np.concatenate((sample_token, draft_tokens))
 
             draft_parents = parents_list[top_scores_index // top_k].astype(np.int64)
-            # print(f'draft_parents: {draft_parents}')
 
             if log:
                 print(f'draft_parents: {draft_parents}')
@@ -869,9 +892,6 @@ class Model(nn.Module):
             # mask_index[(top_scores_index[mask_index]!=draft_parents - 1)]=-1
             mask_index[draft_parents == 0] = -1
             mask_index = mask_index + 1
-            # print(f'mask_index:')
-            # for i in range(len(mask_index)):
-            #     print(f'{i+1} parent: {mask_index[i]}')
             mask_index_list = mask_index.tolist()
             # with Timer("mask"):
             tree_mask = np.eye(total_tokens + 1).astype(bool)
@@ -896,10 +916,13 @@ class Model(nn.Module):
             # print(tree_mask0.equal(tree_mask))
                 tree_position_ids = np.sum(tree_mask, axis=1) - 1
 
+                # [update]
+                if sort_score:
+                    tree_mask = tree_mask[inv_indices]
+                    tree_mask = tree_mask[:, inv_indices]
+
                 tree_mask = tree_mask.astype(float)[None, None]
                 draft_tokens = draft_tokens[None]
-
-
 
             del parents_list, scores_list, ss_token, ss_token_list, draft_parents
 
@@ -946,11 +969,13 @@ class Model(nn.Module):
                 tree_position_ids = torch.tensor(tree_position_ids, dtype=torch.long)
             
                 del mask_index, mask_index_list, noleaf_index, noleaf_num, leaf_num, max_depth, rid
-                
-                # assert retrieve_indices.device == torch.device(f"cuda:{1}")
-                # assert draft_tokens.device == torch.device(f"cuda:{1}")
-                # assert tree_mask.device == torch.device(f"cuda:{1}")
-                # assert tree_position_ids.device == torch.device(f"cuda:{1}")
+
+                # [update]
+                if sort_score:
+                    from pipeline_utils import map_retrieve_indices
+                    retrieve_indices = map_retrieve_indices(retrieve_indices, torch.arange(draft_tokens.size(-1)), torch.from_numpy(top_orig_indices))
+                    # retrieve_indices = map_retrieve_indices(retrieve_indices, top_orig_indices, top_scores_index)
+                    tree_position_ids = tree_position_ids[inv_indices]
             
         return draft_tokens, retrieve_indices, tree_mask, tree_position_ids, current_state
     
@@ -1083,7 +1108,7 @@ class Model(nn.Module):
         tree_mask, len_posi, top_k, \
         topk_cs_index, scores, ss_token, scores_list, parents_list, last_top_scores_index = last_state
         
-        total_tokens = last_top_scores_index.size(-1) + expand_size
+        total_tokens = last_top_scores_index.size + expand_size
         sample_token = input_ids[:, -1]
      
         with prof.time_context(f"Stage 0: expand last new main loop", cpu=False) if prof is not None else nullcontext():
@@ -1144,9 +1169,9 @@ class Model(nn.Module):
                     # print(f"out_ids.device={out_ids.device}, input_ids.device={input_ids.device}")
                     tree_mask = torch.cat((tree_mask[:, :, out_ids], self.tree_mask_init), dim=3)
                 
-            current_state = None
             if return_last:
-                last_depth = i + 1
+                if expand_depth > 0:
+                    last_depth = i + 1
                 current_state = (
                     last_depth, #total_tokens,
                     input_ids, input_hidden, past_key_values,
@@ -1160,7 +1185,13 @@ class Model(nn.Module):
             
             # top_scores_index, _ = self.topk_np(scores_list, total_tokens)
             top_scores = torch.topk(scores_list, total_tokens, dim=-1)
-            top_scores_index = top_scores.indices.cpu()
+            top_scores_index = top_scores.indices.cpu().numpy()
+
+            # print(f'top_scores_index: {top_scores_index}')
+            # print(f'last_top_scores_index: {last_top_scores_index}')
+            # new = set(top_scores_index.tolist()) - set(last_top_scores_index.tolist())
+            # print(f'new: {new}, {len(new)}')
+            # exit(0)
             
             if return_last:
                 current_state = current_state + (top_scores_index,)
@@ -1170,17 +1201,16 @@ class Model(nn.Module):
             parents_list = parents_list.cpu()
             
         with prof.time_context(f"Stage 0: expand last new post process", cpu=True) if prof is not None else nullcontext():
-            with prof.time_context(f"Stage 0: expand last new numpy", cpu=True) if prof is not None else nullcontext():
-                scores_list = scores_list.numpy()
-                ss_token_list = ss_token_list.numpy()
-                parents_list = parents_list.numpy()
+            scores_list = scores_list.numpy()
+            ss_token_list = ss_token_list.numpy()
+            parents_list = parents_list.numpy()
             
-            top_scores_index = top_scores_index.numpy()
             top_scores_index = np.sort(top_scores_index)
 
             draft_tokens = ss_token_list[top_scores_index]
             sample_token = sample_token.cpu().numpy()
             draft_tokens = np.concatenate((sample_token, draft_tokens))
+            
 
             draft_parents = parents_list[top_scores_index // top_k].astype(np.int64)
             # print(f'draft_parents: {draft_parents}')
@@ -1437,15 +1467,6 @@ class Model(nn.Module):
                 topk_cs_index, topk_cs_p = topk_cs.indices, topk_cs.values
                 scores = topk_cs_p
 
-                # if log:
-                #     print(f'topK_genrate depth {i}:')
-                #     print(f'-- out_hidden: {out_hidden.shape}')
-                #     print(f'-- input_ids: {input_ids.shape}')
-                #     print(f'-- last_p: {last_p.shape}')
-                #     print(f'-- topk_p: {topk_p.shape}')
-                #     print(f'-- scores: {scores.shape}')
-                #     print(f'-- ss_token: {sum([i.numel() for i in ss_token])}')
-
                 out_ids = topk_cs_index // top_k
                 # print(f"out_ids.device={out_ids.device}")
                 input_hidden = out_hidden[:, out_ids]
@@ -1465,9 +1486,10 @@ class Model(nn.Module):
                 tree_mask = torch.cat((tree_mask[:, :, out_ids], self.tree_mask_init), dim=3)
 
         with prof.time_context(f"Stage 0: expand last post process", cpu=True) if prof is not None else nullcontext():
-            current_state = None
             if return_last:
-                last_depth = i + 1
+                if expand_depth > 0:
+                    last_depth = i + 1
+
                 current_state = (
                     last_depth,
                     input_ids, input_hidden, past_key_values,
@@ -1475,48 +1497,65 @@ class Model(nn.Module):
                     topk_cs_index, scores, ss_token, scores_list, parents_list
                 )
 
-            scores_list = torch.cat(scores_list, dim=0).view(-1)
-            ss_token_list = torch.cat(ss_token, dim=0).view(-1)
+
+            scores_list = torch.cat(scores_list, dim=0).view(-1).cpu().numpy()
+            ss_token_list = torch.cat(ss_token, dim=0).view(-1).cpu()
+            parents_list = torch.cat(parents_list, dim=0).view(-1).cpu().numpy()
 
             # all_draft_size = scores_list.size(-1)
             # mask last_selected
-            last_selected_mask = torch.ones_like(scores_list, dtype=torch.bool)
+            first_k_layers = 3
+            bias = top_k + (first_k_layers - 1) * top_k**2
+            last_selected_mask = np.ones_like(scores_list, dtype=np.bool_)
+            last_selected_mask[bias:] = False
             last_selected_mask[last_top_scores_index] = False
+            assert np.sum(last_selected_mask) > expand_size
             masked_scores_list = scores_list[last_selected_mask]
             
             # scores_list[last_top_scores_index] = -torch.inf
             # appended_top_scores = torch.topk(scores_list, expand_size, dim=-1)
 
-            valid_indices = torch.nonzero(last_selected_mask).squeeze()
-            appended_top_scores = torch.topk(masked_scores_list, expand_size, dim=-1)
-            appended_top_scores_index = appended_top_scores.indices
-            appended_top_scores_index = valid_indices[appended_top_scores_index]  # map to original indices
-            appended_top_scores_index = torch.sort(appended_top_scores_index).values
+            valid_indices = np.flatnonzero(last_selected_mask)
+            appended_top_scores = np.argsort(masked_scores_list)[-expand_size:]
+            appended_top_scores_index = valid_indices[appended_top_scores]
+            appended_top_scores_index = np.sort(appended_top_scores_index)
             # print(f'appended_top_scores_index: {appended_top_scores_index}')
+
+            # scores_list = scores_list.cpu().numpy()
+            # ss_token_list = ss_token_list.cpu().numpy()
+            # parents_list = parents_list.cpu().numpy()
 
             last_size = last_draft_tokens.size(-1)
 
-            merged_top_indices = torch.cat((last_top_scores_index, appended_top_scores_index), dim=-1)
+            merged_top_indices = np.concatenate((last_top_scores_index, appended_top_scores_index), axis=-1)
             if return_last:
                 current_state = current_state + (merged_top_indices,)
 
-            merged_sorted_top_indices, merged_indices_origin = torch.sort(merged_top_indices)
-            merged_indices_origin = F.pad((merged_indices_origin+1).cpu(), (1, 0), value=0)
+            # scores_list = scores_list.cpu()
+            # ss_token_list = ss_token_list.cpu()
+            # parents_list = parents_list.cpu()
+
+            merged_indices_origin = np.argsort(merged_top_indices)
+            merged_sorted_top_indices = merged_top_indices[merged_indices_origin]
+            
+            # merged_sorted_top_indices, merged_indices_origin = np.sort(merged_top_indices)
+            merged_indices_origin = np.pad(merged_indices_origin+1, (1, 0), mode='constant', constant_values=0)
 
             # 构造反向索引
-            inv_indices = torch.zeros(merged_indices_origin.size(0), dtype=torch.long)
-            inv_indices[merged_indices_origin] = torch.arange(merged_indices_origin.size(0), dtype=torch.long)
-
-            draft_tokens_new = torch.cat((last_draft_tokens[:, 0], ss_token_list[merged_sorted_top_indices]), dim=-1)
-            draft_tokens_new = draft_tokens_new[inv_indices]
+            inv_indices = np.zeros(merged_indices_origin.size, dtype=np.int64)
+            inv_indices[merged_indices_origin] = np.arange(merged_indices_origin.size, dtype=np.int64)
 
             draft_tokens = torch.cat((last_draft_tokens[0], ss_token_list[appended_top_scores_index]), dim=-1)
+            
+            draft_tokens_new = torch.cat((last_draft_tokens[:, 0], ss_token_list[merged_sorted_top_indices]), dim=-1)
+            draft_tokens_new = draft_tokens_new[inv_indices]
             assert torch.equal(draft_tokens, draft_tokens_new)
 
-            # print(f'parents_list: {parents_list}')
-            draft_parents = torch.cat(parents_list, dim=0)[merged_sorted_top_indices // top_k].long()
 
-            mask_index = torch.searchsorted(merged_sorted_top_indices, draft_parents - 1, right=False)
+            # print(f'parents_list: {parents_list}')
+            draft_parents = parents_list[merged_sorted_top_indices // top_k].astype(np.int64)
+
+            mask_index = np.searchsorted(merged_sorted_top_indices, draft_parents - 1, side='left')
             # mask_index = mask_index[torch.sort(merged_indices_origin).values]
             mask_index[draft_parents == 0] = -1
             mask_index = mask_index + 1
@@ -1525,32 +1564,50 @@ class Model(nn.Module):
             mask_index_list = mask_index.tolist()
 
             total_tokens = last_size + expand_size - 1
-            tree_mask = torch.eye(total_tokens + 1).bool()
+            tree_mask = np.eye(total_tokens + 1).astype(np.bool_)
             tree_mask[:, 0] = True
             for i in range(total_tokens):
-                tree_mask[i + 1].add_(tree_mask[mask_index_list[i]])
+                # tree_mask[i + 1].add_(tree_mask[mask_index_list[i]])
+                # print(f'{i+1}, {mask_index_list[i]}')
+                try:
+                    np.add(tree_mask[i + 1], tree_mask[mask_index_list[i]], out=tree_mask[i + 1])
+                except:
+                    print(f'{i+1}, {mask_index_list[i]}')
+                    raise
 
-            tree_position_ids = torch.sum(tree_mask, dim=1) - 1
+            tree_position_ids = np.sum(tree_mask, axis=1) - 1
             # tree_position_ids = tree_position_ids[inv_indices]
             tree_mask = tree_mask[inv_indices]
             tree_mask = tree_mask[:, inv_indices]
-            tree_mask = tree_mask.float()[None, None]
+            tree_mask = tree_mask.astype(np.float32)[None, None]
 
-            assert torch.equal(tree_mask[0, 0, :last_size, :last_size], last_tree_mask[0, 0])
+            tree_mask = torch.from_numpy(tree_mask)
+            try:
+                assert torch.allclose(tree_mask[0, 0, :last_size, :last_size], last_tree_mask[0, 0])
+            except:
+                print(f'tree_mask: {tree_mask[0, 0, :last_size, :last_size]}')
+                print(f'last_tree_mask: {last_tree_mask[0, 0]}')
+                diff = tree_mask[0, 0, :last_size, :last_size] - last_tree_mask[0, 0]
+                print(f'diff: {diff.reshape(-1)}')
+                print(f'diff.shape: {diff.shape}')
+                print(f'positions: {torch.nonzero(diff, as_tuple=True)}')
+                raise
             draft_tokens = draft_tokens[None]
 
             # [retrieve_indices]
-            max_depth = torch.max(tree_position_ids) + 1
-            noleaf_index = torch.unique(mask_index).tolist()
+            max_depth = np.max(tree_position_ids) + 1
+            noleaf_index = np.unique(mask_index).tolist()
             noleaf_num = len(noleaf_index) - 1
             leaf_num = total_tokens - noleaf_num
 
-            retrieve_indices = torch.zeros(leaf_num, max_depth.item(), dtype=torch.long) - 1
+            retrieve_indices = np.full((leaf_num, max_depth), -1, dtype=np.int64)
             retrieve_indices = retrieve_indices.tolist()
 
             rid = 0
             position_ids_list = tree_position_ids.tolist()
-            tree_position_ids = tree_position_ids[inv_indices]
+            tree_position_ids = torch.from_numpy(tree_position_ids[inv_indices])
+            
+            assert torch.allclose(tree_position_ids[:last_size], last_tree_position_ids)
 
             for i in range(total_tokens + 1):
                 if i not in noleaf_index:
@@ -1575,9 +1632,12 @@ class Model(nn.Module):
 
             retrieve_indices = torch.tensor(retrieve_indices, dtype=torch.long)
             from pipeline_utils import map_retrieve_indices
-            retrieve_indices = map_retrieve_indices(retrieve_indices, torch.arange(draft_tokens.size(-1)), merged_indices_origin)
+            retrieve_indices = map_retrieve_indices(retrieve_indices, torch.arange(draft_tokens.size(-1)), torch.from_numpy(merged_indices_origin))
             del mask_index, mask_index_list, noleaf_index, noleaf_num, leaf_num, max_depth, rid
-            tree_position_ids = tree_position_ids.to(device)
+
+            # tree_mask = torch.from(tree_mask, dtype=torch.float)
+            # tree_position_ids = torch.tensor(tree_position_ids, dtype=torch.long)
+            # tree_position_ids = tree_position_ids.to(device)
         
         return draft_tokens, retrieve_indices, tree_mask, tree_position_ids, current_state
 
