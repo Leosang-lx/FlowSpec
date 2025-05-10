@@ -626,7 +626,7 @@ def fill_pipeline_stages(
     device = stage_model.stage_base_model.device
     comm = stage_model.comm
     # print(f'Stage {config.stage} fill_pipeline_stages')
-    dist.barrier()
+    # dist.barrier()
 
     # draft stage 0
     if config.is_draft_stage:  # [IMPORTANT] lens_split = world_size = 5

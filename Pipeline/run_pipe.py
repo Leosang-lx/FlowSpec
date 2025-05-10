@@ -236,6 +236,9 @@ def run_eval():
     #test
     ###########################################
     cnt = tqdm(range(len(questions)), desc=run_config.dataset_name) if rank == 0 else range(len(questions))
+    new_tokens_list = []
+    wall_time_list = []
+    
     for i in cnt:
         q = questions[i]
         
@@ -257,21 +260,24 @@ def run_eval():
                     input_ids = torch.as_tensor(input_ids).cuda()
                 
                 with prof.profile_context(f"Rank {rank}: {run_config.pipeline_type} pipeline", device=f"cuda:{device}"):
+                    start_time = time.time()
                     outputs = run(
                         stage_model, 
                         input_ids if rank == 0 else None, 
                         run_config.log if rank == 0 else False, 
                         prof
                     )
+                    torch.cuda.synchronize()
+                    end_time = time.time()
+                    wall_time = end_time - start_time
                 
                 if rank == 0:  # only for greedy decoding test!!!
                     if run_config.log:
                         output_ids, new_tokens, idx, turns = outputs
                     else:
                         output_ids = outputs
-                        
-                    output_ids = output_ids[0][len(input_ids[0]):]
                     
+                    output_ids = output_ids[0][len(input_ids[0]):]
                     if conv.stop_token_ids:
                         stop_token_ids_index = [
                             i
@@ -301,10 +307,18 @@ def run_eval():
                         
                     conv.messages[-1][-1] = output
                 
+                if rank == 0:
+                    new_tokens_list.append(output_ids.shape[0])
+                    wall_time_list.append(wall_time)
+                
     dist.barrier()
     # if rank == 0 or rank == world_size - 1:
     prof.print_all_events()
     
+    if rank == 0:
+        throughput = sum(new_tokens_list) / sum(wall_time_list)
+        avg_latency = sum(wall_time_list) / len(wall_time_list)
+        print(f'throughput: {throughput}, avg_latency: {avg_latency}')
     # dist.barrier()
     if hasattr(stage_model, "comm"):
         stage_model.comm.stop()
