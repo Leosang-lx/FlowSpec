@@ -5,7 +5,7 @@ class Config:
     
     # run config
     mode = "demo" # "eval" or "demo"
-    pipeline_type: str = "continuous"
+    pipeline_type: str = "pipedec"
     warmup = True
     warmup_repeat = 10
     test_repeat = 10 # this refer to num of choices in the eval set
@@ -66,6 +66,11 @@ class Config:
         if none_expand:
             none_expand_size: int = 48
             none_expand_depth: int = 1
+
+    if pipeline_type == "pipedec":
+        init_total_token: int = 64
+        init_topk: int = 16
+        init_depth: int = 1
         
     # device config
     device: str = "cuda"

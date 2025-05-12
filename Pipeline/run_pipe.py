@@ -53,8 +53,8 @@ def main():
     #     assert stage_model.stage_base_model.lm_head.weight is stage_model.stage_base_model.model.embed_tokens.weight
     
     stage_model.eval()
-
-    assert run_config.pipeline_type in ["naive", "pruned", "continuous"]
+    # [update] pipedec
+    assert run_config.pipeline_type in ["naive", "pruned", "continuous", "pipedec"]
     assert run_config.mode in ["eval", "demo"]
 
     # [initialize]
