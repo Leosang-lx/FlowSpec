@@ -1693,9 +1693,9 @@ class Model(nn.Module):
 
             draft_tokens = torch.cat((input_ids[:, :1], topk_index[None]), dim=-1)
             # first expand仅有两层，第二层的全部看得到第一层的根节点
-            tree_mask = torch.eye(top_k, top_k, dtype=torch.bool)
+            tree_mask = torch.eye(1+top_k, 1+top_k, dtype=torch.bool)
             tree_mask[:, 0] = True
-            tree_mask = tree_mask[None, None]
+            tree_mask = tree_mask[None, None].to(torch.float32)
             # 根节点为0，后面全为1
             tree_position_ids = torch.ones(1+top_k, dtype=torch.long)
             tree_position_ids[0] = 0
@@ -1718,12 +1718,13 @@ class Model(nn.Module):
         # 可能已经剪过枝了（如果剪过则accept_tokens非None以及left_indices非None
         draft_tokens, retrieve_indices, tree_mask, tree_position_ids = tree
         cur_input_len = input_ids.size(-1)
+        print(f'cur_tree_size: {tree_mask.shape}')
 
         # 当前树最后一层的节点在树中对应的indices
         max_position_id = torch.max(tree_position_ids)
         is_last_layer = tree_position_ids == max_position_id
-        last_layer_indices = torch.nonzero(is_last_layer).squeeze()
-        print(f'last_layer_indices: {last_layer_indices}')
+        last_layer_indices = torch.nonzero(is_last_layer).squeeze(-1)
+        # print(f'last_layer_indices: {last_layer_indices}')
         last_layer_size = is_last_layer.sum().item()
 
         # input_ids: 初始draft token tree对应的left_indices（不包含初始根节点）
@@ -1735,7 +1736,7 @@ class Model(nn.Module):
             input_ids = torch.cat((accept_tokens[:, 1:], draft_tokens), dim=-1)
             # pruning the input_hidden and cu_scores_cum
             left_indices_in_state = left_indices[1:] - 1
-            print(f'left_indices_in_state: {left_indices_in_state}')
+            # print(f'left_indices_in_state: {left_indices_in_state}')
             input_hidden = input_hidden[:, left_indices_in_state]
             print(f'cu_scores_cum: {cu_scores_cum.shape}')
             cu_scores_cum = cu_scores_cum[left_indices_in_state]
@@ -1761,7 +1762,7 @@ class Model(nn.Module):
         output_hidden, _ = self(input_hidden, input_ids=input_ids,
                                             past_key_values=self.stable_kv,
                                             position_ids=position_ids, use_cache=True)
-        print(f'Stage 1: output_hidden {output_hidden.shape}')
+        print(f'Stage 0: output_hidden {output_hidden.shape}')
 
         # 取得当前树最后一层的节点的next-token distribution
         last_layer_output_hidden = output_hidden[:, -last_layer_size:]
@@ -1786,6 +1787,7 @@ class Model(nn.Module):
         scores = topk_cs_p
         print(f'scores: {scores.shape}')
         # 拿到这些parent在当前draft token tree中的序号
+        print(f'last_layer_indices: {last_layer_indices.shape}')
         parent_indices = last_layer_indices[parents]
         idx_ri_path = []  # parent_idx -> ri_path
         for parent_idx in last_layer_indices:

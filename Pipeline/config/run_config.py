@@ -6,9 +6,9 @@ class Config:
     # run config
     mode = "demo" # "eval" or "demo"
     pipeline_type: str = "pipedec"
-    warmup = True
+    warmup = False
     warmup_repeat = 10
-    test_repeat = 10 # this refer to num of choices in the eval set
+    test_repeat = 1 # this refer to num of choices in the eval set
     
     log: bool = True
     save_timestamps: bool = False

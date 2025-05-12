@@ -169,7 +169,7 @@ class CommHandler:
         """ 
         self.sendto(appended_input.cpu(), self.next_rank)
         self.sendto(tree_pos_ids.cpu(), self.next_rank)
-        self.sendto(tree_mask.cpu(), self.next_rank)
+        self.sendto(tree_mask.clone().cpu(), self.next_rank)
 
     def recv_appended(self, device=None):
         appended_input = self.recvfrom(self.last_rank)

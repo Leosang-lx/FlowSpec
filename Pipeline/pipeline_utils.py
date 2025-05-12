@@ -624,6 +624,30 @@ def token_tree_partition(draft_tokens, retrieve_indices, total_stage, subseq_len
     return tokens_split, lens_split, torch.stack(subseq_ri_cum_depths, dim=0)
 
 
+def get_subseq_ri_cum_depths(retrieve_indices, lens_split):
+    n_leaves = retrieve_indices.size(0)
+    subseq_ri_cum_depths = []
+    cum_seq_lens = np.cumsum(lens_split.numpy(), axis=0)
+    bottom = np.full((n_leaves, 1), -1, dtype=np.int64)
+    retrieve_indices_filled = np.concatenate((retrieve_indices.numpy(), bottom), axis=1)  # add -1 to bottom to prevent overflow
+
+    ri_depth_cum = np.zeros(n_leaves, dtype=np.int64)
+    for i, cum_seq_len in enumerate(cum_seq_lens):
+        for j in range(0 if i == 0 else cum_seq_lens[i - 1], cum_seq_len):
+            row_indices = np.arange(n_leaves, dtype=np.int64)
+            cum_ri_leaves = retrieve_indices_filled[row_indices, ri_depth_cum]
+            ri_depth_cum[cum_ri_leaves == j] += 1
+        # update: 只计算到在pipeline里的draft token tree部分，即将输入的最新一段单独算
+        subseq_ri_cum_depths.append(ri_depth_cum.copy())
+    subseq_ri_cum_depths = np.stack(subseq_ri_cum_depths, axis=0)
+
+    subseq_ri_cum_depth = (retrieve_indices != -1).sum(dim=1)[None]
+    subseq_ri_cum_depths = np.concatenate((subseq_ri_cum_depths, subseq_ri_cum_depth), axis=0)
+
+    subseq_ri_cum_depths = torch.from_numpy(subseq_ri_cum_depths)
+
+    return subseq_ri_cum_depths
+
 def fill_pipeline_stages(
     stage_model,
     stage_past_key_values=None,  # necessary for following stages
