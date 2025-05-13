@@ -1,8 +1,17 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import List
 
 @dataclass
 class Config:
     
+    # network config
+    hardware: str = "server" # "jetson" or "server"
+    if hardware == "jetson":
+        password: str = "nvidia"
+        interface: str = "eth0"
+        rate_mbps: float = 150
+        delay_ms: float = 0.0
+
     # run config
     mode = "demo" # "eval" or "demo"
     pipeline_type: str = "continuous"
@@ -10,41 +19,42 @@ class Config:
     warmup_repeat = 10
     test_repeat = 10 # this refer to num of choices in the eval set
     
-    log: bool = True
+    log: bool = False
+    prof: bool = False
     save_timestamps: bool = False
     temperature: float = 0.0
     max_new_tokens: int = 512
-
-    draft_gen_sort_score: bool = True
     
     timeout: int = 15
     
     # model config
-    base_model_dir: str = f'/home/liux/big_file/pipeline_model/meta-llama/Llama-2-7b-chat-hf/new_stage_model_series_0+8+8+8+8_fp16'
-    # base_model_dir: str = f'/home/liux/big_file/pipeline_model/meta-llama/Llama-2-7b-chat-hf/new_stage_model_series_0+10+11+11_fp16'
-    EAGLE_model_path: str = "/home/liux/LLM/models_hf/yuhuili/EAGLE-llama2-chat-7B"
-    
-    # base_model_dir: str = f"/home/nvidia/LLM/pipeline_model/meta-llama/Llama-2-7b-chat-hf/new_stage_model_series_0+8+8+8+8_fp16"
-    # EAGLE_model_path: str = f"/home/nvidia/LLM/models_hf/yuhuili/EAGLE-llama2-chat-7B"
+    if hardware == "server":
+        base_model_dir: str = f'/home/liux/big_file/pipeline_model/meta-llama/Llama-2-7b-chat-hf/new_stage_model_series_0+8+8+8+8_fp16'
+        EAGLE_model_path: str = "/home/liux/LLM/models_hf/yuhuili/EAGLE-llama2-chat-7B"
+    else:
+        base_model_dir: str = f"/home/nvidia/LLM/pipeline_model/meta-llama/Llama-2-7b-chat-hf/new_stage_model_series_0+8+8+8+8_fp16"
+        EAGLE_model_path: str = f"/home/nvidia/LLM/models_hf/yuhuili/EAGLE-llama2-chat-7B"
     
     # eval config
     if mode == "eval":
         dataset_name: str = "mt_bench"
         question_path: str = "./data/" + dataset_name + "/question.jsonl"
-        question_begin: int = 10
-        question_end: int = 20
+        question_begin: int = 0
+        question_end: int = 2
         
     # demo config
     if mode == "demo":
         your_message: str = "Hello"
     # pipeline config
     if pipeline_type == "naive":
+        draft_gen_sort_score: bool = False
         num_stage: int = 5 # 5 or 4
         init_total_token: int = 80
         init_topk: int = 10
         init_depth: int = 6
     
     if pipeline_type == "pruned":
+        draft_gen_sort_score: bool = False
         num_stage: int = 5 # 5 or 4
         init_total_token: int = 80
         init_topk: int = 10
@@ -52,6 +62,7 @@ class Config:
         init_subseq_token: int = 16
         
     if pipeline_type == "continuous":
+        draft_gen_sort_score: bool = True
         num_stage: int = 5 # only support 5 stage now
         
         # draft config
@@ -61,7 +72,7 @@ class Config:
         init_subseq_token: int = 16
         
         # expand draft config
-        expand_total_token: int = 64
+        expand_total_token: int =64
         expand_topk: int =10 # now must be the same as init_topk
         expand_depth: int =6
         expand_subseq_token: int = -1

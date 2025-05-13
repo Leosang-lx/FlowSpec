@@ -16,6 +16,7 @@ from profiler.profiler import prof, is_strictly_ascending, save_as
 from contextlib import nullcontext
 from config.run_config import config as run_config
 warnings.filterwarnings("ignore", category=UserWarning, message="TypedStorage is deprecated.*")
+import time
 
 rank = int(os.environ['RANK'])
 world_size = int(os.environ['WORLD_SIZE'])
@@ -74,19 +75,6 @@ def main():
 
         input_ids = stage_model.tokenizer([prompt]).input_ids
         input_ids = torch.as_tensor(input_ids).cuda()
-    
-    # # collaborative generation
-    # def run(log=False, profiler=None):
-    #     outputs = stage_model.stage_generate(
-    #         input_ids=input_ids if rank == 0 else None,
-    #         temperature=run_config.temperature,
-    #         max_new_tokens=run_config.max_new_tokens,
-    #         log=log if rank == 0 else False,
-    #         pipeline_type=run_config.pipeline_type,
-    #         profiler=profiler,
-    #     )
-    #     if rank == 0:
-    #         return outputs
 
     # [warm-up]
     if run_config.warmup:
@@ -104,12 +92,12 @@ def main():
     cnt = tqdm(range(run_config.test_repeat), desc="Test") if rank == 0 else range(run_config.test_repeat)
     for i in cnt:
         dist.barrier()
-        with prof.profile_context(f"Rank {rank}: {run_config.pipeline_type} pipeline", device=f"cuda:{device}"):
+        with prof.profile_context(f"Rank {rank}: {run_config.pipeline_type} pipeline", device=f"cuda:{device}") if run_config.prof else nullcontext():
             outputs = run(
                     stage_model, 
                     input_ids if rank == 0 else None, 
                     run_config.log if rank == 0 else False, 
-                    prof
+                    prof if run_config.prof else None
                 )
     
     # [print output]
@@ -143,6 +131,10 @@ def main():
     if hasattr(stage_model, "comm"):
         stage_model.comm.stop()
     dist.destroy_process_group()
+    
+    # reset traffic
+    if run_config.hardware == "jetson":
+        stage_model.comm.reset_traffic()
     
 def run_eval():
     assert torch.cuda.is_available()
@@ -269,13 +261,13 @@ def run_eval():
                     input_ids = stage_model.tokenizer([prompt]).input_ids
                     input_ids = torch.as_tensor(input_ids).cuda()
                 
-                with prof.profile_context(f"Rank {rank}: {run_config.pipeline_type} pipeline", device=f"cuda:{device}"):
+                with prof.profile_context(f"Rank {rank}: {run_config.pipeline_type} pipeline", device=f"cuda:{device}") if run_config.prof else nullcontext():
                     start_time = time.time()
                     outputs = run(
                         stage_model, 
                         input_ids if rank == 0 else None, 
                         run_config.log if rank == 0 else False, 
-                        prof
+                        prof if run_config.prof else None
                     )
                     torch.cuda.synchronize()
                     end_time = time.time()
@@ -333,6 +325,11 @@ def run_eval():
     if hasattr(stage_model, "comm"):
         stage_model.comm.stop()
     dist.destroy_process_group()
+    
+    # reset traffic
+    if run_config.hardware == "jetson":
+        stage_model.comm.reset_traffic()
+    
 
 def run(stage_model, input_ids, log=False, profiler=None):
     outputs = stage_model.stage_generate(

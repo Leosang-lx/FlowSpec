@@ -74,6 +74,8 @@ class StageEaModel(nn.Module):
             # print(f"init comm handler")
             self.comm.init_PG()
             self.comm.start_threads()
+            if run_config.hardware == "jetson":
+                self.comm.traffic_control(run_config.rate_mbps, run_config.delay_ms)
             dist.barrier()
         
     def get_tokenizer(self):

@@ -835,7 +835,7 @@ class Model(nn.Module):
             parents_list = torch.cat(parents_list, dim=0).view(-1)
             
             # top_scores_index, _ = self.topk_np(scores_list, total_tokens)
-            top_scores = torch.topk(scores_list, total_tokens, dim=-1)
+            top_scores = torch.topk(scores_list, total_tokens, dim=-1, sorted=True)
             top_scores_index = top_scores.indices.cpu()
             
             # if return_last:
@@ -852,12 +852,23 @@ class Model(nn.Module):
                 parents_list = parents_list.numpy()
             
             top_scores_index = top_scores_index.numpy()
-
-            # [update]
+            
             if sort_score:
+                # correct the top_scores_index
+                top_scores_values = top_scores.values.cpu()
+                top_scores_values = top_scores_values.numpy()
+                sort_keys = np.column_stack((-top_scores_values, top_scores_index))
+                lex_indices = np.lexsort((sort_keys[:, 1], sort_keys[:, 0]))
+                top_scores_index = top_scores_index[lex_indices]
+                
                 draft_tokens = ss_token_list[top_scores_index]
                 if return_last:
                     current_state = current_state + (top_scores_index,)
+            
+            # if sort_score:
+            #     draft_tokens = ss_token_list[top_scores_index]
+            #     if return_last:
+            #         current_state = current_state + (top_scores_index,)
 
             # resort the top_scores_index
             top_orig_indices = np.argsort(top_scores_index)  # 保留原始顺序

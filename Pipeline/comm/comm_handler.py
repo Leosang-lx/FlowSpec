@@ -7,6 +7,7 @@ from queue import Queue, Empty
 from datetime import timedelta
 import traceback
 from config.run_config import config as run_config
+import subprocess
 
 
 class CommHandler:
@@ -393,7 +394,67 @@ class CommHandler:
         for future in self._threads:
             future.cancel()
         self.executor.shutdown(wait=True)
+        
+    # def set_bandwidth(self, dst_ip: str, rate_mbps: float, delay_ms: float = 0.0) -> bool:
+    #     base_cmd = ['echo', 'nvidia'] + ['|', 'sudo', '-S', 'tc']
+    #     interface = 'eth0'
+    #     check_cmd = base_cmd + ["qdisc", "show", "dev", interface]
+    #     check_result = subprocess.run(check_cmd, capture_output=True, text=True, check=False)
+        
+    #     if "qdisc htb 1:" not in check_result.stdout:
+    #         cmd1 = base_cmd + ["qdisc", "add", "dev", interface, "root", "handle", "1:", "htb", "default", "10"]
+    #         subprocess.run(cmd1, check=True)
+
+    #     ip_parts = dst_ip.split('.')
+    #     class_id = int(int(ip_parts[-1]) / 2)
+        
+    #     burst = rate_mbps * 0.3 
+        
+    #     cmd3 = base_cmd + ["class", "add", "dev", interface, "parent", "1:", "classid", f"1:{class_id}", "htb", "rate", f"{rate_mbps}mbit", "burst", f"{burst}mbit"]
+    #     subprocess.run(cmd3, check=True)
+        
+    #     cmd4 = base_cmd + ["filter", "add", "dev", interface, "protocol", "ip", "parent", "1:0", "prio", "1", "u32", "match", "ip", "dst", dst_ip, "flowid", f"1:{class_id}"]
+    #     subprocess.run(cmd4, check=True)
+        
+    #     # if delay_ms > 0:
+    #     #     cmd5 = self.base_cmd + ["qdisc", "add", "dev", self.interface, "parent", f"1:{class_id}", "netem", "delay", f"{delay_ms}ms"]
+    #     #     subprocess.run(cmd5, check=True)
+    #     #     logger.info(f"Successfully set delay for {dst_ip} to {delay_ms} ms")
+    #     print(f"Successfully set bandwidth for {dst_ip} to {rate_mbps} Mbps")
+    #     return True
     
+    def run_command_with_sudo(self, command: str, password: str):
+        try:
+            subprocess.run(f'echo {password} | sudo -S {command}', shell=True, check=True)
+            print(f"Command '{command}' executed successfully.")
+        except subprocess.CalledProcessError as e:
+            print(f"Error occurred: {e}")
+        
+    def set_bandwidth(self, interface: str, rate_mbps: float, password: str) -> bool:
+        try:
+            self.run_command_with_sudo(f'tc qdisc del dev {interface} root', password)
+            
+            self.run_command_with_sudo(f'tc qdisc add dev {interface} root handle 1: htb default 10', password)
+            
+            self.run_command_with_sudo(f'tc class add dev {interface} parent 1: classid 1:10 htb rate {rate_mbps}mbit', password)
+            
+            print(f"Successfully set bandwidth limit to {rate_mbps} Mbps on {interface}")
+            return True
+        except subprocess.CalledProcessError as e:
+            print(f"Error occurred while setting bandwidth limit: {e}")
+            return False
+    
+    def traffic_control(self, rate_mbps: float, delay_ms: float = 0.0):
+        self.set_bandwidth(run_config.interface, rate_mbps, run_config.password)
+            
+    def reset_traffic(self) -> bool:
+        try:
+            self.run_command_with_sudo(f'tc qdisc del dev {run_config.interface} root', run_config.password)
+            print(f"Successfully reset traffic for {run_config.interface}")
+            return True
+        except subprocess.CalledProcessError as e:
+            print(f"Failed to reset traffic for {run_config.interface}: {e}")
+            return False
 
             
         

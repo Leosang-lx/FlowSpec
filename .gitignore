@@ -7,3 +7,5 @@ test.py
 Pipeline/test.py
 *.rec
 *.pdf
+Pipeline/pipeinfer/
+Pipeline/pipeinfer/pipeinfer.py
