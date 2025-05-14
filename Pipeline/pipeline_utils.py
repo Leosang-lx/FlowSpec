@@ -640,8 +640,6 @@ def fill_pipeline_stages(
     device = stage_model.stage_base_model.device
     comm = stage_model.comm
     # print(f'Stage {config.stage} fill_pipeline_stages')
-
-
     # dist.barrier()
 
     # draft stage 0

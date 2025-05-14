@@ -54,8 +54,8 @@ def main():
     #     assert stage_model.stage_base_model.lm_head.weight is stage_model.stage_base_model.model.embed_tokens.weight
     
     stage_model.eval()
-
-    assert run_config.pipeline_type in ["naive", "pruned", "continuous"]
+    # [update] pipedec
+    assert run_config.pipeline_type in ["naive", "pruned", "continuous", "pipedec"]
     assert run_config.mode in ["eval", "demo"]
 
     # [initialize]
@@ -321,13 +321,21 @@ def run_eval():
         throughput = sum(new_tokens_list) / sum(wall_time_list)
         avg_latency = sum(wall_time_list) / len(wall_time_list)
         print(f'throughput: {throughput}, avg_latency: {avg_latency}')
+        if run_config.eval_record:
+            with open(f'eval_record.txt', 'a') as f:
+                f.write(f'{run_config.pipeline_type} pipeline, question_path: {run_config.question_path}, question_begin: {run_config.question_begin}, question_end: {run_config.question_end}\n')
+                f.write(f'new_tokens_list: {new_tokens_list}\n')
+                f.write(f'wall_time_list: {wall_time_list}\n')
+                f.write(f'throughput: {throughput}\n')
+                f.write(f'avg_latency: {avg_latency}\n')
+                f.write(f'---------------------------------------------------------------------------------------------------------\n')
     # dist.barrier()
     if hasattr(stage_model, "comm"):
         stage_model.comm.stop()
     dist.destroy_process_group()
     
     # reset traffic
-    if run_config.hardware == "jetson":
+    if run_config.hardware == "jetson" and run_config.set_network:
         stage_model.comm.reset_traffic()
     
 

@@ -9,3 +9,4 @@ Pipeline/test.py
 *.pdf
 Pipeline/pipeinfer/
 Pipeline/pipeinfer/pipeinfer.py
+*.txt

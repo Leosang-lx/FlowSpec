@@ -791,14 +791,14 @@ class Model(nn.Module):
                     topk_cs_index, topk_cs_p = topk_cs.indices, topk_cs.values
                     scores = topk_cs_p
 
-                    # if log:
-                    #     print(f'topK_genrate depth {i}:')
-                    #     print(f'-- out_hidden: {out_hidden.shape}')
-                    #     print(f'-- input_ids: {input_ids.shape}')
-                    #     print(f'-- last_p: {last_p.shape}')
-                    #     print(f'-- topk_p: {topk_p.shape}')
-                    #     print(f'-- scores: {scores.shape}')
-                    #     print(f'-- ss_token: {sum([i.numel() for i in ss_token])}')
+                    if log:
+                        print(f'topK_genrate depth {i}:')
+                        print(f'-- out_hidden: {out_hidden.shape}')
+                        print(f'-- input_ids: {input_ids.shape}')
+                        print(f'-- last_p: {last_p.shape}')
+                        print(f'-- topk_p: {topk_p.shape}')
+                        print(f'-- scores: {scores.shape}')
+                        print(f'-- ss_token: {sum([i.numel() for i in ss_token])}')
 
                     out_ids = topk_cs_index // top_k
                     # print(f"out_ids.device={out_ids.device}")
@@ -822,7 +822,7 @@ class Model(nn.Module):
                 #     break  
             current_state = None
             if return_last:
-                last_depth = i + 1
+                last_depth = depth
                 current_state = (
                     last_depth, #total_tokens,
                     input_ids, input_hidden, past_key_values,
@@ -1110,6 +1110,7 @@ class Model(nn.Module):
                     expand_depth=1, expand_size=20,
                     return_last=False, log=False,
                     prof=None):
+        raise NotImplementedError("expand_last_new has some bugs, please use expand_last instead")
         """
         Expand the current tree with probs of all draft tokens
         """
@@ -1651,6 +1652,217 @@ class Model(nn.Module):
             # tree_position_ids = tree_position_ids.to(device)
         
         return draft_tokens, retrieve_indices, tree_mask, tree_position_ids, current_state
+
+    @torch.no_grad()    
+    def expand_pipedec(self, hidden_states, input_ids, head, logits_processor,
+                       top_k=None,
+                       log=False,
+                       first_expand=False,
+                       last_state=None, tree=None,
+                       accept_tokens=None, left_indices=None):
+        
+        if top_k is None:
+            top_k = self.top_k
+        elif top_k != self.top_k:
+            self.top_k = top_k
+            self.init_tree()
+        
+        if first_expand:
+            input_ids = input_ids.to(hidden_states.device)
+            sample_token = input_ids[:, -1]
+            scores_list = []
+            parents_list = []
+            input_hidden_list = []
+
+            input_ids = input_ids[:, 1:]
+            input_ids = input_ids.to(hidden_states.device)
+            len_posi = input_ids.shape[1]
+            self.reset()
+
+            if hasattr(self, "stable_kv") and self.stable_kv is not None:
+                kv_len = self.stable_kv[0][0].shape[2]
+                # print(f'kv_len in topk_genrate: {kv_len}')
+                out_hidden, past_key_values = self(hidden_states, input_ids=input_ids[:, kv_len:],
+                                                past_key_values=self.stable_kv, use_cache=True)
+            else:
+                out_hidden, past_key_values = self(hidden_states, input_ids=input_ids, use_cache=True)
+
+            self.stable_kv = past_key_values
+            last_hidden = out_hidden[:, -1]
+
+            input_hidden = last_hidden[None].repeat(1, top_k, 1)
+            # input_hidden_list.append(input_hidden)  # 下一次要用
+
+            last_headout = head(last_hidden)
+            last_p = self.logsoftmax(last_headout)
+            top = torch.topk(last_p.view(-1), top_k, dim=-1)
+            topk_index, topk_p = top.indices, top.values
+            scores = topk_p
+
+            # 不包含树的根节点
+            cu_scores_cum = topk_p
+            print(f'cu_scores: {cu_scores_cum.shape}')
+
+            draft_tokens = torch.cat((input_ids[:, :1], topk_index[None]), dim=-1)
+            # first expand仅有两层，第二层的全部看得到第一层的根节点
+            tree_mask = torch.eye(top_k, top_k, dtype=torch.bool)
+            tree_mask[:, 0] = True
+            tree_mask = tree_mask[None, None]
+            # 根节点为0，后面全为1
+            tree_position_ids = torch.ones(1+top_k, dtype=torch.long)
+            tree_position_ids[0] = 0
+
+            # retrieve_indices
+            retrieve_indices = torch.stack((torch.zeros(top_k, dtype=torch.long), torch.arange(1, top_k+1, dtype=torch.long)), dim=1)
+
+            accept_hidden = []
+            # current_state: 用于下次继续延申
+            current_state = (
+                input_hidden, len_posi + 1, cu_scores_cum, accept_hidden
+            )
+
+            return draft_tokens, retrieve_indices, tree_mask, tree_position_ids, current_state
+        
+        # [expand one layer]
+        input_hidden, init_len_posi, cu_scores_cum, accept_hidden = last_state
+        # input_hidden = torch.cat(input_hidden_list, dim=1)
+
+        # 可能已经剪过枝了（如果剪过则accept_tokens非None以及left_indices非None
+        draft_tokens, retrieve_indices, tree_mask, tree_position_ids = tree
+        cur_input_len = input_ids.size(-1)
+
+        # 当前树最后一层的节点在树中对应的indices
+        max_position_id = torch.max(tree_position_ids)
+        is_last_layer = tree_position_ids == max_position_id
+        last_layer_indices = torch.nonzero(is_last_layer).squeeze()
+        print(f'last_layer_indices: {last_layer_indices}')
+        last_layer_size = is_last_layer.sum().item()
+
+        # input_ids: 初始draft token tree对应的left_indices（不包含初始根节点）
+        if accept_tokens is None:
+            input_ids = draft_tokens[:, 1:]
+            position_ids = tree_position_ids[1:]
+            tree_mask_ea = tree_mask[:, :, 1:, 1:]
+        else:
+            input_ids = torch.cat((accept_tokens[:, 1:], draft_tokens), dim=-1)
+            # pruning the input_hidden and cu_scores_cum
+            left_indices_in_state = left_indices[1:] - 1
+            print(f'left_indices_in_state: {left_indices_in_state}')
+            input_hidden = input_hidden[:, left_indices_in_state]
+            print(f'cu_scores_cum: {cu_scores_cum.shape}')
+            cu_scores_cum = cu_scores_cum[left_indices_in_state]
+            print(f'input_hidden: {input_hidden.shape}, cu_scores_cum: {cu_scores_cum.shape}')
+            print(f'left_indices: {left_indices.shape}')
+
+            print(f'init_len_posi: {init_len_posi}, cur_input_len: {cur_input_len}')
+            position_ids = torch.arange(init_len_posi, cur_input_len, dtype=torch.long)
+            position_ids = torch.cat((position_ids, tree_position_ids), dim=0)
+            accept_len = accept_tokens.size(-1) - 1
+            tree_size = draft_tokens.size(-1)
+            tree_mask_ea = torch.zeros(accept_len + tree_size, accept_len + tree_size, dtype=torch.float32)
+            for i in range(accept_len):
+                tree_mask_ea[i:, i] = 1
+            tree_mask_ea[accept_len:, accept_len:] = tree_mask
+            tree_mask_ea = tree_mask_ea[None, None]
+        
+        self.tree_mask = tree_mask_ea
+
+
+
+        print(f'Stage 0: input_hidden {input_hidden.shape}, input_ids {input_ids.shape}, position_ids {position_ids.shape}, tree_mask {tree_mask_ea.shape}')
+        output_hidden, _ = self(input_hidden, input_ids=input_ids,
+                                            past_key_values=self.stable_kv,
+                                            position_ids=position_ids, use_cache=True)
+        print(f'Stage 1: output_hidden {output_hidden.shape}')
+
+        # 取得当前树最后一层的节点的next-token distribution
+        last_layer_output_hidden = output_hidden[:, -last_layer_size:]
+        last_headout = head(last_layer_output_hidden[0])
+        last_layer_p = self.logsoftmax(last_headout)
+
+        print(f'Stage 0: last_layer_size {last_layer_size}, last_layer_p {last_layer_p.shape}')
+        
+        last_layer_cu_scores = cu_scores_cum[-last_layer_size:]
+        cu_scores = last_layer_p + last_layer_cu_scores[:, None]
+        print(f'cu_scores: {cu_scores.shape}')
+        topk_cs = torch.topk(cu_scores.view(-1), top_k, dim=-1)
+        topk_cs_index, topk_cs_p = topk_cs.indices, topk_cs.values
+
+        out_ids = topk_cs_index // last_layer_size  # 如何映射回token_ids？
+        assert out_ids.max() < 32000
+        topk_cs_index = topk_cs_index.cpu()
+        parents = topk_cs_index // 32000  # 相对于当前最后一层的tokens
+
+        input_hidden_appended = last_layer_output_hidden[:, parents]
+
+        scores = topk_cs_p
+        print(f'scores: {scores.shape}')
+        # 拿到这些parent在当前draft token tree中的序号
+        parent_indices = last_layer_indices[parents]
+        idx_ri_path = []  # parent_idx -> ri_path
+        for parent_idx in last_layer_indices:
+            ri_path = torch.nonzero(retrieve_indices[:, -1] == parent_idx).item()
+            idx_ri_path.append(ri_path)
+
+        print(f'idx_ri_path: {idx_ri_path}')
+
+        # 更新input_hidden和cu_scores_cum
+        input_hidden = torch.cat((input_hidden, input_hidden_appended), dim=1)
+        cu_scores_cum = torch.cat((cu_scores_cum, topk_cs_p), dim=-1)
+
+        last_tree_size = draft_tokens.size(-1)
+
+        # 更新draft_tokens
+        draft_tokens = torch.cat((draft_tokens, out_ids[None]), dim=-1)
+
+        # 选出retrieve_indices中到底的路径并基于选中的节点进行延申
+        # path_depths = retrieve_indices.sum(dim=1)
+        # expand_choice = path_depths == max(path_depths)
+
+        expanded_paths = torch.zeros(retrieve_indices.size(0), dtype=torch.bool)
+        retrieve_indices = F.pad(retrieve_indices, (0, 1), value=-1)
+        # kept_paths = retrieve_indices[~expand_choice]
+        expand_paths = []
+        for i in range(top_k):
+            parent_ri_path = idx_ri_path[parents[i]]
+            expanded_paths[parent_ri_path] = True
+            new_path = retrieve_indices[parent_ri_path].clone()
+            new_path[-1] = i + last_tree_size
+            expand_paths.append(new_path)
+        kept_paths = retrieve_indices[~expanded_paths]
+        expand_paths = torch.stack(expand_paths, dim=0)
+
+        print(f'kept_paths: {kept_paths.shape}, expand_paths: {expand_paths.shape}')
+        retrieve_indices = torch.cat((kept_paths, expand_paths), dim=0)
+
+        # 更新accept_hidden
+        if left_indices is not None:
+            pass
+            
+
+        # 更新tree_mask
+        tree_mask_new = torch.eye(last_tree_size + top_k, last_tree_size + top_k, dtype=torch.float32)
+        tree_mask_new[:, 0] = True
+        for i in range(top_k):
+            parent_index = parent_indices[i]
+            tree_mask_new[last_tree_size+i] += tree_mask_new[parent_index]
+        tree_mask_new = tree_mask_new[None, None]
+
+        # 更新tree_position_ids
+        max_pos_id = torch.max(tree_position_ids)
+        appended_pos_ids = torch.full((top_k,), max_pos_id + 1, dtype=torch.long)
+        tree_position_ids = torch.cat((tree_position_ids, appended_pos_ids), dim=0)
+
+        # 更新input_hidden和cu_scores_cum
+        last_state = (
+            input_hidden,
+            init_len_posi,
+            cu_scores_cum,
+            accept_hidden
+        )
+
+        return draft_tokens, retrieve_indices, tree_mask_new, tree_position_ids, last_state
+
 
 
     @torch.no_grad()

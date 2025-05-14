@@ -7,6 +7,7 @@ class Config:
     # network config
     hardware: str = "server" # "jetson" or "server"
     if hardware == "jetson":
+        set_network: bool = True
         password: str = "nvidia"
         interface: str = "eth0"
         rate_mbps: float = 150
@@ -14,13 +15,20 @@ class Config:
 
     # run config
     mode = "demo" # "eval" or "demo"
-    pipeline_type: str = "continuous"
-    warmup = True
-    warmup_repeat = 10
-    test_repeat = 10 # this refer to num of choices in the eval set
+    pipeline_type: str = "pipedec"
     
+    if mode == "eval":  
+        warmup = True
+        warmup_repeat = 5
+        test_repeat = 1 # this refer to num of choices in the eval set
+    else:
+        warmup = True
+        warmup_repeat = 10
+        test_repeat = 10
+    
+    eval_record: bool = True
     log: bool = False
-    prof: bool = False
+    prof: bool = True
     save_timestamps: bool = False
     temperature: float = 0.0
     max_new_tokens: int = 512
@@ -39,8 +47,8 @@ class Config:
     if mode == "eval":
         dataset_name: str = "mt_bench"
         question_path: str = "./data/" + dataset_name + "/question.jsonl"
-        question_begin: int = 0
-        question_end: int = 2
+        question_begin: int = 30
+        question_end: int = 50
         
     # demo config
     if mode == "demo":
@@ -54,7 +62,7 @@ class Config:
         init_depth: int = 6
     
     if pipeline_type == "pruned":
-        draft_gen_sort_score: bool = False
+        draft_gen_sort_score: bool = True
         num_stage: int = 5 # 5 or 4
         init_total_token: int = 80
         init_topk: int = 10
@@ -80,7 +88,12 @@ class Config:
         none_expand: bool = True
         if none_expand:
             none_expand_size: int = 48
-            none_expand_depth: int = 0
+            none_expand_depth: int = 1
+
+    if pipeline_type == "pipedec":
+        init_total_token: int = 64
+        init_topk: int = 16
+        init_depth: int = 1
         
     # device config
     device: str = "cuda"
