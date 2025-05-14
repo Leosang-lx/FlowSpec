@@ -307,15 +307,12 @@ class StageEaModel(nn.Module):
                 subseq_ri_cum_depth = torch.min(cur_depth, path_depth)
                 ri_cum_depths.append(subseq_ri_cum_depth)
             subseq_ri_cum_depths = torch.stack(ri_cum_depths, dim=0)
-            
-            print(f"Stage {config.stage}: done draft init forward")
             return lens_split, draft_tokens, retrieve_indices, tree_mask, tree_position_ids, subseq_ri_cum_depths, last_ea_state, last_ea_tree
         
         # following stages 1-4
         for i in range(config.total_stage - config.stage):
             with prof.time_context(f"Stage {config.stage}: recv from last stage", cpu=True) if prof is not None else nullcontext():
                 appended_input, subseq_pos_ids, tree_mask = comm.recv_appended(device)
-            print(f"Stage {config.stage}: recv from last stage")
             # set the tree mask for the current stage
             self.stage_base_model.model.tree_mask = tree_mask
 
@@ -338,7 +335,6 @@ class StageEaModel(nn.Module):
             else:
                 print(f'Stage {config.stage}: {type(sub_hidden_state)}')
                 comm.send_appended(sub_hidden_state, subseq_pos_ids, tree_mask)
-        print(f"Stage {config.stage}: done draft init forward")
     
     @torch.no_grad()
     def stage_generate(
