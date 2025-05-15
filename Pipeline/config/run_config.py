@@ -4,10 +4,12 @@ from typing import List
 @dataclass
 class Config:
     
+    model_name: str = "vicuna"
+    
     # network config
     hardware: str = "server" # "jetson" or "server"
     if hardware == "jetson":
-        set_network: bool = True
+        set_network: bool = False
         password: str = "nvidia"
         interface: str = "eth0"
         rate_mbps: float = 150
@@ -15,7 +17,7 @@ class Config:
 
     # run config
     mode = "demo" # "eval" or "demo"
-    pipeline_type: str = "pipedec"
+    pipeline_type: str = "pruned"
     
     if mode == "eval":  
         warmup = True
@@ -28,7 +30,7 @@ class Config:
     
     eval_record: bool = True
     log: bool = False
-    prof: bool = True
+    prof: bool = False
     save_timestamps: bool = False
     temperature: float = 0.0
     max_new_tokens: int = 512
@@ -36,12 +38,20 @@ class Config:
     timeout: int = 15
     
     # model config
-    if hardware == "server":
-        base_model_dir: str = f'/home/liux/big_file/pipeline_model/meta-llama/Llama-2-7b-chat-hf/new_stage_model_series_0+8+8+8+8_fp16'
-        EAGLE_model_path: str = "/home/liux/LLM/models_hf/yuhuili/EAGLE-llama2-chat-7B"
-    else:
-        base_model_dir: str = f"/home/nvidia/LLM/pipeline_model/meta-llama/Llama-2-7b-chat-hf/new_stage_model_series_0+8+8+8+8_fp16"
-        EAGLE_model_path: str = f"/home/nvidia/LLM/models_hf/yuhuili/EAGLE-llama2-chat-7B"
+    if model_name == "llama2":
+        if hardware == "server":
+            base_model_dir: str = f'/home/liux/big_file/pipeline_model/meta-llama/Llama-2-7b-chat-hf/new_stage_model_series_0+8+8+8+8_fp16'
+            EAGLE_model_path: str = "/home/liux/LLM/models_hf/yuhuili/EAGLE-llama2-chat-7B"
+        else:
+            base_model_dir: str = f"/home/nvidia/LLM/pipeline_model/meta-llama/Llama-2-7b-chat-hf/new_stage_model_series_0+8+8+8+8_fp16"
+            EAGLE_model_path: str = f"/home/nvidia/LLM/models_hf/yuhuili/EAGLE-llama2-chat-7B"
+    elif model_name == "vicuna":
+        if hardware == "server":
+            base_model_dir: str = f'/home/liux/big_file/pipeline_model/vicuna/Vicuna-7B-v1.3/new_stage_model_series_0+8+8+8+8_fp16'
+            EAGLE_model_path: str = "/home/liux/big_file/vicuna/EAGLE-Vicuna-7B-v1.3"
+        else:
+            base_model_dir: str = f"/home/nvidia/LLM/pipeline_model/vicuna/Vicuna-7B-v1.3/new_stage_model_series_0+8+8+8+8_fp16"
+            EAGLE_model_path: str = f"/home/nvidia/LLM/vicuna/EAGLE-Vicuna-7B-v1.3"
     
     # eval config
     if mode == "eval":
@@ -91,9 +101,9 @@ class Config:
             none_expand_depth: int = 1
 
     if pipeline_type == "pipedec":
-        init_total_token: int = 64
+        init_total_token: int = 64 # this parameter is meaningless in pipedec
         init_topk: int = 16
-        init_depth: int = 1
+        init_depth: int = 1 # meaningless in pipedec as well
         
     # device config
     device: str = "cuda"

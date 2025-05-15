@@ -61,8 +61,10 @@ def main():
     # [initialize]
     if rank == 0:
         your_message=run_config.your_message
-        # conv = get_conversation_template("vicuna")
-        conv = get_conversation_template("llama-2-chat")
+        if run_config.model_name == "vicuna":
+            conv = get_conversation_template("vicuna")
+        elif run_config.model_name == "llama2":
+            conv = get_conversation_template("llama-2-chat")
 
         sys_p = "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."
         conv.system_message = sys_p
@@ -163,7 +165,7 @@ def run_eval():
     
     stage_model.eval()
 
-    assert run_config.pipeline_type in ["naive", "pruned", "continuous"]
+    assert run_config.pipeline_type in ["naive", "pruned", "continuous", "pipedec"]
     assert run_config.mode in ["eval", "demo"]
     
     questions = load_questions(run_config.question_path, run_config.question_begin, run_config.question_end)
