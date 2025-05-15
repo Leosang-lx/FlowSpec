@@ -10,3 +10,5 @@ Pipeline/test.py
 Pipeline/pipeinfer/
 Pipeline/pipeinfer/pipeinfer.py
 *.txt
+Pipeline/tp
+Pipeline/run_tp.sh

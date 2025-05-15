@@ -305,7 +305,7 @@ class StageEaModel(nn.Module):
                     appended_input = draft_tokens[:, -run_config.init_topk:]
                     appended_tree_pos_ids = tree_position_ids[-run_config.init_topk:]
                     appended_tree_mask = tree_mask[:, :, -run_config.init_topk:, :]
-                
+                # print(f"draft_tokens: {self.tokenizer.decode(draft_tokens[0])}")
                 # print(f'Stage {config.stage} {i}th: appended_tree_mask: {appended_tree_mask.shape}, {appended_tree_mask.dtype}, {appended_tree_mask.element_size()}')
                 # if log:
                 #     print(f"Stage {config.stage}: draft init forward")
@@ -1471,6 +1471,8 @@ class StageEaModel(nn.Module):
                         left_indices=left_indices
                     )
                     last_ea_tree = (draft_tokens, retrieve_indices, tree_mask, tree_position_ids)
+                    # with open('draft_tokens.txt', 'a') as f:
+                    #     f.write(f'{self.tokenizer.decode(draft_tokens[0])}\n')
 
                     # n_leaves = retrieve_indices.size(0)
                     # subseq_ri_cum_depths = []

@@ -1688,9 +1688,12 @@ class Model(nn.Module):
                 out_hidden, past_key_values = self(hidden_states, input_ids=input_ids, use_cache=True)
 
             self.stable_kv = past_key_values
+            # print(f'out_hidden: {out_hidden.shape}')
             last_hidden = out_hidden[:, -1]
+            # print(f'last_hidden: {last_hidden.shape}')
 
             input_hidden = last_hidden[None].repeat(1, top_k, 1)
+            # print(f'input_hidden: {input_hidden.shape}')
             # input_hidden_list.append(input_hidden)  # 下一次要用
 
             last_headout = head(last_hidden)
@@ -1770,7 +1773,8 @@ class Model(nn.Module):
             # if accept_hidden is not None:
                 # print(f'accept_hidden: {accept_hidden.shape}')
 
-            if accept_tokens.size(-1) == 1:  # 直接把整棵树输进去，但是position要减1
+            if accept_tokens.size(-1) == 1: # 直接把整棵树输进去，但是position要减1
+                # print(f'accept_tokens: {accept_tokens.shape}')
                 input_hidden_ea = input_hidden
                 input_ids = draft_tokens
                 position_ids = tree_pos_ids_ea
@@ -1810,19 +1814,26 @@ class Model(nn.Module):
 
         # print(f'Stage 0: last_layer_size {last_layer_size}, last_layer_p {last_layer_p.shape}')
         
+        top = torch.topk(last_layer_p, top_k, dim=-1)
+        topk_index, topk_p = top.indices, top.values
+        
         last_layer_cu_scores = cu_scores_cum[-last_layer_size:]
-        cu_scores = last_layer_p + last_layer_cu_scores[:, None]
+        cu_scores = topk_p + last_layer_cu_scores[:, None]
         # print(f'cu_scores: {cu_scores.shape}')
         topk_cs = torch.topk(cu_scores.view(-1), top_k, dim=-1)
         topk_cs_index, topk_cs_p = topk_cs.indices, topk_cs.values
 
-        out_ids = topk_cs_index // last_layer_size  # 如何映射回token_ids？
+        # out_ids = topk_cs_index // last_layer_size  # 如何映射回token_ids？
+        out_ids = topk_cs_index // top_k
+        
         assert out_ids.max() < 32000
         topk_cs_index = topk_cs_index.cpu()
-        parents = topk_cs_index // 32000  # 相对于当前最后一层的tokens
+        # parents = topk_cs_index // 32000  # 相对于当前最后一层的tokens
+        parents = topk_cs_index // top_k
         # print(f'parents: {parents}')
 
-        input_hidden_appended = last_layer_output_hidden[:, parents]
+        # input_hidden_appended = last_layer_output_hidden[:, parents]
+        input_hidden_appended = last_layer_output_hidden[:, out_ids]
         # print(f'input_hidden_appended: {input_hidden_appended.shape}')
 
         scores = topk_cs_p
@@ -1845,7 +1856,9 @@ class Model(nn.Module):
         last_tree_size = draft_tokens.size(-1)
 
         # 更新draft_tokens
-        draft_tokens = torch.cat((draft_tokens, out_ids[None]), dim=-1)
+        # print(f'out tokens: {self.tokenizer.decode(out_ids)}')
+        # draft_tokens = torch.cat((draft_tokens, out_ids[None]), dim=-1)
+        draft_tokens = torch.cat((draft_tokens, topk_index.view(-1)[topk_cs_index][None]), dim=-1)
 
         # 选出retrieve_indices中到底的路径并基于选中的节点进行延申
         # path_depths = retrieve_indices.sum(dim=1)
