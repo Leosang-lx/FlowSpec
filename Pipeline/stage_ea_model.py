@@ -262,11 +262,16 @@ class StageEaModel(nn.Module):
             input_ids_ea = torch.cat((input_ids, token), dim=1)
 
             lens_split = []
-            draft_tokens = input_ids[:, -1][None]
+            # draft_tokens = input_ids[:, -1][None]
+            # print(f'draft_tokens: {self.tokenizer.decode(draft_tokens[0])}')
+            draft_tokens = token
+            
             tree_position_ids = torch.zeros(1, dtype=torch.long) + input_ids.size(-1)
             tree_mask = torch.ones(1, 1, 1, 1, dtype=torch.float32)
             retrieve_indices = torch.zeros(1, 1, dtype=torch.long)
             for i in range(config.total_stage):
+                # with open('draft_tokens.txt', 'a') as f:
+                #     f.write(f'{self.tokenizer.decode(draft_tokens[0])}\n')
                 if i == 0:
                     appended_input = draft_tokens
                     appended_tree_pos_ids = tree_position_ids
@@ -301,18 +306,18 @@ class StageEaModel(nn.Module):
                     appended_tree_pos_ids = tree_position_ids[-run_config.init_topk:]
                     appended_tree_mask = tree_mask[:, :, -run_config.init_topk:, :]
                 
-                print(f'Stage {config.stage} {i}th: appended_tree_mask: {appended_tree_mask.shape}, {appended_tree_mask.dtype}, {appended_tree_mask.element_size()}')
+                # print(f'Stage {config.stage} {i}th: appended_tree_mask: {appended_tree_mask.shape}, {appended_tree_mask.dtype}, {appended_tree_mask.element_size()}')
                 # if log:
                 #     print(f"Stage {config.stage}: draft init forward")
                 #     print(f'draft_tokens: {draft_tokens}')
                 last_ea_tree = (draft_tokens, retrieve_indices, tree_mask, tree_position_ids)
-                print(f'Stage {config.stage} {i}th: send to next stage...')
+                # print(f'Stage {config.stage} {i}th: send to next stage...')
                 comm.send_appended(appended_input, appended_tree_pos_ids, appended_tree_mask.contiguous())
-                print(f'Stage {config.stage} {i}th: send done!!!')
+                # print(f'Stage {config.stage} {i}th: send done!!!')
                 lens_split.append(draft_tokens.size(-1) - sum(lens_split))
 
             lens_split = torch.tensor(lens_split, dtype=torch.long)
-            print(f'Stage {config.stage}: lens_split: {lens_split}')
+            # print(f'Stage {config.stage}: lens_split: {lens_split}')
             ri_cum_depths = []
             path_depth = (retrieve_indices != -1).sum(dim=-1)
             for i in range(config.total_stage):
@@ -324,17 +329,17 @@ class StageEaModel(nn.Module):
         
         # following stages 1-4
         for i in range(config.total_stage - config.stage):
-            print(f'Stage {config.stage} {i}th: recv from last stage...')
+            # print(f'Stage {config.stage} {i}th: recv from last stage...')
             with prof.time_context(f"Stage {config.stage} {i}th: recv from last stage", cpu=True) if prof is not None else nullcontext():
                 appended_input, subseq_pos_ids, tree_mask = comm.recv_appended(device)
-            print(f'Stage {config.stage} {i}th: recv done!!!')
+            # print(f'Stage {config.stage} {i}th: recv done!!!')
             # set the tree mask for the current stage
             self.stage_base_model.model.tree_mask = tree_mask
 
-            print(f'Stage {config.stage} {i}th: draft init forward...')
+            # print(f'Stage {config.stage} {i}th: draft init forward...')
             with prof.time_context(f"Stage {config.stage}: draft init forward", cpu=False) if prof is not None else nullcontext():
                 if config.is_first_stage:
-                    print(f'Stage {config.stage} {i}th: appended_input: {appended_input.shape}, subseq_pos_ids: {subseq_pos_ids}')
+                    # print(f'Stage {config.stage} {i}th: appended_input: {appended_input.shape}, subseq_pos_ids: {subseq_pos_ids}')
                     outputs, sub_hidden_state = self(
                         input_ids=appended_input,
                         past_key_values=stage_past_key_values,
@@ -1244,7 +1249,7 @@ class StageEaModel(nn.Module):
             global_accept_len = current_length_data[0].item()
 
         outputs = self.draft_init_pipedec(*draft_init_params)
-        print(f'Stage {config.stage}: draft init done!!!')
+        # print(f'Stage {config.stage}: draft init done!!!')
 
 
         if config.is_draft_stage:
@@ -1283,19 +1288,21 @@ class StageEaModel(nn.Module):
             skip_pruning = False
             if config.is_draft_stage:  # last stage正常pruning
                 if hs_len > 0:
+                    # print(f'draft_tokens: {self.tokenizer.decode(draft_tokens[0])}')
                     with prof.time_context(f"Stage {config.stage}: verification and pruning", cpu=False) if prof is not None else nullcontext():
                     # with prof.time_context(f"Stage {config.stage}: lm_head", cpu=False) if prof is not None else nullcontext():
                         subseq_logits = self.stage_base_model.lm_head(sub_hidden_state)
                     
                     # with prof.time_context(f"Stage {config.stage}: get subseq", cpu=False) if prof is not None else nullcontext():
                         sub_draft_tokens = draft_tokens[:, :lens_split[0]]
+                        # print(f'sub_draft_tokens: {sub_draft_tokens.shape}')
                         sub_draft_tokens = F.pad(sub_draft_tokens, (0, 1), value=-1)
-                        print(f'subseq_ri_cum_depth: {subseq_ri_cum_depths[0]}')
+                        # print(f'subseq_ri_cum_depth: {subseq_ri_cum_depths[0]}')
                         sub_retrieve_indices = get_subtree_retrieve_indices(retrieve_indices, subseq_ri_cum_depths[0])
-                        print(f'sub_retrieve_indices: {sub_retrieve_indices.shape}')
+                        # print(f'sub_retrieve_indices: {sub_retrieve_indices.shape}')
                         # subseq_ri_cum_depths = subseq_ri_cum_depths[1:]  # remove the first subseq
                         subtree_logits = subseq_logits[0, sub_retrieve_indices]
-                        print(f'subtree_logits: {subtree_logits.shape}')
+                        # print(f'subtree_logits: {subtree_logits.shape}')
                         
                         candidates = sub_draft_tokens[0, sub_retrieve_indices]
                     
@@ -1303,18 +1310,26 @@ class StageEaModel(nn.Module):
                         best_candidate, accept_length, sample_p = evaluate_posterior(
                             subtree_logits, candidates, logits_processor
                         )
-                    
+                        
+                        # best_candidate = torch.tensor(0, dtype=torch.long, device=candidates.device)
                         accept_length += 1
+                        # sample_p = subseq_logits[0, 0]
+                        
                         token = gen_token(prob=sample_p, logits_processor=logits_processor)  # device=cuda
+                        
+                        # print(f'sample Token is ({self.tokenizer.decode(token.item())})')
 
                         cur_draft_depth = subseq_ri_cum_depths[0, best_candidate]
                         if log:
                             print(f'- {i}th turn, accept_len/local_depth: {accept_length}/{cur_draft_depth}')
-                            
-                        sub_hidden_state = sub_hidden_state[:, retrieve_indices[best_candidate, :accept_length]]
+
+                        # sub_hidden_state = sub_hidden_state[:, retrieve_indices[best_candidate, :accept_length]]
+                        # assert sub_draft_tokens.size(1) == 1, f'sub_draft_tokens.shape: {sub_draft_tokens.shape}'
+                        assert sub_draft_tokens[0, 0] == sub_draft_tokens[0, retrieve_indices[best_candidate, 0]], f'sub_draft_tokens[0, 0] != sub_draft_tokens[0, retrieve_indices[best_candidate, 0]]: {sub_draft_tokens[0, 0]} and {sub_draft_tokens[0, retrieve_indices[best_candidate, 0]]}'
                     # with prof.time_context(f"Stage {config.stage}: last-stage pruning", cpu=False) if prof is not None else nullcontext():
                         left_indices, truncate = cal_pruning_info(draft_tokens, retrieve_indices, best_candidate, accept_length, token, subseq_ri_cum_depths)
-                        
+                        # print(f'left_indices.shape: {left_indices.shape}')
+                        # print(f'left_indices: {self.tokenizer.decode(draft_tokens[left_indices[0]])}, truncate: {truncate}')
                     if truncate:  # start new speculation round
                         new_sampled_token = token.item()
                         if log:
@@ -1324,7 +1339,7 @@ class StageEaModel(nn.Module):
                         
                     pruning_info = torch.cat((torch.tensor((new_sampled_token, accept_length), dtype=torch.long), left_indices), dim=0).contiguous()
                     
-                    print(f'Stage {config.stage} {i}th: send pruning_info: {pruning_info}')
+                    # print(f'Stage {config.stage} {i}th: send pruning_info: {pruning_info}')
                     if not truncate:  # not truncate: async pruning info broadcast
                         # broadcast_pruning_info_task = comm.executor.submit(
                         #     comm.broadcast_send,
@@ -1336,7 +1351,7 @@ class StageEaModel(nn.Module):
                         lens_split = tree_mask = tree_position_ids = None
                 
                 else:
-                    print(f'Stage {config.stage} {i}th: send pruning_info with hs_len = 0')
+                    # print(f'Stage {config.stage} {i}th: send pruning_info with hs_len = 0')
                     skip_pruning = True
                     left_indices = None
                     global skip_count 
@@ -1347,10 +1362,10 @@ class StageEaModel(nn.Module):
                     # )  
                     comm.broadcast_send(torch.tensor([[-1]], dtype=torch.long))
             else:
-                print(f'Stage {config.stage} {i}th: wait broadcast_pruning...')
+                # print(f'Stage {config.stage} {i}th: wait broadcast_pruning...')
                 with prof.time_context(f"Stage {config.stage}: wait broadcast_pruning", cpu=True) if prof is not None else nullcontext():
                     pruning_info = comm.broadcast_recv(0)
-                print(f'Stage {config.stage} {i}th: wait broadcast_pruning done!!!')
+                # print(f'Stage {config.stage} {i}th: wait broadcast_pruning done!!!')
                 
                 if (pruning_info.size(-1) == 1 and pruning_info.item() == -1):
                     skip_pruning = True
@@ -1364,7 +1379,7 @@ class StageEaModel(nn.Module):
             ####################################
             # pruning
             ####################################
-            print(f'Stage {config.stage} {i}th: pruning...')
+            # print(f'Stage {config.stage} {i}th: pruning...')
             if not skip_pruning:
                 if config.is_draft_stage:
                     accept_length_this_round += accept_length
@@ -1375,9 +1390,10 @@ class StageEaModel(nn.Module):
                                     left_indices, accept_length, draft_tokens, tree_mask, tree_position_ids, retrieve_indices, subseq_ri_cum_depths, lens_split
                             )
                             # last_ea_tree = (draft_tokens, retrieve_indices, tree_mask, tree_position_ids)
-                            print(f'Stage {config.stage} {i}th: draft_stage_pruning done!!!: tree_position_ids: {tree_position_ids.shape}, tree_mask: {tree_mask.shape}, retrieve_indices: {retrieve_indices.shape}, accepted_tokens: {accepted_tokens.shape}')
+                            # print(f'Stage {config.stage} {i}th: draft_stage_pruning done!!!: tree_position_ids: {tree_position_ids.shape}, tree_mask: {tree_mask.shape}, retrieve_indices: {retrieve_indices.shape}, accepted_tokens: {accepted_tokens.shape}')
                         accepted_tokens = accepted_tokens.to(input_ids.device)
                         input_ids = torch.cat((input_ids, accepted_tokens), dim=-1)
+                        # print(f'Stage {config.stage} {i}th: input_ids: {self.tokenizer.decode(input_ids[0])}')
                         if accept_tokens is None:
                             accept_tokens = accepted_tokens
                         else:
@@ -1407,7 +1423,7 @@ class StageEaModel(nn.Module):
                         token = torch.tensor([[new_sampled_token]], dtype=torch.long, device=input_ids.device)
                         accept_tokens = draft_tokens[:, left_indices].to(input_ids.device)
                         input_ids = torch.cat((input_ids, accept_tokens), dim=-1)
-                    print(f'Stage {config.stage} {i}th: truncate, break!!!')
+                    # print(f'Stage {config.stage} {i}th: truncate, break!!!')
                     break
             
             else:
@@ -1422,8 +1438,8 @@ class StageEaModel(nn.Module):
             hs_len = sub_hidden_state.size(1) if hs_len > 0 else 0
             
             if config.is_draft_stage:
-                print(f'Stage {config.stage} {i}th: subseq_ri_cum_depths after pruning: {subseq_ri_cum_depths}')
-                print(f'lens_split: {lens_split}')
+                # print(f'Stage {config.stage} {i}th: subseq_ri_cum_depths after pruning: {subseq_ri_cum_depths}')
+                # print(f'lens_split: {lens_split}')
 
                 
                 cur_draft_depth = (retrieve_indices != -1).sum(dim=1).max()
@@ -1477,11 +1493,11 @@ class StageEaModel(nn.Module):
 
                     # subseq_ri_cum_depths = torch.from_numpy(subseq_ri_cum_depths)
                     subseq_ri_cum_depths = get_subseq_ri_cum_depths(retrieve_indices, lens_split)
-                    print(f'Stage {config.stage} {i}th: subseq_ri_cum_depths after expand: {subseq_ri_cum_depths}')
+                    # print(f'Stage {config.stage} {i}th: subseq_ri_cum_depths after expand: {subseq_ri_cum_depths}')
 
                     lens_split = torch.cat((lens_split, torch.tensor([run_config.init_topk], dtype=torch.long)), dim=0)
                     waiting_draft = lens_split[-1].item()
-                    print(f'lens_split after expand: {lens_split}')
+                    # print(f'lens_split after expand: {lens_split}')
 
                     appended_draft_len = waiting_draft
                     lens_split[-1] = appended_draft_len

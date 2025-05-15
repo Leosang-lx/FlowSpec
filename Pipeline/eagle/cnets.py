@@ -1701,9 +1701,10 @@ class Model(nn.Module):
 
             # 不包含树的根节点
             cu_scores_cum = topk_p
-            print(f'cu_scores: {cu_scores_cum.shape}')
+            # print(f'cu_scores: {cu_scores_cum.shape}')
 
-            draft_tokens = torch.cat((input_ids[:, :1], topk_index[None]), dim=-1)
+            # draft_tokens = torch.cat((input_ids[:, :1], topk_index[None]), dim=-1)
+            draft_tokens = torch.cat((sample_token[None], topk_index[None]), dim=-1)
             # first expand仅有两层，第二层的全部看得到第一层的根节点
             tree_mask = torch.eye(1+top_k, 1+top_k, dtype=torch.bool)
             tree_mask[:, 0] = True
@@ -1730,7 +1731,7 @@ class Model(nn.Module):
         # 可能已经剪过枝了（如果剪过则accept_tokens非None以及left_indices非None
         draft_tokens, retrieve_indices, tree_mask, tree_position_ids = tree
         cur_input_len = input_ids.size(-1)
-        print(f'cur_tree_size: {tree_mask.shape}')
+        # print(f'cur_tree_size: {tree_mask.shape}')
 
         # 当前树最后一层的节点在树中对应的indices
         max_position_id = torch.max(tree_position_ids)
@@ -1757,17 +1758,17 @@ class Model(nn.Module):
                     accept_hidden = torch.cat((accept_hidden, appended_accept_hidden), dim=1)
             
             if left_indices is not None:
-                print(f'left_indices: {left_indices.shape}')
+                # print(f'left_indices: {left_indices.shape}')
 
                 left_indices_in_state = left_indices[1:] - 1
                 # print(f'left_indices_in_state: {left_indices_in_state}')
                 input_hidden = input_hidden[:, left_indices_in_state]
-                print(f'cu_scores_cum: {cu_scores_cum.shape}')
+                # print(f'cu_scores_cum: {cu_scores_cum.shape}')
                 cu_scores_cum = cu_scores_cum[left_indices_in_state]
-            print(f'input_hidden: {input_hidden.shape}, cu_scores_cum: {cu_scores_cum.shape}')
-            print(f'accept_tokens: {accept_tokens.size(-1)}')
-            if accept_hidden is not None:
-                print(f'accept_hidden: {accept_hidden.shape}')
+            # print(f'input_hidden: {input_hidden.shape}, cu_scores_cum: {cu_scores_cum.shape}')
+            # print(f'accept_tokens: {accept_tokens.size(-1)}')
+            # if accept_hidden is not None:
+                # print(f'accept_hidden: {accept_hidden.shape}')
 
             if accept_tokens.size(-1) == 1:  # 直接把整棵树输进去，但是position要减1
                 input_hidden_ea = input_hidden
@@ -1779,7 +1780,7 @@ class Model(nn.Module):
                 input_ids = torch.cat((accept_tokens[:, 1:], draft_tokens), dim=-1)
                 
 
-                print(f'init_len_posi: {init_len_posi}, cur_input_len: {cur_input_len}')
+                # print(f'init_len_posi: {init_len_posi}, cur_input_len: {cur_input_len}')
                 position_ids = torch.arange(init_len_posi, init_len_posi + accept_tokens.size(-1) - 1, dtype=torch.long)
                 position_ids = torch.cat((position_ids, tree_pos_ids_ea), dim=0)
                 accept_len = accept_tokens.size(-1) - 1
@@ -1794,24 +1795,24 @@ class Model(nn.Module):
 
 
 
-        print(f'Stage 0: input_hidden_ea {input_hidden_ea.shape}, input_ids {input_ids.shape}, position_ids {position_ids.shape}, tree_mask {tree_mask_ea.shape}')
-        print(f'Stage 0: stable_kv: {self.stable_kv[0][0].shape}, position_ids: {position_ids}')
+        # print(f'Stage 0: input_hidden_ea {input_hidden_ea.shape}, input_ids {input_ids.shape}, position_ids {position_ids.shape}, tree_mask {tree_mask_ea.shape}')
+        # print(f'Stage 0: stable_kv: {self.stable_kv[0][0].shape}, position_ids: {position_ids}')
         assert input_hidden_ea.size(1) == position_ids.size(0) == input_ids.size(-1) == tree_mask_ea.size(-2)
         output_hidden, _ = self(input_hidden_ea, input_ids=input_ids,
                                             past_key_values=self.stable_kv,
                                             position_ids=position_ids, use_cache=True)
-        print(f'Stage 0: output_hidden {output_hidden.shape}')
+        # print(f'Stage 0: output_hidden {output_hidden.shape}')
 
         # 取得当前树最后一层的节点的next-token distribution
         last_layer_output_hidden = output_hidden[:, -last_layer_size:]
         last_headout = head(last_layer_output_hidden[0])
         last_layer_p = self.logsoftmax(last_headout)
 
-        print(f'Stage 0: last_layer_size {last_layer_size}, last_layer_p {last_layer_p.shape}')
+        # print(f'Stage 0: last_layer_size {last_layer_size}, last_layer_p {last_layer_p.shape}')
         
         last_layer_cu_scores = cu_scores_cum[-last_layer_size:]
         cu_scores = last_layer_p + last_layer_cu_scores[:, None]
-        print(f'cu_scores: {cu_scores.shape}')
+        # print(f'cu_scores: {cu_scores.shape}')
         topk_cs = torch.topk(cu_scores.view(-1), top_k, dim=-1)
         topk_cs_index, topk_cs_p = topk_cs.indices, topk_cs.values
 
@@ -1819,27 +1820,27 @@ class Model(nn.Module):
         assert out_ids.max() < 32000
         topk_cs_index = topk_cs_index.cpu()
         parents = topk_cs_index // 32000  # 相对于当前最后一层的tokens
-        print(f'parents: {parents}')
+        # print(f'parents: {parents}')
 
         input_hidden_appended = last_layer_output_hidden[:, parents]
-        print(f'input_hidden_appended: {input_hidden_appended.shape}')
+        # print(f'input_hidden_appended: {input_hidden_appended.shape}')
 
         scores = topk_cs_p
-        print(f'scores: {scores.shape}')
+        # print(f'scores: {scores.shape}')
         # 拿到这些parent在当前draft token tree中的序号
-        print(f'last_layer_indices: {last_layer_indices.shape}')
+        # print(f'last_layer_indices: {last_layer_indices.shape}')
         parent_indices = last_layer_indices[parents]
         idx_ri_path = []  # parent_idx -> ri_path
         for parent_idx in last_layer_indices:
             ri_path = torch.nonzero(retrieve_indices[:, -1] == parent_idx).item()
             idx_ri_path.append(ri_path)
 
-        print(f'idx_ri_path: {idx_ri_path}')
+        # print(f'idx_ri_path: {idx_ri_path}')
 
         # 更新input_hidden和cu_scores_cum
         input_hidden = torch.cat((input_hidden, input_hidden_appended), dim=1)
         cu_scores_cum = torch.cat((cu_scores_cum, topk_cs_p), dim=-1)
-        print(f'appended input_hidden: {input_hidden.shape}, cu_scores_cum: {cu_scores_cum.shape}')
+        # print(f'appended input_hidden: {input_hidden.shape}, cu_scores_cum: {cu_scores_cum.shape}')
 
         last_tree_size = draft_tokens.size(-1)
 
@@ -1863,7 +1864,7 @@ class Model(nn.Module):
         kept_paths = retrieve_indices[~expanded_paths]
         expand_paths = torch.stack(expand_paths, dim=0)
 
-        print(f'kept_paths: {kept_paths.shape}, expand_paths: {expand_paths.shape}')
+        # print(f'kept_paths: {kept_paths.shape}, expand_paths: {expand_paths.shape}')
         retrieve_indices = torch.cat((kept_paths, expand_paths), dim=0)
 
         # 更新tree_mask
