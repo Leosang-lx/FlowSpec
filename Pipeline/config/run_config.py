@@ -47,8 +47,12 @@ class Config:
             base_model_dir: str = f"/home/nvidia/LLM/pipeline_model/meta-llama/Llama-2-7b-chat-hf/new_stage_model_series_0+8+8+8+8_fp16"
             EAGLE_model_path: str = f"/home/nvidia/LLM/models_hf/yuhuili/EAGLE-llama2-chat-7B"
     if model_name == "llama2-13b":
-        base_model_dir: str = f'/home/liux/big_file/pipeline_model/meta-llama/Llama-2-13b-chat-hf/new_stage_model_series_0+10+10+10+10_fp16'
-        EAGLE_model_path: str = "/home/liux/LLM/models_hf/yuhuili/EAGLE-llama2-chat-13B"
+        if hardware == "server":
+            base_model_dir: str = '/home/liux/big_file/pipeline_model/meta-llama/Llama-2-13b-chat-hf/new_stage_model_series_0+10+10+10+10_fp16'
+            EAGLE_model_path: str = "/home/liux/LLM/models_hf/yuhuili/EAGLE-llama2-chat-13B"
+        else:
+            base_model_dir: str = f'/home/nvidia/LLM/pipeline_model/meta-llama/Llama-2-13b-chat-hf/new_stage_model_series_0+10+10+10+10_fp16'
+            EAGLE_model_path: str = "/home/nvidia/LLM/models_hf/yuhuili/EAGLE-llama2-chat-13B"
     elif model_name == "vicuna":
         if hardware == "server":
             base_model_dir: str = f'/home/liux/big_file/pipeline_model/vicuna/Vicuna-7B-v1.3/new_stage_model_series_0+8+8+8+8_fp16'
