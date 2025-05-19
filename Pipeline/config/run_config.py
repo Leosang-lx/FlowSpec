@@ -1,10 +1,11 @@
 from dataclasses import dataclass, field
 from typing import List
+from transformers import BitsAndBytesConfig
 
 @dataclass
 class Config:
     
-    model_name: str = "llama2"
+    model_name: str = "llama2-13b"
     
     # network config
     hardware: str = "server" # "jetson" or "server"
@@ -16,20 +17,20 @@ class Config:
         delay_ms: float = 0.0
 
     # run config
-    mode = "eval" # "eval" or "demo"
-    pipeline_type: str = "naive"
+    mode = "demo" # "eval" or "demo"
+    pipeline_type: str = "continuous"
     
     if mode == "eval":  
         warmup = True
         warmup_repeat = 5
         test_repeat = 1 # this refer to num of choices in the eval set
     else:
-        warmup = True
+        warmup = False
         warmup_repeat = 10
-        test_repeat = 10
+        test_repeat = 1
     
     eval_record: bool = True
-    log: bool = False
+    log: bool = True
     prof: bool = False
     save_timestamps: bool = False
     temperature: float = 0.0
@@ -45,6 +46,9 @@ class Config:
         else:
             base_model_dir: str = f"/home/nvidia/LLM/pipeline_model/meta-llama/Llama-2-7b-chat-hf/new_stage_model_series_0+8+8+8+8_fp16"
             EAGLE_model_path: str = f"/home/nvidia/LLM/models_hf/yuhuili/EAGLE-llama2-chat-7B"
+    if model_name == "llama2-13b":
+        base_model_dir: str = f'/home/liux/big_file/pipeline_model/meta-llama/Llama-2-13b-chat-hf/new_stage_model_series_0+10+10+10+10_fp16'
+        EAGLE_model_path: str = "/home/liux/LLM/models_hf/yuhuili/EAGLE-llama2-chat-13B"
     elif model_name == "vicuna":
         if hardware == "server":
             base_model_dir: str = f'/home/liux/big_file/pipeline_model/vicuna/Vicuna-7B-v1.3/new_stage_model_series_0+8+8+8+8_fp16'
@@ -52,6 +56,9 @@ class Config:
         else:
             base_model_dir: str = f"/home/nvidia/LLM/pipeline_model/vicuna/Vicuna-7B-v1.3/new_stage_model_series_0+8+8+8+8_fp16"
             EAGLE_model_path: str = f"/home/nvidia/LLM/vicuna/EAGLE-Vicuna-7B-v1.3"
+
+    quant = False
+    quant_config = BitsAndBytesConfig(load_in_8bit=True) if quant else None
     
     # eval config
     if mode == "eval":
