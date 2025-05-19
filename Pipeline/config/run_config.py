@@ -4,7 +4,7 @@ from typing import List
 @dataclass
 class Config:
     
-    model_name: str = "vicuna"
+    model_name: str = "llama2"
     
     # network config
     hardware: str = "server" # "jetson" or "server"
@@ -16,8 +16,8 @@ class Config:
         delay_ms: float = 0.0
 
     # run config
-    mode = "demo" # "eval" or "demo"
-    pipeline_type: str = "pruned"
+    mode = "eval" # "eval" or "demo"
+    pipeline_type: str = "naive"
     
     if mode == "eval":  
         warmup = True
@@ -58,7 +58,7 @@ class Config:
         dataset_name: str = "mt_bench"
         question_path: str = "./data/" + dataset_name + "/question.jsonl"
         question_begin: int = 30
-        question_end: int = 50
+        question_end: int = 40
         
     # demo config
     if mode == "demo":
