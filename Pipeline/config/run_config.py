@@ -62,12 +62,12 @@ class Config:
             base_model_dir: str = f"/home/nvidia/LLM/pipeline_model/vicuna/Vicuna-7B-v1.3/new_stage_model_series_0+8+8+8+8_fp16"
             EAGLE_model_path: str = f"/home/nvidia/LLM/vicuna/EAGLE-Vicuna-7B-v1.3"
 
-    quant = True
-    quant_config = BitsAndBytesConfig(
+    quant = False
+    quant_config = BitsAndBytesConfig(  # Fastest parameters with 4-bit quantization
         load_in_4bit=True,
-        bnb_4bit_compute_dtype=torch.bfloat16,
-        bnb_4bit_use_double_quant=True,
-        bnb_4bit_quant_type="nf4"
+        bnb_4bit_compute_dtype=torch.float16,
+        bnb_4bit_use_double_quant=False,
+        bnb_4bit_quant_type="fp4"
         ) if quant else None
     
     # eval config
