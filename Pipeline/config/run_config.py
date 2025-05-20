@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from typing import List
 from transformers import BitsAndBytesConfig
+import torch
 
 @dataclass
 class Config:
@@ -25,7 +26,7 @@ class Config:
         warmup_repeat = 5
         test_repeat = 1 # this refer to num of choices in the eval set
     else:
-        warmup = False
+        warmup = True
         warmup_repeat = 10
         test_repeat = 1
     
@@ -61,8 +62,13 @@ class Config:
             base_model_dir: str = f"/home/nvidia/LLM/pipeline_model/vicuna/Vicuna-7B-v1.3/new_stage_model_series_0+8+8+8+8_fp16"
             EAGLE_model_path: str = f"/home/nvidia/LLM/vicuna/EAGLE-Vicuna-7B-v1.3"
 
-    quant = False
-    quant_config = BitsAndBytesConfig(load_in_8bit=True) if quant else None
+    quant = True
+    quant_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_compute_dtype=torch.bfloat16,
+        bnb_4bit_use_double_quant=True,
+        bnb_4bit_quant_type="nf4"
+        ) if quant else None
     
     # eval config
     if mode == "eval":
