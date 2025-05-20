@@ -17,7 +17,7 @@ class Config:
         delay_ms: float = 0.0
 
     # run config
-    mode = "demo" # "eval" or "demo"
+    mode = "eval" # "eval" or "demo"
     
     if mode == "eval":  
         pipeline_types: List[str] = field(default_factory=lambda: ["naive", "continuous", "pipedec"])
@@ -25,18 +25,18 @@ class Config:
         warmup = True
         warmup_repeat = 5
         test_repeat = 1 # this refer to num of choices in the eval set
-        error_repeat = 2
+        error_repeat = 3
         change_seed = False
         
         # dataset_names: List[str] = field(default_factory=lambda: ["mt_bench", "humaneval", "gsm8k", "alpaca", "sum", "qa"])
         dataset_names: List[str] = field(default_factory=lambda: ["mt_bench"])
         question_paths: List[str] = field(init=False)
         question_begin: int = 30
-        question_end: int = 35
+        question_end: int = 40
         
         eval_record: bool = True
         
-        temperatures: List[float] = field(default_factory=lambda: [0.0])
+        temperatures: List[float] = field(default_factory=lambda: [0.0, 1.0])
     else:
         pipeline_type: str = "continuous"
         

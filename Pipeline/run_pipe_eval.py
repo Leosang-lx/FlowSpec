@@ -135,10 +135,9 @@ def run_eval(args):
     record_path = f"{args.model_name}-{args.extra_name}.txt"
     for temperature in run_config.temperatures:
         for pipeline_type in run_config.pipeline_types:
-            for question_path in run_config.question_paths:
-                questions = load_questions(question_path, run_config.question_begin, run_config.question_end)
-                
-                for _ in range(run_config.error_repeat):
+            for _ in range(run_config.error_repeat):
+                for question_path in run_config.question_paths:
+                    questions = load_questions(question_path, run_config.question_begin, run_config.question_end)
                 
                     cnt = tqdm(range(len(questions)), desc=question_path) if rank == 0 else range(len(questions))
                     new_tokens_list = []
@@ -157,8 +156,11 @@ def run_eval(args):
                                     conv = get_conversation_template("llama-2-chat")
                                     sys_p = "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."
                                     conv.system_message = sys_p
+                                    conv.stop_token_ids = [2]
+                                    
                                 elif args.model_name == "vicuna":
                                     conv = get_conversation_template("vicuna")
+                                    conv.stop_token_ids = [2]
                             
                             for k in range(len(q["turns"])):
                                 if rank == 0:

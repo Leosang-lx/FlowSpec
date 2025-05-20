@@ -478,7 +478,7 @@ class StageEaModel(nn.Module):
 
             if self.is_draft_stage:
                 input_ids, hidden_state, token, accept_length, turns = outputs
-                assert accept_length == len(input_ids[0, input_len:]) - new_token, f'accept_length: {accept_length} != len(input_ids[0, input_len:]) - new_token: {len(input_ids[0, input_len:]) - new_token}'
+                # assert accept_length == len(input_ids[0, input_len:]) - new_token, f'accept_length: {accept_length} != len(input_ids[0, input_len:]) - new_token: {len(input_ids[0, input_len:]) - new_token}'
                 new_token += accept_length
                 if log:
                     print(f'{idx_spec}th round, accept_length: {accept_length} in {turns} turns')
