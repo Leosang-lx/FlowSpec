@@ -12,3 +12,7 @@ Pipeline/pipeinfer/pipeinfer.py
 *.txt
 Pipeline/tp
 Pipeline/run_tp.sh
+Pipeline/run_eval2.sh
+Pipeline/run_jetson_eval2.sh
+Pipeline/run_pipe_eval2.py
+Pipeline/run_pipe_eval3.py

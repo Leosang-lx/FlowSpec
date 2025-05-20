@@ -46,7 +46,7 @@ def main():
         device_map=f"cuda:{device}",
         total_token=run_config.init_total_token,
         depth=run_config.init_depth,
-        top_k=run_config.init_topk,
+        top_k=run_config.init_topk if run_config.pipeline_type != "pipedec" else run_config.init_topk_pipedec,
     )
 
     # check shared_weight
@@ -159,7 +159,7 @@ def run_eval():
         device_map=f"cuda:{device}",
         total_token=run_config.init_total_token,
         depth=run_config.init_depth,
-        top_k=run_config.init_topk,
+        top_k=run_config.init_topk if run_config.pipeline_type != "pipedec" else run_config.init_topk_pipedec,
     )
     
     stage_model.eval()

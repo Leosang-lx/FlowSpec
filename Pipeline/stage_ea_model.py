@@ -282,7 +282,7 @@ class StageEaModel(nn.Module):
                             input_ids_ea,  # input_ids_ea只有first expand时候要用
                             self.stage_base_model.lm_head,
                             logits_processor,
-                            top_k=run_config.init_topk,
+                            top_k=run_config.init_topk_pipedec,
                             first_expand=True
                             # prof=prof
                     )
@@ -297,14 +297,14 @@ class StageEaModel(nn.Module):
                         input_ids,
                         self.stage_base_model.lm_head,
                         logits_processor,
-                        top_k=run_config.init_topk,
+                        top_k=run_config.init_topk_pipedec,
                         last_state=last_ea_state,
                         tree=last_ea_tree,
                         first_expand=False,
                     )
-                    appended_input = draft_tokens[:, -run_config.init_topk:]
-                    appended_tree_pos_ids = tree_position_ids[-run_config.init_topk:]
-                    appended_tree_mask = tree_mask[:, :, -run_config.init_topk:, :]
+                    appended_input = draft_tokens[:, -run_config.init_topk_pipedec:]
+                    appended_tree_pos_ids = tree_position_ids[-run_config.init_topk_pipedec:]
+                    appended_tree_mask = tree_mask[:, :, -run_config.init_topk_pipedec:, :]
                 # print(f"draft_tokens: {self.tokenizer.decode(draft_tokens[0])}")
                 # print(f'Stage {config.stage} {i}th: appended_tree_mask: {appended_tree_mask.shape}, {appended_tree_mask.dtype}, {appended_tree_mask.element_size()}')
                 # if log:
@@ -456,7 +456,9 @@ class StageEaModel(nn.Module):
                     input_ids=input_ids,
                     token=token,
                     hidden_state=hidden_state,
-                    # new_token=new_token,
+                    new_token=new_token,
+                    max_new_tokens=max_new_tokens,
+                    max_length=max_length,
                     log=log,
                     prof=profiler
                 )
@@ -476,9 +478,10 @@ class StageEaModel(nn.Module):
 
             if self.is_draft_stage:
                 input_ids, hidden_state, token, accept_length, turns = outputs
+                assert accept_length == len(input_ids[0, input_len:]) - new_token, f'accept_length: {accept_length} != len(input_ids[0, input_len:]) - new_token: {len(input_ids[0, input_len:]) - new_token}'
+                new_token += accept_length
                 if log:
                     print(f'{idx_spec}th round, accept_length: {accept_length} in {turns} turns')
-                    new_token += accept_length
                     turns_cnt += turns
 
                 if input_ids is not None and self.tokenizer is not None:
@@ -513,7 +516,9 @@ class StageEaModel(nn.Module):
         input_ids=None,
         token=None,
         hidden_state=None,
-        # new_token=None,
+        new_token=None,
+        max_new_tokens=None,
+        max_length=None,
         log=False,
         prof=None
     ):  
@@ -528,7 +533,7 @@ class StageEaModel(nn.Module):
                 depth=run_config.init_depth,
                 top_k=run_config.init_topk,
                 return_last=False,
-                sort_score=run_config.draft_gen_sort_score,
+                sort_score=False,
                 # prof=prof,
             )
             seqs_split, lens_split = split_sequence_close_equal_len(
@@ -589,7 +594,9 @@ class StageEaModel(nn.Module):
         input_ids=None,
         token=None,
         hidden_state=None,
-        # new_token=None,
+        new_token=None,
+        max_new_tokens=None,
+        max_length=None,
         log=False,
         prof=None
     ):
@@ -599,6 +606,7 @@ class StageEaModel(nn.Module):
 
         if config.is_draft_stage:
             input_ids_ea = torch.cat((input_ids, token.to(input_ids.device)), dim=1)
+            input_len = input_ids.size(-1)
 
             draft_tokens, retrieve_indices, tree_mask, tree_position_ids, last_ea_state = self.ea_layer.topK_genrate(
                     hidden_state,
@@ -694,6 +702,8 @@ class StageEaModel(nn.Module):
                             )
                         
                         accept_length += 1
+                        new_token += accept_length
+                        
                         token = gen_token(prob=sample_p, logits_processor=logits_processor)  # device=cuda
 
                         cur_draft_depth = subseq_ri_cum_depths[0, best_candidate]
@@ -704,7 +714,15 @@ class StageEaModel(nn.Module):
                         
                         with prof.time_context(f"Stage {config.stage}: last-stage pruning", cpu=True) if prof is not None else nullcontext():
                             left_indices, truncate = cal_pruning_info(draft_tokens, retrieve_indices, best_candidate, accept_length, token, subseq_ri_cum_depths)
-                            
+                        
+                        if not truncate:
+                            if self.tokenizer.eos_token_id in input_ids[0, input_len:].tolist():
+                                truncate = True
+                            elif new_token > max_new_tokens:
+                                truncate = True
+                            elif input_ids.shape[1] > max_length:
+                                truncate = True
+                                
                         if truncate:  # start new speculation round
                             new_sampled_token = token.item()
                             if log:
@@ -785,7 +803,8 @@ class StageEaModel(nn.Module):
                         if config.is_draft_stage:
                             accept_hidden_states.append(sub_hidden_state)
                             token = torch.tensor([[new_sampled_token]], dtype=torch.long, device=input_ids.device)
-                            accepted_tokens = draft_tokens[:, left_indices].to(input_ids.device)
+                            # accepted_tokens = draft_tokens[:, left_indices].to(input_ids.device)
+                            accepted_tokens = draft_tokens[:, left_indices[:accept_length]].to(input_ids.device)
                             input_ids = torch.cat((input_ids, accepted_tokens), dim=-1)
                         break
                 else:  
@@ -851,7 +870,9 @@ class StageEaModel(nn.Module):
         input_ids=None,
         token=None,
         hidden_state=None,
-        # new_token=None,
+        new_token=None,
+        max_new_tokens=None,
+        max_length=None,
         log=False,
         prof=None
     ):
@@ -861,6 +882,7 @@ class StageEaModel(nn.Module):
 
         if config.is_draft_stage:
             input_ids_ea = torch.cat((input_ids, token.to(input_ids.device)), dim=1)
+            input_len = input_ids.size(-1)
 
             with prof.time_context(f"Stage {config.stage}: topK_genrate", cpu=False) if prof is not None else nullcontext():
                 draft_tokens, retrieve_indices, tree_mask, tree_position_ids, last_ea_state = self.ea_layer.topK_genrate(
@@ -956,6 +978,7 @@ class StageEaModel(nn.Module):
                             )
                         
                             accept_length += 1
+                            new_token += accept_length
                             token = gen_token(prob=sample_p, logits_processor=logits_processor)  # device=cuda
 
                             cur_draft_depth = subseq_ri_cum_depths[0, best_candidate]
@@ -965,7 +988,15 @@ class StageEaModel(nn.Module):
                             sub_hidden_state = sub_hidden_state[:, retrieve_indices[best_candidate, :accept_length]]
                         # with prof.time_context(f"Stage {config.stage}: last-stage pruning", cpu=False) if prof is not None else nullcontext():
                             left_indices, truncate = cal_pruning_info(draft_tokens, retrieve_indices, best_candidate, accept_length, token, subseq_ri_cum_depths)
-                            
+                        
+                        if not truncate:
+                            if self.tokenizer.eos_token_id in input_ids[0, input_len:].tolist():
+                                truncate = True
+                            elif new_token > max_new_tokens:
+                                truncate = True
+                            elif input_ids.shape[1] > max_length:
+                                truncate = True
+                                
                         if truncate:  # start new speculation round
                             new_sampled_token = token.item()
                             if log:
@@ -1048,7 +1079,8 @@ class StageEaModel(nn.Module):
                         if config.is_draft_stage:
                             accept_hidden_states.append(sub_hidden_state)
                             token = torch.tensor([[new_sampled_token]], dtype=torch.long, device=input_ids.device)
-                            accepted_tokens = draft_tokens[:, left_indices].to(input_ids.device)
+                            # accepted_tokens = draft_tokens[:, left_indices].to(input_ids.device)
+                            accepted_tokens = draft_tokens[:, left_indices[:accept_length]].to(input_ids.device)
                             input_ids = torch.cat((input_ids, accepted_tokens), dim=-1)
                         break
                 else:  
@@ -1228,7 +1260,9 @@ class StageEaModel(nn.Module):
         input_ids=None,
         token=None,
         hidden_state=None,
-        # new_token=None,
+        new_token=None,
+        max_new_tokens=None,
+        max_length=None,
         log=False,
         prof=None
     ):
@@ -1243,6 +1277,7 @@ class StageEaModel(nn.Module):
             #     print
             draft_init_params = (None, input_ids, token.to(input_ids.device), hidden_state, logits_processor)
             global_accept_len = input_ids.size(-1)
+            input_len = input_ids.size(-1)
         else:
             past_key_values, past_key_values_data, current_length_data = kv_cache
             draft_init_params = (past_key_values,)
@@ -1313,10 +1348,10 @@ class StageEaModel(nn.Module):
                         
                         # best_candidate = torch.tensor(0, dtype=torch.long, device=candidates.device)
                         accept_length += 1
+                        new_token += accept_length
                         # sample_p = subseq_logits[0, 0]
                         
                         token = gen_token(prob=sample_p, logits_processor=logits_processor)  # device=cuda
-                        
                         # print(f'sample Token is ({self.tokenizer.decode(token.item())})')
 
                         cur_draft_depth = subseq_ri_cum_depths[0, best_candidate]
@@ -1330,6 +1365,15 @@ class StageEaModel(nn.Module):
                         left_indices, truncate = cal_pruning_info(draft_tokens, retrieve_indices, best_candidate, accept_length, token, subseq_ri_cum_depths)
                         # print(f'left_indices.shape: {left_indices.shape}')
                         # print(f'left_indices: {self.tokenizer.decode(draft_tokens[left_indices[0]])}, truncate: {truncate}')
+                    
+                    if not truncate:
+                        if self.tokenizer.eos_token_id in input_ids[0, input_len:].tolist():
+                            truncate = True
+                        elif new_token > max_new_tokens:
+                            truncate = True
+                        elif input_ids.shape[1] > max_length:
+                            truncate = True
+                                
                     if truncate:  # start new speculation round
                         new_sampled_token = token.item()
                         if log:
@@ -1421,7 +1465,8 @@ class StageEaModel(nn.Module):
                     if config.is_draft_stage:
                         accept_hidden_states.append(sub_hidden_state)
                         token = torch.tensor([[new_sampled_token]], dtype=torch.long, device=input_ids.device)
-                        accept_tokens = draft_tokens[:, left_indices].to(input_ids.device)
+                        # accept_tokens = draft_tokens[:, left_indices].to(input_ids.device)
+                        accept_tokens = draft_tokens[:, left_indices[:accept_length]].to(input_ids.device)
                         input_ids = torch.cat((input_ids, accept_tokens), dim=-1)
                     # print(f'Stage {config.stage} {i}th: truncate, break!!!')
                     break
@@ -1462,7 +1507,7 @@ class StageEaModel(nn.Module):
                         input_ids,
                         self.stage_base_model.lm_head,
                         logits_processor,
-                        top_k=run_config.init_topk,
+                        top_k=run_config.init_topk_pipedec,
                         log=log,
                         first_expand=False,
                         last_state=last_ea_state,
@@ -1497,7 +1542,7 @@ class StageEaModel(nn.Module):
                     subseq_ri_cum_depths = get_subseq_ri_cum_depths(retrieve_indices, lens_split)
                     # print(f'Stage {config.stage} {i}th: subseq_ri_cum_depths after expand: {subseq_ri_cum_depths}')
 
-                    lens_split = torch.cat((lens_split, torch.tensor([run_config.init_topk], dtype=torch.long)), dim=0)
+                    lens_split = torch.cat((lens_split, torch.tensor([run_config.init_topk_pipedec], dtype=torch.long)), dim=0)
                     waiting_draft = lens_split[-1].item()
                     # print(f'lens_split after expand: {lens_split}')
 

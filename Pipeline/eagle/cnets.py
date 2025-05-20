@@ -1819,14 +1819,12 @@ class Model(nn.Module):
         
         last_layer_cu_scores = cu_scores_cum[-last_layer_size:]
         cu_scores = topk_p + last_layer_cu_scores[:, None]
-        # print(f'cu_scores: {cu_scores.shape}')
         topk_cs = torch.topk(cu_scores.view(-1), top_k, dim=-1)
         topk_cs_index, topk_cs_p = topk_cs.indices, topk_cs.values
 
         # out_ids = topk_cs_index // last_layer_size  # 如何映射回token_ids？
         out_ids = topk_cs_index // top_k
-        
-        assert out_ids.max() < 32000
+
         topk_cs_index = topk_cs_index.cpu()
         # parents = topk_cs_index // 32000  # 相对于当前最后一层的tokens
         parents = topk_cs_index // top_k
@@ -1882,6 +1880,7 @@ class Model(nn.Module):
 
         # 更新tree_mask
         tree_mask_new = torch.eye(last_tree_size + top_k, last_tree_size + top_k, dtype=torch.float32)
+        tree_mask_new[:last_tree_size, :last_tree_size] = tree_mask.clone()
         tree_mask_new[:, 0] = True
         for i in range(top_k):
             parent_index = parent_indices[i]
