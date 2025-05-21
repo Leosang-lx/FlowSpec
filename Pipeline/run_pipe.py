@@ -157,6 +157,7 @@ def run_eval():
         low_cpu_mem_usage=True,
         # max_memory={"cpu": "1GB"},
         use_safetensors=True,
+        quantization_config=run_config.quant_config,
         device_map=f"cuda:{device}",
         total_token=run_config.init_total_token,
         depth=run_config.init_depth,
