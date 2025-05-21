@@ -14,17 +14,15 @@ from test.model_struct_test import model_struct_test
 import hashlib
 import torch.nn as nn
 
-# cache_dir = '/home/liux/LLM/models_hf/'
+cache_dir = '/home/liux/LLM/models_hf/'
+large_file_dir = '/home/liux/big_file/'
 
-# base_model_path = 'meta-llama/Llama-2-7b-chat-hf'
-# EAGLE_model_path = 'yuhuili/EAGLE-llama2-chat-7B'
+base_model_path = 'lmsys/vicuna-13b-v1.3'
+EAGLE_model_path = 'yuhuili/EAGLE-Vicuna-13B-v1.3'
+# base_model_path = 'meta-llama/Llama-2-13b-chat-hf'
+# EAGLE_model_path = 'yuhuili/EAGLE-llama2-chat-13B'
 
-cache_dir = '/home/liux/big_file/'
-
-base_model_path = 'vicuna/Vicuna-7B-v1.3'
-EAGLE_model_path = 'vicuna/EAGLE-Vicuna-7B-v1.3'
-
-base_model_path = cache_dir + base_model_path
+base_model_path = large_file_dir + base_model_path
 EAGLE_model_path = cache_dir + EAGLE_model_path
 
 def gen_stage_model_config_series(split_cnt: int, base_ea_config) -> StageEaConfig:
@@ -121,9 +119,10 @@ if __name__ == '__main__':
         ea_model_path=EAGLE_model_path,
         torch_dtype=torch.float16
     )
+    # exit(0)
     
     stage_model_config_series = gen_stage_model_config_series(4, base_ea_config)
     
-    stage_model_save_dir = '/home/liux/big_file/pipeline_model/vicuna/Vicuna-7B-v1.3'
+    stage_model_save_dir = f'/home/liux/big_file/pipeline_model/{base_model_path}'
     for config in stage_model_config_series:
         save_stage_dict(model, config, stage_model_save_dir, draft_stage=True)

@@ -31,7 +31,7 @@ def main():
     rank = int(os.environ['RANK'])
     world_size = int(os.environ['WORLD_SIZE'])
     # device = rank % torch.cuda.device_count()
-    device = 1
+    device = 0
     torch.cuda.set_device(device)
     print(f'rank={rank}, world_size={world_size}, device={device}')
     
@@ -43,6 +43,7 @@ def main():
         low_cpu_mem_usage=True,
         # max_memory={"cpu": "1GB"},
         use_safetensors=True,
+        quantization_config=run_config.quant_config,
         device_map=f"cuda:{device}",
         total_token=run_config.init_total_token,
         depth=run_config.init_depth,
@@ -61,9 +62,9 @@ def main():
     # [initialize]
     if rank == 0:
         your_message=run_config.your_message
-        if run_config.model_name == "vicuna":
+        if "vicuna" in run_config.model_name:
             conv = get_conversation_template("vicuna")
-        elif run_config.model_name == "llama2":
+        elif "llama2" in run_config.model_name:
             conv = get_conversation_template("llama-2-chat")
             sys_p = "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."
             conv.system_message = sys_p

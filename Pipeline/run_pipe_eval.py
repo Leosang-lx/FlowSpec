@@ -67,11 +67,11 @@ def run_eval(args):
         torch.manual_seed(0) 
             
         if rank == 0:
-            if args.model_name == "llama2":
+            if "llama2" in args.model_name:
                 conv = get_conversation_template("llama-2-chat")
                 sys_p = "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."
                 conv.system_message = sys_p
-            elif args.model_name == "vicuna":
+            elif "vicuna" in args.model_name:
                 conv = get_conversation_template("vicuna")
             
         for k in range(len(q["turns"])):
@@ -152,13 +152,13 @@ def run_eval(args):
                             np.random.seed(j)
                             
                             if rank == 0:
-                                if args.model_name == "llama2":
+                                if "llama2" in args.model_name:
                                     conv = get_conversation_template("llama-2-chat")
                                     sys_p = "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."
                                     conv.system_message = sys_p
                                     conv.stop_token_ids = [2]
                                     
-                                elif args.model_name == "vicuna":
+                                elif "vicuna" in args.model_name:
                                     conv = get_conversation_template("vicuna")
                                     conv.stop_token_ids = [2]
                             

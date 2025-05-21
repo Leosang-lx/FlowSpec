@@ -1,11 +1,13 @@
 from dataclasses import dataclass, field
 from typing import List
 import time
+from transformers import BitsAndBytesConfig
+import torch
 
 @dataclass
 class Config:
     
-    model_name: str = "llama2"
+    model_name: str = "llama2-13b"
     
     # network config
     hardware: str = "server" # "jetson" or "server"
@@ -32,7 +34,7 @@ class Config:
         dataset_names: List[str] = field(default_factory=lambda: ["mt_bench"])
         question_paths: List[str] = field(init=False)
         question_begin: int = 30
-        question_end: int = 40
+        question_end: int = 31
         
         eval_record: bool = True
         
@@ -60,10 +62,17 @@ class Config:
     if model_name == "llama2":
         if hardware == "server":
             base_model_dir: str = f'/home/liux/big_file/pipeline_model/meta-llama/Llama-2-7b-chat-hf/new_stage_model_series_0+8+8+8+8_fp16'
-            EAGLE_model_path: str = "/home/liux/LLM/models_hf/yuhuili/EAGLE-llama2-chat-7B"
+            EAGLE_model_path: str = "/home/nvidia/LLM/models_hf/yuhuili/EAGLE-llama2-chat-7B"
         else:
             base_model_dir: str = f"/home/nvidia/LLM/pipeline_model/meta-llama/Llama-2-7b-chat-hf/new_stage_model_series_0+8+8+8+8_fp16"
             EAGLE_model_path: str = f"/home/nvidia/LLM/models_hf/yuhuili/EAGLE-llama2-chat-7B"
+    elif model_name == "llama2-13b":
+        if hardware == "server":
+            base_model_dir: str = '/home/liux/big_file/pipeline_model/meta-llama/Llama-2-13b-chat-hf/new_stage_model_series_0+10+10+10+10_fp16'
+            EAGLE_model_path: str = "/home/liux/LLM/models_hf/yuhuili/EAGLE-llama2-chat-13B"
+        else:
+            base_model_dir: str = f'/home/nvidia/LLM/pipeline_model/meta-llama/Llama-2-13b-chat-hf/new_stage_model_series_0+10+10+10+10_fp16'
+            EAGLE_model_path: str = "/home/nvidia/LLM/models_hf/yuhuili/EAGLE-llama2-chat-13B"
     elif model_name == "vicuna":
         if hardware == "server":
             base_model_dir: str = f'/home/liux/big_file/pipeline_model/vicuna/Vicuna-7B-v1.3/new_stage_model_series_0+8+8+8+8_fp16'
@@ -71,6 +80,21 @@ class Config:
         else:
             base_model_dir: str = f"/home/nvidia/LLM/pipeline_model/vicuna/Vicuna-7B-v1.3/new_stage_model_series_0+8+8+8+8_fp16"
             EAGLE_model_path: str = f"/home/nvidia/LLM/vicuna/EAGLE-Vicuna-7B-v1.3"
+    elif model_name == "vicuna-13b":
+        if hardware == "server":
+            base_model_dir: str = f'/home/liux/big_file/pipeline_model/lmsys/vicuna-13b-v1.3/new_stage_model_series_0+10+10+10+10_fp16'
+            EAGLE_model_path: str = "/home/liux/LLM/models_hf/yuhuili/EAGLE-Vicuna-13B-v1.3"
+        else:
+            base_model_dir: str = f"/home/nvidia/LLM/pipeline_model/vicuna/Vicuna-13B-v1.3/new_stage_model_series_0+10+10+10+10_fp16"
+            EAGLE_model_path: str = "/home/nvidia/LLM/models_hf/yuhuili/EAGLE-Vicuna-13B-v1.3"
+
+    quant = True
+    quant_config = BitsAndBytesConfig(  # Fastest parameters with 4-bit quantization
+        load_in_4bit=True,
+        bnb_4bit_compute_dtype=torch.float16,
+        bnb_4bit_use_double_quant=False,
+        bnb_4bit_quant_type="fp4"
+        ) if quant else None
     
     # pipeline config
     if mode == "eval":

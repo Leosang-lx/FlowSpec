@@ -321,14 +321,14 @@ class StageLlamaModelForCausalLM(LlamaPreTrainedModel):
 
     def get_output_embeddings(self):
         # [modify]
-        if self.config.is_last_stage:
+        if self.config.is_draft_stage:
             return self.lm_head
         else:
             return None
 
     def set_output_embeddings(self, new_embeddings):
         # [modify]
-        if self.config.is_last_stage:
+        if self.config.is_draft_stage:
             self.lm_head = new_embeddings
 
     def set_decoder(self, decoder):
