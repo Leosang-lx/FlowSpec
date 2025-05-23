@@ -726,7 +726,7 @@ class Model(nn.Module):
         parents_list = []
         ss_token = []
 
-        input_ids = input_ids[:, 1:] # liux: (maybe)base model has generate 1 token before, drop the first one
+        input_ids = input_ids[:, 1:]
         input_ids = input_ids.to(hidden_states.device)
 
         len_posi = input_ids.shape[1]

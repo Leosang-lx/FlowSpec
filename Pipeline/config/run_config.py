@@ -7,39 +7,40 @@ import torch
 @dataclass
 class Config:
     
-    model_name: str = "llama2-13b"
+    # model to use
+    model_name: str = "llama2-13b" 
     
     # network config
     hardware: str = "server" # "jetson" or "server"
-    if hardware == "jetson":
+    if hardware == "jetson": # network config for distributed test
         set_network: bool = False
         password: str = "nvidia"
         interface: str = "eth0"
         rate_mbps: float = 150
-        delay_ms: float = 0.0
+        delay_ms: float = 0.0 # not supported yet
 
     # run config
-    mode = "eval" # "eval" or "demo"
+    mode = "demo" # "eval" or "demo"
     
-    if mode == "eval":  
+    if mode == "eval":  # large scale evaluation
         pipeline_types: List[str] = field(default_factory=lambda: ["naive", "continuous", "pipedec"])
         
         warmup = True
         warmup_repeat = 5
         test_repeat = 1 # this refer to num of choices in the eval set
-        error_repeat = 3
+        error_repeat = 1 # for error analysis
         change_seed = False
         
-        # dataset_names: List[str] = field(default_factory=lambda: ["mt_bench", "humaneval", "gsm8k", "alpaca", "sum", "qa"])
-        dataset_names: List[str] = field(default_factory=lambda: ["mt_bench"])
+        dataset_names: List[str] = field(default_factory=lambda: ["mt_bench", "humaneval", "gsm8k", "alpaca", "sum", "qa"])
+        # dataset_names: List[str] = field(default_factory=lambda: ["mt_bench"])
         question_paths: List[str] = field(init=False)
         question_begin: int = 30
-        question_end: int = 31
+        question_end: int = 50
         
         eval_record: bool = True
         
         temperatures: List[float] = field(default_factory=lambda: [0.0, 1.0])
-    else:
+    else:  # local test
         pipeline_type: str = "continuous"
         
         warmup = False
@@ -57,6 +58,14 @@ class Config:
     max_new_tokens: int = 128
     
     timeout: int = 15
+    
+    quant = False
+    quant_config = BitsAndBytesConfig(  # Fastest parameters with 4-bit quantization
+        load_in_4bit=True,
+        bnb_4bit_compute_dtype=torch.float16,
+        bnb_4bit_use_double_quant=False,
+        bnb_4bit_quant_type="fp4"
+        ) if quant else None
     
     # model config
     if model_name == "llama2":
@@ -87,14 +96,6 @@ class Config:
         else:
             base_model_dir: str = f"/home/nvidia/LLM/pipeline_model/vicuna/Vicuna-13B-v1.3/new_stage_model_series_0+10+10+10+10_fp16"
             EAGLE_model_path: str = "/home/nvidia/LLM/models_hf/yuhuili/EAGLE-Vicuna-13B-v1.3"
-
-    quant = True
-    quant_config = BitsAndBytesConfig(  # Fastest parameters with 4-bit quantization
-        load_in_4bit=True,
-        bnb_4bit_compute_dtype=torch.float16,
-        bnb_4bit_use_double_quant=False,
-        bnb_4bit_quant_type="fp4"
-        ) if quant else None
     
     # pipeline config
     if mode == "eval":
@@ -118,7 +119,7 @@ class Config:
             none_expand_size: int = 48
             none_expand_depth: int = 1
         
-        init_topk_pipedec: int = 16
+        init_topk_pipedec: int = 16 # only for pipedec
     else:
         if pipeline_type == "naive":
             draft_gen_sort_score: bool = False
