@@ -108,7 +108,7 @@ Set `quant` in `run_config.py` to choose the quantization method, if needed.
 **7B model evaluation**
 ``` shell
 # run
-bash run_pipe_eval.sh
+bash run_eval.sh
 # or
 bash run_jetson_eval.sh
 ```
@@ -116,7 +116,7 @@ bash run_jetson_eval.sh
 **13B model evaluation (Quantization is recommended)**
 ``` shell
 # run
-bash run_pipe_eval_13B.sh
+bash run_eval_13B.sh
 # or
 bash run_jetson_eval_13B.sh
 ```
