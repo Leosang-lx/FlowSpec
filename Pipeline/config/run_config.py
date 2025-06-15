@@ -7,7 +7,7 @@ import torch
 @dataclass
 class Config:
     
-    model_name: str = "llama2-13b"
+    model_name: str = "llama2"
     
     # network config
     hardware: str = "server" # "jetson" or "server"
@@ -62,7 +62,7 @@ class Config:
     if model_name == "llama2":
         if hardware == "server":
             base_model_dir: str = f'/home/liux/big_file/pipeline_model/meta-llama/Llama-2-7b-chat-hf/new_stage_model_series_0+8+8+8+8_fp16'
-            EAGLE_model_path: str = "/home/nvidia/LLM/models_hf/yuhuili/EAGLE-llama2-chat-7B"
+            EAGLE_model_path: str = "/home/liux/LLM/models_hf/yuhuili/EAGLE-llama2-chat-7B"
         else:
             base_model_dir: str = f"/home/nvidia/LLM/pipeline_model/meta-llama/Llama-2-7b-chat-hf/new_stage_model_series_0+8+8+8+8_fp16"
             EAGLE_model_path: str = f"/home/nvidia/LLM/models_hf/yuhuili/EAGLE-llama2-chat-7B"
@@ -88,7 +88,7 @@ class Config:
             base_model_dir: str = f"/home/nvidia/LLM/pipeline_model/vicuna/Vicuna-13B-v1.3/new_stage_model_series_0+10+10+10+10_fp16"
             EAGLE_model_path: str = "/home/nvidia/LLM/models_hf/yuhuili/EAGLE-Vicuna-13B-v1.3"
 
-    quant = True
+    quant = False
     quant_config = BitsAndBytesConfig(  # Fastest parameters with 4-bit quantization
         load_in_4bit=True,
         bnb_4bit_compute_dtype=torch.float16,
