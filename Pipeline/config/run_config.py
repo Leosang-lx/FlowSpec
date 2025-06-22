@@ -19,7 +19,7 @@ class Config:
         delay_ms: float = 0.0
 
     # run config
-    mode = "eval" # "eval" or "demo"
+    mode = "demo" # "eval" or "demo"
     
     if mode == "eval":  
         pipeline_types: List[str] = field(default_factory=lambda: ["naive", "continuous", "pipedec"])
@@ -40,21 +40,21 @@ class Config:
         
         temperatures: List[float] = field(default_factory=lambda: [0.0, 1.0])
     else:
-        pipeline_type: str = "continuous"
+        pipeline_type: str = "serial"
         
-        warmup = False
+        warmup = True
         warmup_repeat = 10
-        test_repeat = 1
+        test_repeat = 10
         
-        your_message: str = "who are you?"
+        your_message: str = "Hello"
         
         temperature: float = 0.0
     
     
-    log: bool = False
+    log: bool = True
     prof: bool = False
     save_timestamps: bool = False
-    max_new_tokens: int = 128
+    max_new_tokens: int = 256
     
     timeout: int = 15
     
@@ -98,7 +98,7 @@ class Config:
     
     # pipeline config
     if mode == "eval":
-        draft_gen_sort_score: bool = True
+        draft_gen_sort_score: bool = False
         num_stage: int = 5 # only support 5 stage now
         
         # draft config
@@ -120,6 +120,10 @@ class Config:
         
         init_topk_pipedec: int = 16
     else:
+        init_total_token: int = 80
+        init_topk: int = 10
+        init_depth: int = 6
+
         if pipeline_type == "naive":
             draft_gen_sort_score: bool = False
             num_stage: int = 5 # 5 or 4

@@ -376,7 +376,9 @@ class StageEaModel(nn.Module):
             stop_token_id = self.tokenizer.convert_tokens_to_ids("<|eot_id|>")
         
         # [pipeline method]
-        if pipeline_type == "naive":
+        if pipeline_type == "serial":
+            pipeline_forward = self._serial_pipeline
+        elif pipeline_type == "naive":
             pipeline_forward = self._naive_pipeline
         elif pipeline_type == "pruned":
             pipeline_forward = self._pruned_pipeline
@@ -507,6 +509,106 @@ class StageEaModel(nn.Module):
             else:
                 print(f'skip_count: {skip_count}')
                 return input_ids, new_token, idx_spec, turns_cnt
+            
+    def _serial_pipeline(
+        self,
+        kv_cache=None,
+        logits_processor=None,
+        input_ids=None,
+        token=None,
+        hidden_state=None,
+        new_token=None,
+        max_new_tokens=None,
+        max_length=None,
+        log=False,
+        prof=None
+    ):
+        config = self.config
+        device = self.stage_base_model.device
+        comm = self.comm
+        if self.is_draft_stage:
+            input_ids_ea = torch.cat((input_ids, token.to(input_ids.device)), dim=1)
+            draft_tokens, retrieve_indices, tree_mask, tree_position_ids, last_ea_state = self.ea_layer.topK_genrate(
+                hidden_state,
+                input_ids_ea,
+                self.stage_base_model.lm_head,
+                logits_processor,
+            )
+            tree_position_ids = tree_position_ids + input_ids.size(-1)
+            # send to next stage
+            comm.send_appended(draft_tokens, tree_position_ids, tree_mask)
+            hidden_state_verified = comm.recvfrom(self.config.last_rank, device)
+            logits = self.stage_base_model.lm_head(hidden_state_verified)
+            # if self.is_draft_stage:
+            # logits, hidden_state = outputs
+            logits = logits[0, retrieve_indices]
+
+            # padding = (torch.zeros(1, 1, dtype=torch.long) - 1).to(self.stage_base_model.device)
+            # draft_tokens = torch.cat((draft_tokens, padding), dim=1)
+            draft_tokens = F.pad(draft_tokens, (0, 1), value=-1)
+
+            candidates = draft_tokens[0, retrieve_indices]
+            best_candidate, accept_length, sample_p = evaluate_posterior(
+                logits, candidates, logits_processor
+            )
+            # print(f'accept_length: {accept_length}')
+            accept_length += 1
+
+            # prev_input_len = input_ids.size(-1)
+            # select_indices = retrieve_indices[best_candidate, :accept_length] + prev_input_len
+            # for i in range(1, self.config.world_size):
+            #     comm.sendto(select_indices, i)  # 0 must be received, therefore select_indices[0] is the prev_input_len
+            # input_ids = torch.cat((input_ids, draft_tokens[0, select_indices]), dim=1)
+            # new_token += accept_length
+
+            # token = gen_token(prob=sample_p, logits_processor=logits_processor)
+            # return accept_length, self.config.total_stage*2-1
+            
+        else:
+            past_key_values, past_key_values_data, current_length_data = kv_cache
+            input_tensor, tree_position_ids, tree_mask = comm.recv_appended(device)
+            self.stage_base_model.model.tree_mask = tree_mask
+            if self.is_first_stage:
+                outputs, hidden_state = self(
+                    input_ids=input_tensor,
+                    past_key_values=past_key_values,
+                    position_ids=tree_position_ids,
+                )
+            else:
+                outputs, hidden_state = self(
+                    inputs_embeds=input_tensor,
+                    past_key_values=past_key_values,
+                    position_ids=tree_position_ids,
+                )
+            if self.is_last_stage:
+                comm.sendto(hidden_state, config.next_rank)
+            else:
+                comm.send_appended(hidden_state, tree_position_ids, tree_mask)
+        
+        # [update_inference_inputs]
+        if self.is_draft_stage:
+            candidates = draft_tokens[0, retrieve_indices].to(input_ids.device)
+            update_inputs_params = (
+                self,
+                None, # past_key_values_data
+                None, # current_length_data
+                logits_processor,
+                input_ids,
+                candidates,
+                best_candidate,
+                accept_length,
+                retrieve_indices,
+                # new_token,
+                hidden_state_verified,
+                sample_p,
+            )
+        else:
+            update_inputs_params = (self, past_key_values_data, current_length_data)
+
+        outputs = update_stage_inference_inputs(*update_inputs_params)
+        if self.is_draft_stage:
+            return *outputs, accept_length, self.config.total_stage
+
 
     # inner loop
     def _naive_pipeline(
