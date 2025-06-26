@@ -1,6 +1,4 @@
 from transformers.configuration_utils import PretrainedConfig
-from cmd_util import get_ip_addr
-from network_config import *
 from typing import List
 
 
@@ -231,24 +229,3 @@ class StageEaConfig(PretrainedConfig):
             )
         if rope_scaling_factor is None or not isinstance(rope_scaling_factor, float) or rope_scaling_factor <= 1.0:
             raise ValueError(f"`rope_scaling`'s factor field must be an float > 1, got {rope_scaling_factor}")
-
-    # only necessary for network
-    def update_network_config(self, args):
-        is_distributed = args.distributed
-        network_config = get_network_config(is_distributed, args.use_gpu)
-        self.master_ip = network_config.master_ip
-        if is_distributed:
-            self.ip = get_ip_addr(network_config.interface)
-            rank0_ip = network_config.rank_ip_mapping[0]
-        else:
-            self.ip = '127.0.0.1'
-            rank0_ip = self.ip
-        self.init_method = gen_init_method(rank0_ip, network_config.port)
-
-        self.rank = self.stage  # stage idx as device rank
-        assert self.total_stage == network_config.world_size
-        
-        self.last_rank = self.total_stage - 1 if self.stage == 0 else self.stage - 1
-        self.next_rank = 0 if self.stage == self.total_stage - 1 else self.stage + 1
-        self.is_first_stage = (self.stage == 0)
-        self.is_last_stage = (self.stage == self.total_stage - 1)
