@@ -56,7 +56,7 @@ def main():
     
     stage_model.eval()
     # [update] pipedec
-    assert run_config.pipeline_type in ["naive", "pruned", "continuous", "pipedec"]
+    assert run_config.pipeline_type in ["serial", "naive", "pruned", "continuous", "pipedec"]
     assert run_config.mode in ["eval", "demo"]
 
     # [initialize]

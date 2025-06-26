@@ -43,19 +43,19 @@ class Config:
     else:  # local test
         pipeline_type: str = "continuous"
         
-        warmup = False
+        warmup = True
         warmup_repeat = 10
-        test_repeat = 1
+        test_repeat = 10
         
-        your_message: str = "who are you?"
+        your_message: str = "Hello"
         
         temperature: float = 0.0
     
     
-    log: bool = False
+    log: bool = True
     prof: bool = False
     save_timestamps: bool = False
-    max_new_tokens: int = 128
+    max_new_tokens: int = 256
     
     timeout: int = 15
     
@@ -71,7 +71,7 @@ class Config:
     if model_name == "llama2":
         if hardware == "server":
             base_model_dir: str = f'/home/liux/big_file/pipeline_model/meta-llama/Llama-2-7b-chat-hf/new_stage_model_series_0+8+8+8+8_fp16'
-            EAGLE_model_path: str = "/home/nvidia/LLM/models_hf/yuhuili/EAGLE-llama2-chat-7B"
+            EAGLE_model_path: str = "/home/liux/LLM/models_hf/yuhuili/EAGLE-llama2-chat-7B"
         else:
             base_model_dir: str = f"/home/nvidia/LLM/pipeline_model/meta-llama/Llama-2-7b-chat-hf/new_stage_model_series_0+8+8+8+8_fp16"
             EAGLE_model_path: str = f"/home/nvidia/LLM/models_hf/yuhuili/EAGLE-llama2-chat-7B"
@@ -99,7 +99,7 @@ class Config:
     
     # pipeline config
     if mode == "eval":
-        draft_gen_sort_score: bool = True
+        draft_gen_sort_score: bool = False
         num_stage: int = 5 # only support 5 stage now
         
         # draft config
@@ -121,6 +121,10 @@ class Config:
         
         init_topk_pipedec: int = 16 # only for pipedec
     else:
+        init_total_token: int = 80
+        init_topk: int = 10
+        init_depth: int = 6
+
         if pipeline_type == "naive":
             draft_gen_sort_score: bool = False
             num_stage: int = 5 # 5 or 4
