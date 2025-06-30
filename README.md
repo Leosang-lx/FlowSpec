@@ -186,7 +186,8 @@ number of parameters of the respective models.
 |          |             | **Latency ↓**|**14.84** | **14.58** |**15.38**|**16.86**|**22.24**|**16.43**|**16.72**|         |
 ---
 
-
+## Acknowledgement
+The implementation of Gardener reuses the code from [EAGLE](https://github.com/SafeAILab/EAGLE) and refers to [OPT-Tree](https://github.com/Jikai0Wang/OPT-Tree) and [Jupiter](https://github.com/ysyisyourbrother/Jupiter).
 
 ## Contributing
 coming soon...
