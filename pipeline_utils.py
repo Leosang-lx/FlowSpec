@@ -242,6 +242,38 @@ def pipeline_prefill(
             )
             sub_hidden_state = outputs[0]
             comm.sendto(sub_hidden_state.cpu(), config.next_rank)
+
+def prefill_serial(
+        stage_model,
+        input_ids=None,
+        stage_past_key_values=None,
+        prof=None
+):
+    config = stage_model.config
+    device = stage_model.stage_base_model.device
+    comm = stage_model.comm  # update
+
+    if config.is_draft_stage:
+        comm.sendto(input_ids, config.next_rank)
+        hidden_state = comm.recvfrom(config.last_rank, device=device).to(device)
+        orig = stage_model.stage_base_model.lm_head(hidden_state)
+        return orig, hidden_state
+    
+    if config.is_first_stage:
+        input_ids = comm.recvfrom(config.last_rank, device=device)
+        _, hidden_state = stage_model(
+            input_ids=input_ids,
+            past_key_values=stage_past_key_values,
+        )
+        comm.sendto(hidden_state.cpu(), config.next_rank)
+    else:
+        hidden_state = comm.recvfrom(config.last_rank, device=device)
+        _, hidden_state = stage_model(
+            inputs_embeds=hidden_state,
+            past_key_values=stage_past_key_values,
+        )
+        comm.sendto(hidden_state.cpu(), config.next_rank)
+
             
 def pipeline_prefill_new(
         stage_model,
