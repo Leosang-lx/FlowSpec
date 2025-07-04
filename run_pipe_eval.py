@@ -33,14 +33,16 @@ def run_eval(args):
     rank = int(os.environ['RANK'])
     world_size = int(os.environ['WORLD_SIZE'])
     # device = rank % torch.cuda.device_count()
-    device = 1
+    device = 0
     torch.cuda.set_device(device)
     print(f'rank={rank}, world_size={world_size}, device={device}')
     
     # with prof.profile_context(f"Rank {rank}: loading stage model", device=f"cuda:{device}"):
+    print(f'Load model from {run_config.base_model_dir}...')
+    print(f'Load EAGLE model from {run_config.EAGLE_model_path}...')
     stage_model = StageEaModel.from_pretrained(
-        stage_base_model_path=args.base_model_dir + f"/stage_model_{rank}",
-        ea_model_path=args.EAGLE_model_path if rank == 0 else None,
+        stage_base_model_path=run_config.base_model_dir + f"/stage_model_{rank}",
+        ea_model_path=run_config.EAGLE_model_path if rank == 0 else None,
         torch_dtype=torch.float16,
         low_cpu_mem_usage=True,
         # max_memory={"cpu": "1GB"},
@@ -80,7 +82,9 @@ def run_eval(args):
                 q_turn = q["turns"][k]
                 conv.append_message(conv.roles[0], q_turn)
                 conv.append_message(conv.roles[1], None)
-                prompt = conv.get_prompt() + " "
+                prompt = conv.get_prompt() #
+                if "llama2" in args.model_name:
+                    prompt = prompt + " "
                 input_ids = stage_model.tokenizer([prompt]).input_ids
                 input_ids = torch.as_tensor(input_ids).cuda()
             
@@ -143,32 +147,35 @@ def run_eval(args):
                     cnt = tqdm(range(len(questions)), desc=question_path) if rank == 0 else range(len(questions))
                     new_tokens_list = []
                     wall_time_list = []
+                    idx_list = []
                     
                     for i in cnt:
                         q = questions[i]
                         
                         for j in range(run_config.test_repeat): 
-                            torch.manual_seed(j) 
-                            random.seed(j)
-                            np.random.seed(j)
+                            torch.manual_seed(j)
+                            # random.seed(j) #
+                            # np.random.seed(j) #
                             
                             if rank == 0:
                                 if "llama2" in args.model_name:
                                     conv = get_conversation_template("llama-2-chat")
                                     sys_p = "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."
                                     conv.system_message = sys_p
-                                    conv.stop_token_ids = [2]
+                                    # conv.stop_token_ids = [2] #
                                     
                                 elif "vicuna" in args.model_name:
                                     conv = get_conversation_template("vicuna")
-                                    conv.stop_token_ids = [2]
+                                    # conv.stop_token_ids = [2] #
                             
                             for k in range(len(q["turns"])):
                                 if rank == 0:
                                     q_turn = q["turns"][k]
                                     conv.append_message(conv.roles[0], q_turn)
                                     conv.append_message(conv.roles[1], None)
-                                    prompt = conv.get_prompt() + " "
+                                    prompt = conv.get_prompt() #
+                                    if "llama2" in args.model_name:
+                                        prompt = prompt + " "
                                     input_ids = stage_model.tokenizer([prompt]).input_ids
                                     input_ids = torch.as_tensor(input_ids).cuda()
                                 
@@ -206,7 +213,7 @@ def run_eval(args):
                                         output_ids,
                                         spaces_between_special_tokens=False,
                                     )
-                                    conv.stop_str = "</s>"
+                                    # conv.stop_str = "</s>"
                                     if conv.stop_str and output.find(conv.stop_str) > 0:
                                         output = output[: output.find(conv.stop_str)]
                                     for special_token in stage_model.tokenizer.special_tokens_map.values():
@@ -225,6 +232,8 @@ def run_eval(args):
                                 if rank == 0:
                                     new_tokens_list.append(output_ids.shape[0])
                                     wall_time_list.append(wall_time)
+                                    if run_config.log:
+                                        idx_list.append(idx)
                             
                     dist.barrier()
                     # if rank == 0 or rank == world_size - 1:
@@ -236,6 +245,9 @@ def run_eval(args):
                         avg_latency = sum(wall_time_list) / len(wall_time_list)
                         print(f'temperature: {temperature}, pipeline_type: {pipeline_type}, question_path: {question_path}, question_begin: {run_config.question_begin}, question_end: {run_config.question_end}')
                         print(f'throughput: {throughput}, avg_latency: {avg_latency}')
+                        if run_config.log:
+                            total_rounds = sum(idx_list)
+                            print(f'rounds: {sum(idx_list)}, new_tokens: {sum(new_tokens_list)}, avg_accept_length: {sum(new_tokens_list)/sum(idx_list)}')
                         if run_config.eval_record:
                             with open(record_path, 'a') as f:
                                 f.write(f'temperature: {temperature}, pipeline_type: {pipeline_type}, question_path: {question_path}, question_begin: {run_config.question_begin}, question_end: {run_config.question_end}\n')
@@ -243,6 +255,8 @@ def run_eval(args):
                                 f.write(f'wall_time_list: {wall_time_list}\n')
                                 f.write(f'throughput: {throughput}\n')
                                 f.write(f'avg_latency: {avg_latency}\n')
+                                if run_config.log:
+                                    f.write(f'avg_accept_length: {sum(new_tokens_list)/sum(idx_list)}\n')
                                 f.write(f'---------------------------------------------------------------------------------------------------------\n')
                     dist.barrier()
                     

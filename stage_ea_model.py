@@ -483,7 +483,7 @@ class StageEaModel(nn.Module):
                 # assert accept_length == len(input_ids[0, input_len:]) - new_token, f'accept_length: {accept_length} != len(input_ids[0, input_len:]) - new_token: {len(input_ids[0, input_len:]) - new_token}'
                 new_token += accept_length
                 if log:
-                    print(f'{idx_spec}th round, accept_length: {accept_length} in {turns} turns')
+                    # print(f'{idx_spec}th round, accept_length: {accept_length} in {turns} turns')
                     turns_cnt += turns
 
                 if input_ids is not None and self.tokenizer is not None:
@@ -507,7 +507,7 @@ class StageEaModel(nn.Module):
             if not log:
                 return input_ids
             else:
-                print(f'skip_count: {skip_count}')
+                # print(f'skip_count: {skip_count}')
                 return input_ids, new_token, idx_spec, turns_cnt
             
     def _serial_pipeline(
@@ -809,8 +809,8 @@ class StageEaModel(nn.Module):
                         token = gen_token(prob=sample_p, logits_processor=logits_processor)  # device=cuda
 
                         cur_draft_depth = subseq_ri_cum_depths[0, best_candidate]
-                        if log:
-                            print(f'- {i}th turn, accept_len/local_depth: {accept_length}/{cur_draft_depth}')
+                        # if log:
+                            # print(f'- {i}th turn, accept_len/local_depth: {accept_length}/{cur_draft_depth}')
                             
                         sub_hidden_state = sub_hidden_state[:, retrieve_indices[best_candidate, :accept_length]]
                         
@@ -827,8 +827,8 @@ class StageEaModel(nn.Module):
                                 
                         if truncate:  # start new speculation round
                             new_sampled_token = token.item()
-                            if log:
-                                print(f'- {i}th turn truncate')
+                            # if log:
+                                # print(f'- {i}th turn truncate')
                         else:
                             new_sampled_token = -1
 
@@ -1084,8 +1084,8 @@ class StageEaModel(nn.Module):
                             token = gen_token(prob=sample_p, logits_processor=logits_processor)  # device=cuda
 
                             cur_draft_depth = subseq_ri_cum_depths[0, best_candidate]
-                            if log:
-                                print(f'- {i}th turn, accept_len/local_depth: {accept_length}/{cur_draft_depth}')
+                            # if log:
+                                # print(f'- {i}th turn, accept_len/local_depth: {accept_length}/{cur_draft_depth}')
                                 
                             sub_hidden_state = sub_hidden_state[:, retrieve_indices[best_candidate, :accept_length]]
                         # with prof.time_context(f"Stage {config.stage}: last-stage pruning", cpu=False) if prof is not None else nullcontext():
@@ -1101,8 +1101,8 @@ class StageEaModel(nn.Module):
                                 
                         if truncate:  # start new speculation round
                             new_sampled_token = token.item()
-                            if log:
-                                print(f'- {i}th turn truncate')
+                            # if log:
+                                # print(f'- {i}th turn truncate')
                         else:
                             new_sampled_token = -1
                             
@@ -1403,8 +1403,8 @@ class StageEaModel(nn.Module):
             ####################################
             # recv from last stage
             ####################################
-            if log:
-                print(f'Stage {config.stage} {i}th: recv from last stage...')
+            # if log:
+                # print(f'Stage {config.stage} {i}th: recv from last stage...')
             sub_hidden_state = comm.recvfrom(config.last_rank, device=device)
             if sub_hidden_state.size(-1) == 1 and sub_hidden_state.item() == -1:
                 hs_len = 0
@@ -1415,8 +1415,8 @@ class StageEaModel(nn.Module):
                     tree_position_ids = comm.recvfrom(config.last_rank, device=device)
                     tree_mask = comm.recvfrom(config.last_rank, device=device)
                     assert sub_hidden_state.size(1) == tree_mask.size(-2) == tree_position_ids.size(-1), f'Stage {config.stage} {i}th turn recv pruning info: sub_hidden_state: {sub_hidden_state.shape}, tree_mask: {tree_mask.shape}, tree_position_ids: {tree_position_ids.shape}'
-            if log:
-                print(f'Stage {config.stage} {i}th: recv done!!!')
+            # if log:
+                # print(f'Stage {config.stage} {i}th: recv done!!!')
             
             
             ####################################
@@ -1457,8 +1457,8 @@ class StageEaModel(nn.Module):
                         # print(f'sample Token is ({self.tokenizer.decode(token.item())})')
 
                         cur_draft_depth = subseq_ri_cum_depths[0, best_candidate]
-                        if log:
-                            print(f'- {i}th turn, accept_len/local_depth: {accept_length}/{cur_draft_depth}')
+                        # if log:
+                            # print(f'- {i}th turn, accept_len/local_depth: {accept_length}/{cur_draft_depth}')
 
                         # sub_hidden_state = sub_hidden_state[:, retrieve_indices[best_candidate, :accept_length]]
                         # assert sub_draft_tokens.size(1) == 1, f'sub_draft_tokens.shape: {sub_draft_tokens.shape}'
@@ -1478,8 +1478,8 @@ class StageEaModel(nn.Module):
                                 
                     if truncate:  # start new speculation round
                         new_sampled_token = token.item()
-                        if log:
-                            print(f'- {i}th turn truncate')
+                        # if log:
+                        #     print(f'- {i}th turn truncate')
                     else:
                         new_sampled_token = -1
                         

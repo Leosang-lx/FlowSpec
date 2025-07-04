@@ -8,7 +8,7 @@ import torch
 class Config:
     
     # model to use
-    model_name: str = "llama2-13b" 
+    model_name: str = "vicuna" 
     
     # network config
     hardware: str = "server" # "jetson" or "server"
@@ -20,7 +20,7 @@ class Config:
         delay_ms: float = 0.0 # not supported yet
 
     # run config
-    mode = "demo" # "eval" or "demo"
+    mode = "eval" # "eval" or "demo"
     
     if mode == "eval":  # large scale evaluation
         pipeline_types: List[str] = field(default_factory=lambda: ["naive", "continuous", "pipedec"])
@@ -31,15 +31,15 @@ class Config:
         error_repeat = 1 # for error analysis
         change_seed = False
         
-        dataset_names: List[str] = field(default_factory=lambda: ["mt_bench", "humaneval", "gsm8k", "alpaca", "sum", "qa"])
-        # dataset_names: List[str] = field(default_factory=lambda: ["mt_bench"])
+        # dataset_names: List[str] = field(default_factory=lambda: ["mt_bench", "humaneval", "gsm8k", "alpaca", "sum", "qa"])
+        dataset_names: List[str] = field(default_factory=lambda: ["mt_bench"])
         question_paths: List[str] = field(init=False)
         question_begin: int = 30
         question_end: int = 50
         
         eval_record: bool = True
         
-        temperatures: List[float] = field(default_factory=lambda: [0.0, 1.0])
+        temperatures: List[float] = field(default_factory=lambda: [1.0])
     else:  # local test
         pipeline_type: str = "continuous"
         
