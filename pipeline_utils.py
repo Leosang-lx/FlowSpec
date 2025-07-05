@@ -184,64 +184,108 @@ def pipeline_prefill(
         stage_model,
         input_ids=None,
         stage_past_key_values=None,
+        prof=None
 ):
     config = stage_model.config
-    stage_base_model = stage_model.stage_base_model
-    device = stage_base_model.device
+    device = stage_model.stage_base_model.device
     total_stage = config.total_stage
     comm = stage_model.comm  # update
     
-    if config.is_first_stage:
+    if config.is_draft_stage:
         # todo: split strategy depends on the device performance and the input length
-        if input_ids.size(-1) > 64:  # pipelined prefill, split the input_ids when long enough
-            seq_splits, lens_split = split_sequence_close_equal_len(input_ids, config.n_split)
-            # hidden_state_splits = []  # save the hidden_state for later transmission
+        if input_ids.size(-1) > 64:  # pipelined chunked prefill, split the input_ids when long enough
+            split_cnt = int(np.ceil(input_ids.size(-1) / 60))
+            seq_splits, lens_split = split_sequence_close_equal_len(input_ids, split_cnt)
         else:
-            lens_split = torch.zeros(config.n_split, dtype=torch.long)
-            lens_split[0] = input_ids.size(-1)
-            seq_splits = (input_ids,)
-    # else:
-    #     lens_split = torch.zeros(total_stage, dtype=torch.long)
+            split_cnt = 1
 
-    # dist.broadcast(lens_split, src=1)
-        lens_split = lens_split[lens_split > 0]
+        split_cnt_info = torch.zeros(1, dtype=torch.long)
+        split_cnt_info[0] = split_cnt
+        # send split_cnt to all downstream stages
+        dist.broadcast(split_cnt_info, src=0)
         
-    if config.is_first_stage:
-        comm.sendto(input_ids, dst_rank=0)
-        
-    # [update]: draft stage recv base_hidden_state when prefilling
-    if config.is_draft_stage:  # assume 4 subseqs
-        input_ids = comm.recvfrom(src_rank=1, device=device)
-        # hidden_state_splits = [torch.zeros(input_ids.shape[0], lens_split[i], config.hidden_size, device=device) for i in range(lens_split.size(-1))]
-        hidden_state_splits = []
-        orig = ()
-        for i in range(config.n_split):
-            hidden_state_split = comm.recvfrom(config.last_rank, device=device).to(device)
-            hidden_state_splits.append(hidden_state_split)
-            orig = orig + (stage_base_model.lm_head(hidden_state_split),)
-
-        hidden_state = torch.concat(hidden_state_splits, dim=-2)
-        orig = torch.concat(orig, dim=-2)
-
-        return input_ids, orig, hidden_state
-
-    for i in range(config.n_split):
-        if config.is_first_stage:
-            outputs, sub_hidden_state = stage_model(
-                input_ids=seq_splits[i],
-                past_key_values=stage_past_key_values,
-            )
-            comm.sendto(sub_hidden_state.cpu(), config.next_rank)
+        if split_cnt == 1:
+            comm.sendto(input_ids.cpu(), config.next_rank)
+            hidden_state = comm.recvfrom(config.last_rank, device=device)
+            orig = stage_model.stage_base_model.lm_head(hidden_state)
         else:
-            last_hidden_state = comm.recvfrom(config.last_rank, device=device)
+            for subseq in seq_splits:
+                comm.sendto(subseq.cpu(), config.next_rank)
+                
+            hidden_state_splits = []
+            orig = ()
+            for i in range(split_cnt):
+                with prof.time_context(f"Stage {config.stage}: recv from last stage", cpu=True) if prof is not None else nullcontext():
+                    hidden_state_split = comm.recvfrom(config.last_rank, device=device)
+                hidden_state_splits.append(hidden_state_split)
+                orig = orig + (stage_model.stage_base_model.lm_head(hidden_state_split),)
 
-            # middle stage
-            outputs = stage_base_model.model(
-                inputs_embeds=last_hidden_state,
-                past_key_values=stage_past_key_values,
-            )
-            sub_hidden_state = outputs[0]
-            comm.sendto(sub_hidden_state.cpu(), config.next_rank)
+            hidden_state = torch.concat(hidden_state_splits, dim=-2)
+            orig = torch.concat(orig, dim=-2)
+        return orig, hidden_state
+    
+    split_cnt_info = torch.zeros(1, dtype=torch.long)
+    dist.broadcast(split_cnt_info, src=0)
+    split_cnt = split_cnt_info[0]
+
+    for i in range(split_cnt):
+        with prof.time_context(f"Stage {config.stage}: recv from last stage", cpu=True) if prof is not None else nullcontext():
+            recv_input = comm.recvfrom(config.last_rank, device=device)
+
+        with prof.time_context(f"Stage {config.stage}: prefill forward", cpu=False) if prof is not None else nullcontext():
+            if config.is_first_stage:
+                _, hidden_state = stage_model(
+                    input_ids=recv_input,
+                    past_key_values=stage_past_key_values,
+                )
+            else:
+                _, hidden_state = stage_model(
+                    inputs_embeds=recv_input,
+                    past_key_values=stage_past_key_values,
+                )
+
+        comm.sendto(hidden_state.cpu(), config.next_rank)
+
+    # if config.is_first_stage:
+    #     comm.sendto(input_ids, dst_rank=0)
+
+        
+    # if config.is_first_stage:
+    #     comm.sendto(input_ids, dst_rank=0)
+        
+    # # [update]: draft stage recv base_hidden_state when prefilling
+    # if config.is_draft_stage:  # assume 4 subseqs
+    #     input_ids = comm.recvfrom(src_rank=1, device=device)
+    #     # hidden_state_splits = [torch.zeros(input_ids.shape[0], lens_split[i], config.hidden_size, device=device) for i in range(lens_split.size(-1))]
+    #     hidden_state_splits = []
+    #     orig = ()
+    #     for i in range(config.n_split):
+    #         hidden_state_split = comm.recvfrom(config.last_rank, device=device).to(device)
+    #         hidden_state_splits.append(hidden_state_split)
+    #         orig = orig + (stage_model.stage_base_model.lm_head(hidden_state_split),)
+
+    #     hidden_state = torch.concat(hidden_state_splits, dim=-2)
+    #     orig = torch.concat(orig, dim=-2)
+
+    #     return input_ids, orig, hidden_state
+
+    # for i in range(config.n_split):
+    #     if config.is_first_stage:
+    #         outputs, sub_hidden_state = stage_model(
+    #             input_ids=seq_splits[i],
+    #             past_key_values=stage_past_key_values,
+    #         )
+    #         comm.sendto(sub_hidden_state.cpu(), config.next_rank)
+    #     else:
+    #         last_hidden_state = comm.recvfrom(config.last_rank, device=device)
+
+    #         # middle stage
+    #         outputs = stage_base_model.model(
+    #             inputs_embeds=last_hidden_state,
+    #             past_key_values=stage_past_key_values,
+    #         )
+    #         sub_hidden_state = outputs[0]
+    #         comm.sendto(sub_hidden_state.cpu(), config.next_rank)
 
 def prefill_serial(
         stage_model,
@@ -275,7 +319,7 @@ def prefill_serial(
         comm.sendto(hidden_state.cpu(), config.next_rank)
 
             
-def pipeline_prefill_new(
+def chunked_prefill(
         stage_model,
         input_ids=None,
         stage_past_key_values=None,

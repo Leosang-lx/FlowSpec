@@ -11,7 +11,7 @@ from eagle.utils import *
 from eagle.kv_cache import initialize_past_key_values
 from eagle.cnets import Model
 # from eagle.configs import EConfig
-from stage_modeling_llama import StageLlamaModelForCausalLM
+from model.stage_modeling_llama import StageLlamaModelForCausalLM
 from stage_ea_config import StageEaConfig
 from pipeline_utils import *
 from comm.comm_handler import CommHandler
@@ -433,8 +433,8 @@ class StageEaModel(nn.Module):
             # [update] get input_ids from the first stage
             input_ids = input_ids.clone()
             input_len = input_ids.shape[1]
-            # orig, hidden_state = pipeline_prefill_new(self, input_ids=input_ids, prof=profiler)
-            orig, hidden_state = prefill_serial(self, input_ids=input_ids, prof=profiler)
+            # orig, hidden_state = chunked_prefill(self, input_ids=input_ids, prof=profiler)
+            orig, hidden_state = pipeline_prefill(self, input_ids=input_ids, prof=profiler)
             
             new_token = 0
             token = gen_token(logits=orig[:, -1], logits_processor=logits_processor)
@@ -442,8 +442,8 @@ class StageEaModel(nn.Module):
             skip_count = 0
 
         else:
-            # pipeline_prefill_new(self, stage_past_key_values=past_key_values, prof=profiler)
-            prefill_serial(self, stage_past_key_values=past_key_values, prof=profiler)
+            # chunked_prefill(self, stage_past_key_values=past_key_values, prof=profiler)
+            pipeline_prefill(self, stage_past_key_values=past_key_values, prof=profiler)
         # dist.barrier()
         should_stop = torch.tensor(0, dtype=torch.int32)
 

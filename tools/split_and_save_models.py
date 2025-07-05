@@ -1,6 +1,6 @@
 from stage_ea_model import StageEaModel
 from stage_ea_config import StageEaConfig
-from stage_modeling_llama import StageLlamaModel, StageLlamaModelForCausalLM
+from model.stage_modeling_llama import StageLlamaModel, StageLlamaModelForCausalLM
 from eagle.ea_model import EaModel
 from eagle.cnets import Model
 from transformers import AutoConfig
