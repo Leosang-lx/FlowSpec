@@ -444,26 +444,38 @@ def stage_tree_decoding(
     device = stage_model.stage_base_model.device
     comm = stage_model.comm
     profiler = prof
-    if config.is_draft_stage:
-        tree_pos_ids = tree_pos_ids + input_ids.size(-1)  # add the input length to the tree position ids
-        broadcast_tree_info_global_task = comm.executor.submit(
-            comm.broadcast_tree_info_global,
-            lens_split,
-            tree_pos_ids,
-            tree_mask,
-            appended=False
-        )
-        tree_logits_split = ()
-        hidden_state_splits = []
+    # if config.is_draft_stage:
+    #     tree_pos_ids = tree_pos_ids + input_ids.size(-1)  # add the input length to the tree position ids
+    #     broadcast_tree_info_global_task = comm.executor.submit(
+    #         comm.broadcast_tree_info_global,
+    #         lens_split,
+    #         tree_pos_ids,
+    #         tree_mask,
+    #         appended=False
+    #     )
+    #     tree_logits_split = ()
+    #     hidden_state_splits = []
         
-        for split_draft_seqs in draft_seqs_split:
-            comm.sendto(split_draft_seqs, dst_rank=config.next_rank)
+    #     for split_draft_seqs in draft_seqs_split:
+    #         comm.sendto(split_draft_seqs, dst_rank=config.next_rank)
             
-        broadcast_tree_info_global_task.result()
-    else:
-        lens_split, tree_pos_ids, tree_mask = comm.broadcast_tree_info_global(appended=False)
+    #     broadcast_tree_info_global_task.result()
+    # else:
+    #     lens_split, tree_pos_ids, tree_mask = comm.broadcast_tree_info_global(appended=False)
     
     if stage_model.is_draft_stage:
+        cum_lens_split = torch.cumsum(lens_split, dim=-1)
+        tree_pos_ids = tree_pos_ids + input_ids.size(-1)  # add the input length to the tree position ids
+        tree_pos_ids_split = tree_pos_ids.split(lens_split.tolist(), dim=0)
+        for i in range(lens_split.size(-1)):
+            if i == 0:
+                tree_mask_split = tree_mask[..., :cum_lens_split[i], :cum_lens_split[i]]
+            else:
+                tree_mask_split = tree_mask[..., cum_lens_split[i-1]:cum_lens_split[i], :cum_lens_split[i]].contiguous()
+            comm.send_appended(draft_seqs_split[i], tree_pos_ids_split[i], tree_mask_split)
+        
+        tree_logits_split = ()
+        hidden_state_splits = []
         for i in range(lens_split.size(-1)):
             hidden_state_split = comm.recvfrom(config.last_rank, device=device)
             hidden_state_splits.append(hidden_state_split.to(device))
@@ -473,43 +485,46 @@ def stage_tree_decoding(
         hidden_state = torch.concat(hidden_state_splits, dim=-2)
         return tree_logits, hidden_state
 
-    tree_pos_ids = tree_pos_ids.to(device)
-    tree_mask = tree_mask.to(device)
+    # tree_pos_ids = tree_pos_ids.to(device)
+    # tree_mask = tree_mask.to(device)
 
-    tree_pos_ids_split = tree_pos_ids.split(lens_split.tolist(), dim=0)
-    cum_lens_split = torch.cumsum(lens_split, dim=-1)
+    # tree_pos_ids_split = tree_pos_ids.split(lens_split.tolist(), dim=0)
+    # cum_lens_split = torch.cumsum(lens_split, dim=-1)
     # [step1] end
 
     # [step2] start pipelined verification
-    for i, subseq_len in enumerate(lens_split):
-        if i == 0:
-            # isend_mask.wait()
-            tree_mask_split = tree_mask[..., :cum_lens_split[i], :cum_lens_split[i]]
-        else:
-            tree_mask_split = tree_mask[..., cum_lens_split[i-1]:cum_lens_split[i], :cum_lens_split[i]]
+    # for i, subseq_len in enumerate(lens_split):
+        # if i == 0:
+        #     # isend_mask.wait()
+        #     tree_mask_split = tree_mask[..., :cum_lens_split[i], :cum_lens_split[i]]
+        # else:
+        #     tree_mask_split = tree_mask[..., cum_lens_split[i-1]:cum_lens_split[i], :cum_lens_split[i]]
+
+    for i in range(comm.world_size):
+        subseq, subseq_pos_ids, tree_mask_split = comm.recv_appended(device=device)
         
         # set the tree mask for the current stage
         stage_model.stage_base_model.model.tree_mask = tree_mask_split.contiguous()
-        subseq_pos_ids = tree_pos_ids_split[i]
 
         if config.is_first_stage:
-            subseq_ids = comm.recvfrom(src_rank=config.last_rank, device=device)
             with profiler.time_context(f"Stage {config.stage}: forward", cpu=False) if profiler is not None else nullcontext():
                 outputs, sub_hidden_state = stage_model(
-                    input_ids=subseq_ids,
+                    input_ids=subseq,
                     past_key_values=stage_past_key_values,
                     position_ids=subseq_pos_ids,
                 )
         else:
-            last_hidden_state = comm.recvfrom(config.last_rank, device=device)
+            # last_hidden_state = comm.recvfrom(config.last_rank, device=device)
             with profiler.time_context(f"Stage {config.stage}: forward", cpu=False) if profiler is not None else nullcontext():
                 outputs, sub_hidden_state = stage_model(
-                    inputs_embeds=last_hidden_state,
+                    inputs_embeds=subseq,
                     past_key_values=stage_past_key_values,
                     position_ids=subseq_pos_ids,
                 )
-
-        comm.sendto(sub_hidden_state.cpu(), config.next_rank)
+        if config.is_last_stage:
+            comm.sendto(sub_hidden_state.cpu(), config.next_rank)
+        else:
+            comm.send_appended(sub_hidden_state, subseq_pos_ids, tree_mask_split)
     # [step2] end
 
 def stage_tree_decoding0(
