@@ -8,7 +8,7 @@ import torch
 class Config:
     
     # model to use
-    model_name: str = "vicuna" 
+    model_name: str = "vicuna-13b" 
     
     # network config
     hardware: str = "server" # "jetson" or "server"
@@ -71,10 +71,10 @@ class Config:
     if model_name == "llama2":
         if hardware == "server":
             base_model_dir: str = f'/home/liux/big_file/pipeline_model/meta-llama/Llama-2-7b-chat-hf/new_stage_model_series_0+8+8+8+8_fp16'
-            EAGLE_model_path: str = "/home/liux/LLM/models_hf/yuhuili/EAGLE-llama2-chat-7B"
+            EAGLE_model_path: str = "/home/liux/big_file/yuhuili/EAGLE-llama2-chat-7B"
         else:
             base_model_dir: str = f"/home/nvidia/LLM/pipeline_model/meta-llama/Llama-2-7b-chat-hf/new_stage_model_series_0+8+8+8+8_fp16"
-            EAGLE_model_path: str = f"/home/nvidia/LLM/models_hf/yuhuili/EAGLE-llama2-chat-7B"
+            EAGLE_model_path: str = f"/home/nvidia/big_file/yuhuili/EAGLE-llama2-chat-7B"
     elif model_name == "llama2-13b":
         if hardware == "server":
             base_model_dir: str = '/home/liux/big_file/pipeline_model/meta-llama/Llama-2-13b-chat-hf/new_stage_model_series_0+10+10+10+10_fp16'
@@ -96,6 +96,13 @@ class Config:
         else:
             base_model_dir: str = f"/home/nvidia/LLM/pipeline_model/vicuna/Vicuna-13B-v1.3/new_stage_model_series_0+10+10+10+10_fp16"
             EAGLE_model_path: str = "/home/nvidia/LLM/models_hf/yuhuili/EAGLE-Vicuna-13B-v1.3"
+    elif model_name == 'llama3':
+        if hardware == 'server':
+            base_model_dir: str = '/home/liux/big_file/pipeline_model/meta-llama/Meta-Llama-3-8B-Instruct/new_stage_model_series_0+8+8+8+8_fp16'
+            EAGLE_model_path: str = "/home/liux/big_file/yuhuili/EAGLE-LLaMA3-Instruct-8B"
+        else:
+            base_model_dir: str = '/home/nvidia/LLM/pipeline_model/meta-llama/Meta-Llama-3-8B-Instruct/new_stage_model_series_0+8+8+8+8_fp16'
+            EAGLE_model_path: str = "/home/nvidia/LLM/yuhuili/EAGLE-LLaMA3-Instruct-8B"
     
     # pipeline config
     if mode == "eval":

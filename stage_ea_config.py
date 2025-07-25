@@ -105,6 +105,7 @@ class StageEaConfig(PretrainedConfig):
             has_lm_head=True,
             **kwargs,
     ):
+        max_position_embeddings = 2560
         if ea_config is not None:
             self.vocab_size = ea_config.vocab_size
             self.max_position_embeddings = ea_config.max_position_embeddings
@@ -164,7 +165,7 @@ class StageEaConfig(PretrainedConfig):
                 tie_word_embeddings=tie_word_embeddings,
                 **kwargs,
             )
-
+        self.max_position_embeddings = 2560
         self.base_model_name_or_path = base_model_name_or_path
         self.has_embedding = has_embedding
         self.has_draft_model = has_draft_model
