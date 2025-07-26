@@ -76,16 +76,35 @@ def run_eval(args):
                 conv.system_message = sys_p
             elif "vicuna" in args.model_name:
                 conv = get_conversation_template("vicuna")
-            
+            elif "llama3" in args.model_name:
+                messages = [
+                    {"role": "system",
+                    "content": "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."},
+                ]
+
         for k in range(len(q["turns"])):
             if rank == 0:
                 q_turn = q["turns"][k]
-                conv.append_message(conv.roles[0], q_turn)
-                conv.append_message(conv.roles[1], None)
-                prompt = conv.get_prompt() #
-                if "llama2" in args.model_name:
-                    prompt = prompt + " "
-                input_ids = stage_model.tokenizer([prompt]).input_ids
+                
+                if "llama3" in args.model_name:
+                    messages.append({
+                        "role": "user",
+                        "content": q_turn
+                    })
+                    prompt = stage_model.tokenizer.apply_chat_template(
+                        messages,
+                        tokenize=False,
+                        add_generation_prompt=True,
+                    )
+                    input_ids = stage_model.tokenizer([prompt],add_special_tokens=False,).input_ids
+                else:
+                    conv.append_message(conv.roles[0], q_turn)
+                    conv.append_message(conv.roles[1], None)
+                    prompt = conv.get_prompt() #
+                    if "llama2" in args.model_name:
+                        prompt = prompt + " "
+                    input_ids = stage_model.tokenizer([prompt]).input_ids
+                    
                 input_ids = torch.as_tensor(input_ids).cuda()
             
             outputs = run(
@@ -105,34 +124,63 @@ def run_eval(args):
                     
                 output_ids = output_ids[0][len(input_ids[0]):]
                 
-                if conv.stop_token_ids:
-                    stop_token_ids_index = [
-                        i
-                        for i, id in enumerate(output_ids)
-                        if id in conv.stop_token_ids
+                if "llama3" in args.model_name:
+                    stop_token_ids = [
+                        stage_model.tokenizer.eos_token_id,
+                        stage_model.tokenizer.convert_tokens_to_ids("<|eot_id|>")
                     ]
-                    if len(stop_token_ids_index) > 0:
-                        output_ids = output_ids[: stop_token_ids_index[0]]
+                    if stop_token_ids:
+                        stop_token_ids_index = [
+                            i
+                            for i, id in enumerate(output_ids)
+                            if id in stop_token_ids
+                        ]
+                        if len(stop_token_ids_index) > 0:
+                            output_ids = output_ids[: stop_token_ids_index[0]]
+                else:
+                    if conv.stop_token_ids:
+                        stop_token_ids_index = [
+                            i
+                            for i, id in enumerate(output_ids)
+                            if id in conv.stop_token_ids
+                        ]
+                        if len(stop_token_ids_index) > 0:
+                            output_ids = output_ids[: stop_token_ids_index[0]]
 
                 output = stage_model.tokenizer.decode(
                     output_ids,
                     spaces_between_special_tokens=False,
                 )
-                conv.stop_str = "</s>"
-                if conv.stop_str and output.find(conv.stop_str) > 0:
-                    output = output[: output.find(conv.stop_str)]
-                for special_token in stage_model.tokenizer.special_tokens_map.values():
-                    if isinstance(special_token, list):
-                        for special_tok in special_token:
-                            output = output.replace(special_tok, "")
-                    else:
-                        output = output.replace(special_token, "")
-                output = output.strip()
-
-                if conv.name == "xgen" and output.startswith("Assistant:"):
-                    output = output.replace("Assistant:", "", 1).strip()
+                
+                if "llama3" in args.model_name:
+                    for special_token in stage_model.tokenizer.special_tokens_map.values():
+                        if isinstance(special_token, list):
+                            for special_tok in special_token:
+                                output = output.replace(special_tok, "")
+                        else:
+                            output = output.replace(special_token, "")
+                    output = output.strip()
                     
-                conv.messages[-1][-1] = output
+                    messages.append({
+                        "role": "assistant",
+                        "content": output
+                    })
+                else:
+                    conv.stop_str = "</s>"
+                    if conv.stop_str and output.find(conv.stop_str) > 0:
+                        output = output[: output.find(conv.stop_str)]
+                    for special_token in stage_model.tokenizer.special_tokens_map.values():
+                        if isinstance(special_token, list):
+                            for special_tok in special_token:
+                                output = output.replace(special_tok, "")
+                        else:
+                            output = output.replace(special_token, "")
+                    output = output.strip()
+
+                    if conv.name == "xgen" and output.startswith("Assistant:"):
+                        output = output.replace("Assistant:", "", 1).strip()
+                        
+                    conv.messages[-1][-1] = output
         
     ###########################################
     #test
@@ -167,16 +215,35 @@ def run_eval(args):
                                 elif "vicuna" in args.model_name:
                                     conv = get_conversation_template("vicuna")
                                     # conv.stop_token_ids = [2] #
+                                    
+                                elif "llama3" in args.model_name:
+                                    messages = [
+                                        {"role": "system",
+                                        "content": "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."},
+                                    ]
                             
                             for k in range(len(q["turns"])):
                                 if rank == 0:
                                     q_turn = q["turns"][k]
-                                    conv.append_message(conv.roles[0], q_turn)
-                                    conv.append_message(conv.roles[1], None)
-                                    prompt = conv.get_prompt() #
-                                    if "llama2" in args.model_name:
-                                        prompt = prompt + " "
-                                    input_ids = stage_model.tokenizer([prompt]).input_ids
+                                    if "llama3" in args.model_name:
+                                        messages.append({
+                                            "role": "user",
+                                            "content": q_turn
+                                        })
+                                        prompt = stage_model.tokenizer.apply_chat_template(
+                                            messages,
+                                            tokenize=False,
+                                            add_generation_prompt=True,
+                                        )
+                                        input_ids = stage_model.tokenizer([prompt],add_special_tokens=False,).input_ids
+                                    else:
+                                        conv.append_message(conv.roles[0], q_turn)
+                                        conv.append_message(conv.roles[1], None)
+                                        prompt = conv.get_prompt() #
+                                        if "llama2" in args.model_name:
+                                            prompt = prompt + " "
+                                        input_ids = stage_model.tokenizer([prompt]).input_ids
+                                        
                                     input_ids = torch.as_tensor(input_ids).cuda()
                                 
                                 with prof.profile_context(f"Rank {rank}: {run_config.pipeline_type} pipeline", device=f"cuda:{device}") if run_config.prof else nullcontext():
@@ -200,34 +267,64 @@ def run_eval(args):
                                         output_ids = outputs
                                     
                                     output_ids = output_ids[0][len(input_ids[0]):]
-                                    if conv.stop_token_ids:
-                                        stop_token_ids_index = [
-                                            i
-                                            for i, id in enumerate(output_ids)
-                                            if id in conv.stop_token_ids
+                                    if "llama3" in args.model_name:
+                                        stop_token_ids = [
+                                            stage_model.tokenizer.eos_token_id,
+                                            stage_model.tokenizer.convert_tokens_to_ids("<|eot_id|>")
                                         ]
-                                        if len(stop_token_ids_index) > 0:
-                                            output_ids = output_ids[: stop_token_ids_index[0]]
+                                        if stop_token_ids:
+                                            stop_token_ids_index = [
+                                                i
+                                                for i, id in enumerate(output_ids)
+                                                if id in stop_token_ids
+                                            ]
+                                            if len(stop_token_ids_index) > 0:
+                                                output_ids = output_ids[: stop_token_ids_index[0]]
+                                    else:
+                                        
+                                        if conv.stop_token_ids:
+                                            stop_token_ids_index = [
+                                                i
+                                                for i, id in enumerate(output_ids)
+                                                if id in conv.stop_token_ids
+                                            ]
+                                            if len(stop_token_ids_index) > 0:
+                                                output_ids = output_ids[: stop_token_ids_index[0]]
 
                                     output = stage_model.tokenizer.decode(
                                         output_ids,
                                         spaces_between_special_tokens=False,
                                     )
-                                    # conv.stop_str = "</s>"
-                                    if conv.stop_str and output.find(conv.stop_str) > 0:
-                                        output = output[: output.find(conv.stop_str)]
-                                    for special_token in stage_model.tokenizer.special_tokens_map.values():
-                                        if isinstance(special_token, list):
-                                            for special_tok in special_token:
-                                                output = output.replace(special_tok, "")
-                                        else:
-                                            output = output.replace(special_token, "")
-                                    output = output.strip()
-
-                                    if conv.name == "xgen" and output.startswith("Assistant:"):
-                                        output = output.replace("Assistant:", "", 1).strip()
+                                    
+                                    if "llama3" in args.model_name:
+                                        for special_token in stage_model.tokenizer.special_tokens_map.values():
+                                            if isinstance(special_token, list):
+                                                for special_tok in special_token:
+                                                    output = output.replace(special_tok, "")
+                                            else:
+                                                output = output.replace(special_token, "")
+                                        output = output.strip()
                                         
-                                    conv.messages[-1][-1] = output
+                                        messages.append({
+                                            "role": "assistant",
+                                            "content": output
+                                        })
+                                    else:
+                                            # conv.stop_str = "</s>"
+                                        if conv.stop_str and output.find(conv.stop_str) > 0:
+                                            output = output[: output.find(conv.stop_str)]
+                                        for special_token in stage_model.tokenizer.special_tokens_map.values():
+                                            if isinstance(special_token, list):
+                                                for special_tok in special_token:
+                                                    output = output.replace(special_tok, "")
+                                            else:
+                                                output = output.replace(special_token, "")
+                                        output = output.strip()
+
+                                        if conv.name == "xgen" and output.startswith("Assistant:"):
+                                            output = output.replace("Assistant:", "", 1).strip()
+                                            
+                                        conv.messages[-1][-1] = output
                                 
                                 if rank == 0:
                                     new_tokens_list.append(output_ids.shape[0])

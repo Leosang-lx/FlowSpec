@@ -68,14 +68,32 @@ def main():
             conv = get_conversation_template("llama-2-chat")
             sys_p = "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."
             conv.system_message = sys_p
+        elif "llama3" in run_config.model_name:
+            messages = [
+                {"role": "system",
+                "content": "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."},
+            ]
+            
+        if "llama3" in run_config.model_name:
+            messages.append({
+                "role": "user",
+                "content": your_message
+            })
+            prompt = stage_model.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            input_ids = stage_model.tokenizer([prompt],add_special_tokens=False,).input_ids
+        else:
+            conv.append_message(conv.roles[0], your_message)
+            conv.append_message(conv.roles[1], None)
+            prompt = conv.get_prompt() + " "
+            print('\n=========PROMPT=========')
+            print(prompt)
 
-        conv.append_message(conv.roles[0], your_message)
-        conv.append_message(conv.roles[1], None)
-        prompt = conv.get_prompt() + " "
-        print('\n=========PROMPT=========')
-        print(prompt)
-
-        input_ids = stage_model.tokenizer([prompt]).input_ids
+            input_ids = stage_model.tokenizer([prompt]).input_ids
+        
         input_ids = torch.as_tensor(input_ids).cuda()
 
     # [warm-up]

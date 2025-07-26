@@ -1,3 +1,5 @@
+# run with PYTHONPATH=. python tools/split_and_save_models.py
+
 from stage_ea_model import StageEaModel
 from stage_ea_config import StageEaConfig
 from model.stage_modeling_llama import StageLlamaModel, StageLlamaModelForCausalLM
@@ -16,14 +18,14 @@ import torch.nn as nn
 
 cache_dir = '/home/liux/big_file/'
 
-base_model_path = 'meta-llama/Meta-Llama-3-8B-Instruct'
+base_model_name = 'meta-llama/Meta-Llama-3-8B-Instruct'
 EAGLE_model_path = 'yuhuili/EAGLE-LLaMA3-Instruct-8B'
 # base_model_path = 'lmsys/vicuna-13b-v1.3'
 # EAGLE_model_path = 'yuhuili/EAGLE-Vicuna-13B-v1.3'
 # base_model_path = 'meta-llama/Llama-2-13b-chat-hf'
 # EAGLE_model_path = 'yuhuili/EAGLE-llama2-chat-13B'
 
-base_model_path = cache_dir + base_model_path
+base_model_path = cache_dir + base_model_name
 EAGLE_model_path = cache_dir + EAGLE_model_path
 
 def gen_stage_model_config_series(split_cnt: int, base_ea_config) -> StageEaConfig:
@@ -124,6 +126,6 @@ if __name__ == '__main__':
     
     stage_model_config_series = gen_stage_model_config_series(4, base_ea_config)
     
-    stage_model_save_dir = f'/home/liux/big_file/pipeline_model/{base_model_path}'
+    stage_model_save_dir = f'/home/liux/big_file/pipeline_model/{base_model_name}'
     for config in stage_model_config_series:
         save_stage_dict(model, config, stage_model_save_dir, draft_stage=True)

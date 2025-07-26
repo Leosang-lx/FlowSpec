@@ -8,7 +8,7 @@ import torch
 class Config:
     
     # model to use
-    model_name: str = "vicuna-13b" 
+    model_name: str = "llama3" 
     
     # network config
     hardware: str = "server" # "jetson" or "server"
@@ -85,14 +85,14 @@ class Config:
     elif model_name == "vicuna":
         if hardware == "server":
             base_model_dir: str = f'/home/liux/big_file/pipeline_model/vicuna/Vicuna-7B-v1.3/new_stage_model_series_0+8+8+8+8_fp16'
-            EAGLE_model_path: str = "/home/liux/big_file/vicuna/EAGLE-Vicuna-7B-v1.3"
+            EAGLE_model_path: str = "/home/liux/big_file/yuhuili/EAGLE-Vicuna-7B-v1.3"
         else:
             base_model_dir: str = f"/home/nvidia/LLM/pipeline_model/vicuna/Vicuna-7B-v1.3/new_stage_model_series_0+8+8+8+8_fp16"
             EAGLE_model_path: str = f"/home/nvidia/LLM/vicuna/EAGLE-Vicuna-7B-v1.3"
     elif model_name == "vicuna-13b":
         if hardware == "server":
             base_model_dir: str = f'/home/liux/big_file/pipeline_model/lmsys/vicuna-13b-v1.3/new_stage_model_series_0+10+10+10+10_fp16'
-            EAGLE_model_path: str = "/home/liux/LLM/models_hf/yuhuili/EAGLE-Vicuna-13B-v1.3"
+            EAGLE_model_path: str = "/home/liux/big_file/yuhuili/EAGLE-Vicuna-13B-v1.3"
         else:
             base_model_dir: str = f"/home/nvidia/LLM/pipeline_model/vicuna/Vicuna-13B-v1.3/new_stage_model_series_0+10+10+10+10_fp16"
             EAGLE_model_path: str = "/home/nvidia/LLM/models_hf/yuhuili/EAGLE-Vicuna-13B-v1.3"
