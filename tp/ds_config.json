@@ -1,6 +1,0 @@
-{
-    "tensor_parallel": {
-      "tp_size": 2
-    }
-  }
-  

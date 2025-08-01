@@ -8,7 +8,7 @@ import torch
 class Config:
     
     # model to use
-    model_name: str = "llama3" 
+    model_name: str = "llama2" 
     
     # network config
     hardware: str = "server" # "jetson" or "server"
@@ -23,7 +23,7 @@ class Config:
     mode = "demo" # "eval" or "demo"
     
     if mode == "eval":  # large scale evaluation
-        pipeline_types: List[str] = field(default_factory=lambda: ["continuous"])
+        pipeline_types: List[str] = field(default_factory=lambda: ["naive"])
         
         warmup = True
         if hardware == "server":
@@ -38,7 +38,8 @@ class Config:
         change_seed = False
         
         # dataset_names: List[str] = field(default_factory=lambda: ["mt_bench", "humaneval", "gsm8k", "alpaca", "sum", "qa"])
-        dataset_names: List[str] = field(default_factory=lambda: ["mt_bench"])
+        # dataset_names: List[str] = field(default_factory=lambda: ["mt_bench"])
+        dataset_names: List[str] = field(default_factory=lambda: ["mt_bench", "humaneval", "gsm8k", "alpaca"])
         question_paths: List[str] = field(init=False)
         question_begin: int = 30
         question_end: int = 50
@@ -47,7 +48,7 @@ class Config:
         
         temperatures: List[float] = field(default_factory=lambda: [0.0])
     else:  # local test
-        pipeline_type: str = "pipedec"
+        pipeline_type: str = "tp"
         
         warmup = True
         warmup_repeat = 10
@@ -86,7 +87,7 @@ class Config:
     elif model_name == "llama2-13b":
         if hardware == "server":
             base_model_dir: str = '/home/liux/big_file/pipeline_model/meta-llama/Llama-2-13b-chat-hf/new_stage_model_series_0+10+10+10+10_fp16'
-            EAGLE_model_path: str = "/home/liux/LLM/models_hf/yuhuili/EAGLE-llama2-chat-13B"
+            EAGLE_model_path: str = "/home/liux/big_file/yuhuili/EAGLE-llama2-chat-13B"
         else:
             base_model_dir: str = f'/home/nvidia/LLM/pipeline_model/meta-llama/Llama-2-13b-chat-hf/new_stage_model_series_0+10+10+10+10_fp16'
             EAGLE_model_path: str = "/home/nvidia/LLM/models_hf/yuhuili/EAGLE-llama2-chat-13B"

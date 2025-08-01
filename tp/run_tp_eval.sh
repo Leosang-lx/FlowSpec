@@ -10,8 +10,8 @@
 # wait $FIRST_PID
 # kill -SIGINT "$FIRST_PID" 2>/dev/null || true
 
-torchrun --nnodes=1 --master-port=12345 --nproc_per_node=5 run_pipe_eval.py \
---extra_name turns_0730_vicuna-13b
+torchrun --nnodes=1 --master-port=12345 --nproc_per_node=5 tp/run_tp_eval.py \
+--extra_name turns_0801_llama2-7b
 SECOND_PID=$!
 
 wait $SECOND_PID
