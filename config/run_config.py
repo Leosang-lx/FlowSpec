@@ -51,10 +51,10 @@ class Config:
         pipeline_type: str = "tp"
         
         warmup = True
-        warmup_repeat = 10
-        test_repeat = 5
+        warmup_repeat = 0
+        test_repeat = 1
         
-        your_message: str = "Hello!"
+        your_message: str = "Hello"
         # your_message: str = "Who are you?"
         # your_message: str = "What are some easy and healthy recipes for a quick dinner?"
         
