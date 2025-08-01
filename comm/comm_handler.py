@@ -61,6 +61,9 @@ class CommHandler:
             timeout=timedelta(seconds=self.timeout)
         )
         print(f'Rank {self.rank} initialized')
+    
+    def new_group(self, subgroup_ranks:list[int]):
+        return dist.new_group(ranks = subgroup_ranks, backend=self.backend)
 
     def setup_queue(self):
         """
@@ -229,6 +232,41 @@ class CommHandler:
         except Exception as e:
             print(f"Broadcast recv error in rank {self.rank}: {e}")
             raise e
+    
+    def gather_send(self, data):
+        try:
+            data = data.to(self.comm_device)
+            head = self.get_head(data)
+            dist.gather(head, gather_list=None, dst=0)
+            dist.gather(data, gather_list=None, dst=0)
+        except Exception as e:
+            print(f"Gather send error in rank {self.rank}: {e}")
+            raise e
+
+        
+    def gather_recv(self, world_size, device=None):
+        try:
+            assert self.rank == 0
+            head_list = [torch.zeros(self.max_head_len, dtype=torch.long) for _ in range(world_size)]
+            dist.gather(torch.zeros(self.max_head_len, dtype=torch.long), gather_list=head_list, dst=0)
+            
+            tensor_specs = [self.read_head(head) for head in head_list[1:]]
+            tensor_list = [
+                torch.zeros(shape, dtype=dtype)
+                for dtype, shape in tensor_specs
+            ]
+            tensor_list = [torch.zeros(tensor_specs[-1][1], dtype=tensor_specs[-1][0])] + tensor_list  # add dummy input
+            # print(f"tensor_list: {[t.shape for t in tensor_list]}")
+            dist.gather(torch.zeros(tensor_specs[-1][1], dtype=tensor_specs[-1][0]), gather_list=tensor_list, dst=0)  # dummy input replaced by gather_list
+            tensor_list = tensor_list[1:]
+            if device is not None:
+                tensor_list = [t.to(device) for t in tensor_list]
+            return tensor_list
+        except Exception as e:
+            print(f"Gather recv error in rank {self.rank}: {e}")
+            raise e
+
+
 
     # def broadcast_tree_global(self, lens_split, tree_pos_ids, tree_mask):
     #     try:

@@ -1,4 +1,4 @@
-from stage_ea_model import StageEaModel
+from tp_ea_model import TPEaModel
 from stage_ea_config import StageEaConfig
 from fastchat.model import get_conversation_template
 from fastchat.llm_judge.common import load_questions
@@ -40,8 +40,8 @@ def run_eval(args):
     # with prof.profile_context(f"Rank {rank}: loading stage model", device=f"cuda:{device}"):
     print(f'Load model from {run_config.base_model_dir}...')
     print(f'Load EAGLE model from {run_config.EAGLE_model_path}...')
-    stage_model = StageEaModel.from_pretrained(
-        stage_base_model_path=run_config.base_model_dir + f"/stage_model_{rank}",
+    tp_model = TPEaModel.from_pretrained(
+        tp_base_model_path=f"/home/liux/big_file/tp_model/meta-llama/Llama-2-7b-chat-hf/new_stage_model_series_tp_fp16/stage_model_{rank}",
         ea_model_path=run_config.EAGLE_model_path if rank == 0 else None,
         torch_dtype=torch.float16,
         low_cpu_mem_usage=True,
@@ -51,10 +51,10 @@ def run_eval(args):
         device_map=f"cuda:{device}",
         total_token=run_config.init_total_token,
         depth=run_config.init_depth,
-        top_k=run_config.init_topk if run_config.pipeline_type != "pipedec" else run_config.init_topk_pipedec,
+        top_k=run_config.init_topk,
     )
     
-    stage_model.eval()
+    tp_model.eval()
 
     # assert run_config.pipeline_type in ["naive", "pruned", "continuous", "pipedec"]
     # assert run_config.mode in ["eval", "demo"]
@@ -91,24 +91,24 @@ def run_eval(args):
                         "role": "user",
                         "content": q_turn
                     })
-                    prompt = stage_model.tokenizer.apply_chat_template(
+                    prompt = tp_model.tokenizer.apply_chat_template(
                         messages,
                         tokenize=False,
                         add_generation_prompt=True,
                     )
-                    input_ids = stage_model.tokenizer([prompt],add_special_tokens=False,).input_ids
+                    input_ids = tp_model.tokenizer([prompt],add_special_tokens=False,).input_ids
                 else:
                     conv.append_message(conv.roles[0], q_turn)
                     conv.append_message(conv.roles[1], None)
                     prompt = conv.get_prompt() #
                     if "llama2" in args.model_name:
                         prompt = prompt + " "
-                    input_ids = stage_model.tokenizer([prompt]).input_ids
+                    input_ids = tp_model.tokenizer([prompt]).input_ids
                     
                 input_ids = torch.as_tensor(input_ids).cuda()
             
             outputs = run(
-                stage_model, 
+                tp_model, 
                 input_ids if rank == 0 else None, 
                 run_config.temperatures[0],
                 run_config.pipeline_types[0],
@@ -126,8 +126,8 @@ def run_eval(args):
                 
                 if "llama3" in args.model_name:
                     stop_token_ids = [
-                        stage_model.tokenizer.eos_token_id,
-                        stage_model.tokenizer.convert_tokens_to_ids("<|eot_id|>")
+                        tp_model.tokenizer.eos_token_id,
+                        tp_model.tokenizer.convert_tokens_to_ids("<|eot_id|>")
                     ]
                     if stop_token_ids:
                         stop_token_ids_index = [
@@ -147,13 +147,13 @@ def run_eval(args):
                         if len(stop_token_ids_index) > 0:
                             output_ids = output_ids[: stop_token_ids_index[0]]
 
-                output = stage_model.tokenizer.decode(
+                output = tp_model.tokenizer.decode(
                     output_ids,
                     spaces_between_special_tokens=False,
                 )
                 
                 if "llama3" in args.model_name:
-                    for special_token in stage_model.tokenizer.special_tokens_map.values():
+                    for special_token in tp_model.tokenizer.special_tokens_map.values():
                         if isinstance(special_token, list):
                             for special_tok in special_token:
                                 output = output.replace(special_tok, "")
@@ -169,7 +169,7 @@ def run_eval(args):
                     conv.stop_str = "</s>"
                     if conv.stop_str and output.find(conv.stop_str) > 0:
                         output = output[: output.find(conv.stop_str)]
-                    for special_token in stage_model.tokenizer.special_tokens_map.values():
+                    for special_token in tp_model.tokenizer.special_tokens_map.values():
                         if isinstance(special_token, list):
                             for special_tok in special_token:
                                 output = output.replace(special_tok, "")
@@ -231,26 +231,26 @@ def run_eval(args):
                                             "role": "user",
                                             "content": q_turn
                                         })
-                                        prompt = stage_model.tokenizer.apply_chat_template(
+                                        prompt = tp_model.tokenizer.apply_chat_template(
                                             messages,
                                             tokenize=False,
                                             add_generation_prompt=True,
                                         )
-                                        input_ids = stage_model.tokenizer([prompt],add_special_tokens=False,).input_ids
+                                        input_ids = tp_model.tokenizer([prompt],add_special_tokens=False,).input_ids
                                     else:
                                         conv.append_message(conv.roles[0], q_turn)
                                         conv.append_message(conv.roles[1], None)
                                         prompt = conv.get_prompt() #
                                         if "llama2" in args.model_name:
                                             prompt = prompt + " "
-                                        input_ids = stage_model.tokenizer([prompt]).input_ids
+                                        input_ids = tp_model.tokenizer([prompt]).input_ids
                                         
                                     input_ids = torch.as_tensor(input_ids).cuda()
                                 
                                 with prof.profile_context(f"Rank {rank}: {run_config.pipeline_type} pipeline", device=f"cuda:{device}") if run_config.prof else nullcontext():
                                     start_time = time.time()
                                     outputs = run(
-                                        stage_model, 
+                                        tp_model, 
                                         input_ids if rank == 0 else None, 
                                         temperature,
                                         pipeline_type,
@@ -270,8 +270,8 @@ def run_eval(args):
                                     output_ids = output_ids[0][len(input_ids[0]):]
                                     if "llama3" in args.model_name:
                                         stop_token_ids = [
-                                            stage_model.tokenizer.eos_token_id,
-                                            stage_model.tokenizer.convert_tokens_to_ids("<|eot_id|>")
+                                            tp_model.tokenizer.eos_token_id,
+                                            tp_model.tokenizer.convert_tokens_to_ids("<|eot_id|>")
                                         ]
                                         if stop_token_ids:
                                             stop_token_ids_index = [
@@ -292,13 +292,13 @@ def run_eval(args):
                                             if len(stop_token_ids_index) > 0:
                                                 output_ids = output_ids[: stop_token_ids_index[0]]
 
-                                    output = stage_model.tokenizer.decode(
+                                    output = tp_model.tokenizer.decode(
                                         output_ids,
                                         spaces_between_special_tokens=False,
                                     )
                                     
                                     if "llama3" in args.model_name:
-                                        for special_token in stage_model.tokenizer.special_tokens_map.values():
+                                        for special_token in tp_model.tokenizer.special_tokens_map.values():
                                             if isinstance(special_token, list):
                                                 for special_tok in special_token:
                                                     output = output.replace(special_tok, "")
@@ -314,7 +314,7 @@ def run_eval(args):
                                             # conv.stop_str = "</s>"
                                         if conv.stop_str and output.find(conv.stop_str) > 0:
                                             output = output[: output.find(conv.stop_str)]
-                                        for special_token in stage_model.tokenizer.special_tokens_map.values():
+                                        for special_token in tp_model.tokenizer.special_tokens_map.values():
                                             if isinstance(special_token, list):
                                                 for special_tok in special_token:
                                                     output = output.replace(special_tok, "")
@@ -363,22 +363,21 @@ def run_eval(args):
                     dist.barrier()
                     
                 # dist.barrier()
-    if hasattr(stage_model, "comm"):
-        stage_model.comm.stop()
+    if hasattr(tp_model, "comm"):
+        tp_model.comm.stop()
     dist.destroy_process_group()
     
     # reset traffic
     if run_config.hardware == "jetson" and run_config.set_network:
-        stage_model.comm.reset_traffic()
+        tp_model.comm.reset_traffic()
     
 
-def run(stage_model, input_ids, temperature, pipeline_type, log=False, profiler=None):
-    outputs = stage_model.stage_generate(
+def run(tp_model, input_ids, temperature, pipeline_type, log=False, profiler=None):
+    outputs = tp_model.tp_generate(
         input_ids=input_ids,
         temperature=temperature,
         max_new_tokens=run_config.max_new_tokens,
         log=log,
-        pipeline_type=pipeline_type,
         profiler=profiler,
     )
     if dist.get_rank() == 0:
