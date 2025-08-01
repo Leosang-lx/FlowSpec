@@ -20,13 +20,19 @@ class Config:
         delay_ms: float = 0.0 # not supported yet
 
     # run config
-    mode = "eval" # "eval" or "demo"
+    mode = "demo" # "eval" or "demo"
     
     if mode == "eval":  # large scale evaluation
-        pipeline_types: List[str] = field(default_factory=lambda: ["naive", "continuous", "pipedec"])
+        pipeline_types: List[str] = field(default_factory=lambda: ["continuous"])
         
         warmup = True
-        warmup_repeat = 5
+        if hardware == "server":
+            if '13b' not in model_name:
+                warmup_repeat = 10
+            else:
+                warmup_repeat = 5
+        else:
+            warmup_repeat = 3
         test_repeat = 1 # this refer to num of choices in the eval set
         error_repeat = 1 # for error analysis
         change_seed = False
@@ -39,25 +45,27 @@ class Config:
         
         eval_record: bool = True
         
-        temperatures: List[float] = field(default_factory=lambda: [1.0])
+        temperatures: List[float] = field(default_factory=lambda: [0.0])
     else:  # local test
-        pipeline_type: str = "continuous"
+        pipeline_type: str = "pipedec"
         
         warmup = True
         warmup_repeat = 10
-        test_repeat = 10
+        test_repeat = 5
         
-        your_message: str = "Hello"
+        your_message: str = "Hello!"
+        # your_message: str = "Who are you?"
+        # your_message: str = "What are some easy and healthy recipes for a quick dinner?"
         
         temperature: float = 0.0
     
     
     log: bool = True
-    prof: bool = False
-    save_timestamps: bool = False
+    prof: bool = True
+    save_timestamps: bool = True
     max_new_tokens: int = 256
     
-    timeout: int = 15
+    timeout: int = 20
     
     quant = False
     quant_config = BitsAndBytesConfig(  # Fastest parameters with 4-bit quantization
@@ -106,7 +114,7 @@ class Config:
     
     # pipeline config
     if mode == "eval":
-        draft_gen_sort_score: bool = False
+        draft_gen_sort_score: bool = True
         num_stage: int = 5 # only support 5 stage now
         
         # draft config

@@ -11,7 +11,7 @@
 # kill -SIGINT "$FIRST_PID" 2>/dev/null || true
 
 torchrun --nnodes=1 --master-port=12345 --nproc_per_node=5 run_pipe_eval.py \
---extra_name new_0705
+--extra_name 0728_fp16
 SECOND_PID=$!
 
 wait $SECOND_PID

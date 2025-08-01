@@ -103,16 +103,12 @@ class StageEaModel(nn.Module):
     ):  
         model_config = StageEaConfig.from_pretrained(stage_base_model_path)
         assert Type == 'LLaMA'  # only support LLaMA for now
+
+        device = torch.device(kwargs['device_map'])
+        dtype = kwargs['torch_dtype']
+        # print(f"base_model dtype: {dtype}")
         
-        stage_base_model = StageLlamaModelForCausalLM.from_pretrained(
-                stage_base_model_path, **kwargs
-            )
-        # if model_config.has_lm_head:
-        #     print(f"stage_base_model.lm_head.weight.device={stage_base_model.lm_head.weight.device}")
-        # Type = AutoConfig.from_pretrained(stage_base_model_path).architectures[0]
-        if model_config.is_first_stage and total_token == -1:
-            # print(f"length_sweep(stage_base_model) * model_config.total_stage={length_sweep(stage_base_model) * model_config.total_stage}")
-            total_token = length_sweep(stage_base_model) * model_config.total_stage
+        # [UPDATE NEW]: load draft model first to avoid OOM
         # [MODIFIED] load draft model when config.has_draft_model==True
         if model_config.has_draft_model:   
             assert ea_model_path is not None
@@ -124,14 +120,14 @@ class StageEaModel(nn.Module):
                 if not os.path.exists(load_model_path):
                     load_model_path = hf_hub_download(ea_model_path, "pytorch_model.bin")
                 ea_layer_state_dict = torch.load(load_model_path,
-                                                map_location=stage_base_model.device)
+                                                map_location=device)
             except:
                 from safetensors.torch import load_file
                 load_model_path = os.path.join(ea_model_path, "model.safetensors")
                 if not os.path.exists(load_model_path):
                     load_model_path = hf_hub_download(ea_model_path, "model.safetensors")
                 ea_layer_state_dict = load_file(load_model_path,
-                                                device=stage_base_model.device)
+                                                device=device)
                 
             # [MODIFIED] load ea_draft_model in from_pretrained()
             ea_config = StageEaConfig.from_pretrained(config_path)
@@ -148,27 +144,38 @@ class StageEaModel(nn.Module):
             low_memory = False
 
             # device = stage_base_model.model.layers[-1].self_attn.q_proj.weight.device
-            device = stage_base_model.lm_head.weight.device
-            # print(f"stage_base_model.lm_head.weight.device={stage_base_model.lm_head.weight.device}")
-            # print(f"device={device}")
-            if device != stage_base_model.lm_head.weight.device:
-                ea_layer.diff_device = True
-                if not low_memory:
-                    ea_layer.headweight = stage_base_model.lm_head.weight.clone().to(device)
-                else:
-                    ea_layer.layer_device = device
+            # device = stage_base_model.lm_head.weight.device
+            # # print(f"stage_base_model.lm_head.weight.device={stage_base_model.lm_head.weight.device}")
+            # # print(f"device={device}")
+            # if device != stage_base_model.lm_head.weight.device:
+            #     ea_layer.diff_device = True
+            #     if not low_memory:
+            #         ea_layer.headweight = stage_base_model.lm_head.weight.clone().to(device)
+            #     else:
+            #         ea_layer.layer_device = device
 
-            else:
-                ea_layer.diff_device = False
+            # else:
+            ea_layer.diff_device = False
             ea_layer.load_state_dict(ea_layer_state_dict, strict=True)
             
             del ea_layer_state_dict, ea_config, con
             torch.cuda.empty_cache()
             
-            ea_layer.to(stage_base_model.dtype).to(device)
+            ea_layer.to(dtype).to(device)
             # print(f"ea_layer.embed_tokens.weight.device={ea_layer.embed_tokens.weight.device}")
         else:
             ea_layer = None
+
+
+        stage_base_model = StageLlamaModelForCausalLM.from_pretrained(
+                stage_base_model_path, **kwargs
+            )
+        # if model_config.has_lm_head:
+        #     print(f"stage_base_model.lm_head.weight.device={stage_base_model.lm_head.weight.device}")
+        # Type = AutoConfig.from_pretrained(stage_base_model_path).architectures[0]
+        if model_config.is_first_stage and total_token == -1:
+            # print(f"length_sweep(stage_base_model) * model_config.total_stage={length_sweep(stage_base_model) * model_config.total_stage}")
+            total_token = length_sweep(stage_base_model) * model_config.total_stage
 
         stage_model = cls(
             stage_base_model,
