@@ -38,6 +38,7 @@ from tp.tp_layers import ColumnParallelLinear, RowParallelLinear
 import torch.distributed as dist
 import math
 import torch.nn.functional as F
+from transformers.activations import ACT2FN
 
 logger = logging.get_logger(__name__)
 
@@ -257,7 +258,91 @@ class TPLlamaAttention(nn.Module):
             attn_weights = None
 
         return attn_output, attn_weights, past_key_value
-    
+
+class TPLlamaMLP(nn.Module):
+    """
+    LlamaMLP is a multi-layer perceptron module used in the Llama model.
+
+    Args:
+        config: The configuration for the MLP.
+
+    Attributes:
+        pretraining_tp (int): The pretraining time periods.
+        hidden_size (int): The size of the hidden layer.
+        intermediate_size (int): The size of the intermediate layer.
+        gate_proj (nn.Linear): The linear projection for gating.
+        up_proj (nn.Linear): The linear projection for the up projection.
+        down_proj (nn.Linear): The linear projection for the down projection.
+        act_fn: The activation function.
+
+    """
+
+    def __init__(self, config):
+        super().__init__()
+        self.pretraining_tp = config.pretraining_tp
+        self.hidden_size = config.hidden_size
+        self.intermediate_size = config.intermediate_size // 4
+        self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
+        self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
+        self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
+        self.act_fn = ACT2FN[config.hidden_act]
+
+    def forward(self, x):
+        """
+        Forward pass of the MLP.
+
+        Args:
+            x: Input tensor.
+
+        Returns:
+            torch.Tensor: Output tensor.
+        """
+        if self.pretraining_tp > 1:
+            slice = self.intermediate_size // self.pretraining_tp
+            gate_proj_slices = self.gate_proj.weight.split(slice, dim=0)
+            up_proj_slices = self.up_proj.weight.split(slice, dim=0)
+            down_proj_slices = self.down_proj.weight.split(slice, dim=1)
+
+            gate_proj = torch.cat(
+                [F.linear(x, gate_proj_slices[i]) for i in range(self.pretraining_tp)],
+                dim=-1,
+            )
+            up_proj = torch.cat(
+                [F.linear(x, up_proj_slices[i]) for i in range(self.pretraining_tp)],
+                dim=-1,
+            )
+
+            intermediate_states = (self.act_fn(gate_proj) * up_proj).split(slice, dim=2)
+            down_proj = [
+                F.linear(intermediate_states[i], down_proj_slices[i])
+                for i in range(self.pretraining_tp)
+            ]
+            down_proj = sum(down_proj)
+        else:
+            down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+
+        return down_proj
+
+
+def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
+    """
+    Repeat key and value tensors n times along the specified dimension.
+
+    Args:
+        hidden_states (torch.Tensor): Input tensor with shape (batch, num_key_value_heads, seqlen, head_dim).
+        n_rep (int): Number of times to repeat.
+
+    Returns:
+        torch.Tensor: Repeated tensor with shape (batch, num_key_value_heads * n_rep, seqlen, head_dim).
+    """
+    batch, num_key_value_heads, slen, head_dim = hidden_states.shape
+    if n_rep == 1:
+        return hidden_states
+    hidden_states = hidden_states[:, :, None, :, :].expand(
+        batch, num_key_value_heads, n_rep, slen, head_dim
+    )
+    return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
+
 class TPLlamaDecoderLayer(nn.Module):
     """
     LlamaDecoderLayer represents a single layer of the Llama decoder.
@@ -277,7 +362,7 @@ class TPLlamaDecoderLayer(nn.Module):
         super().__init__()
         self.hidden_size = config.hidden_size
         self.self_attn = TPLlamaAttention(config=config)
-        self.mlp = LlamaMLP(config)
+        self.mlp = TPLlamaMLP(config)
         self.input_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = LlamaRMSNorm(
             config.hidden_size, eps=config.rms_norm_eps

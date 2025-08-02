@@ -13,7 +13,8 @@ class ColumnParallelLinear(nn.Module):
 
         assert out_features % tp_size == 0, "out_features must be divisible by tp_size"
         # print(f'out_features: {out_features}, tp_size: {tp_size}')
-        self.local_out_features = out_features // tp_size
+        # self.local_out_features = out_features // tp_size
+        self.local_out_features = out_features
 
         self.weight = nn.Parameter(torch.empty(self.local_out_features, in_features))
         self.bias = nn.Parameter(torch.empty(self.local_out_features)) if bias else None
@@ -50,7 +51,8 @@ class RowParallelLinear(nn.Module):
         self.tp_size = tp_size
 
         assert in_features % tp_size == 0, "in_features must be divisible by tp_size"
-        self.local_in_features = in_features // tp_size
+        # self.local_in_features = in_features // tp_size
+        self.local_in_features = in_features
 
         self.weight = nn.Parameter(torch.empty(out_features, self.local_in_features))
         self.bias = nn.Parameter(torch.empty(out_features)) if bias else None
