@@ -16,7 +16,7 @@
 
 """ PyTorch LLaMA model."""
 from typing import Optional, Tuple, Union
-
+from contextlib import nullcontext
 import torch
 import torch.utils.checkpoint
 from torch import nn
@@ -377,6 +377,7 @@ class TPLlamaDecoderLayer(nn.Module):
             output_attentions: Optional[bool] = False,
             use_cache: Optional[bool] = False,
             tp_group: Optional[dist.ProcessGroup] = None,
+            prof=None,
     ) -> Tuple[
         torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]
     ]:
@@ -415,7 +416,8 @@ class TPLlamaDecoderLayer(nn.Module):
             output_attentions=output_attentions,
             use_cache=use_cache,
         )
-        dist.all_reduce(hidden_states, op=dist.ReduceOp.SUM, group=tp_group)
+        with prof.profile_context(f"Rank {dist.get_rank()}: all_reduce", device="cpu") if prof else nullcontext():
+            dist.all_reduce(hidden_states, op=dist.ReduceOp.SUM, group=tp_group)
         hidden_states = residual + hidden_states
         
 
@@ -423,7 +425,8 @@ class TPLlamaDecoderLayer(nn.Module):
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
-        dist.all_reduce(hidden_states, op=dist.ReduceOp.SUM, group=tp_group)
+        with prof.profile_context(f"Rank {dist.get_rank()}: all_reduce", device="cpu") if prof else nullcontext():
+            dist.all_reduce(hidden_states, op=dist.ReduceOp.SUM, group=tp_group)
         hidden_states = residual + hidden_states
         
         outputs = (hidden_states,)
@@ -517,6 +520,7 @@ class TPLlamaModel(LlamaPreTrainedModel):
         output_hidden_states=False,
         return_dict=True,
         tp_group=None,
+        prof=None,
     ):  
         output_attentions = (
             output_attentions
@@ -576,7 +580,8 @@ class TPLlamaModel(LlamaPreTrainedModel):
             # print(f'rank: {self.tp_rank} inputs_embeds: {inputs_embeds}')
             inputs_embeds[input_mask, :] = 0.0
             # print(f'rank: {self.tp_rank} after masked inputs_embeds: {inputs_embeds}')
-            dist.all_reduce(inputs_embeds, op=dist.ReduceOp.SUM, group=tp_group)
+            with prof.profile_context(f"Rank {dist.get_rank()}: all_reduce", device="cpu") if prof else nullcontext():
+                dist.all_reduce(inputs_embeds, op=dist.ReduceOp.SUM, group=tp_group)
         
         if attention_mask is None:
             attention_mask = torch.ones(
@@ -650,6 +655,7 @@ class TPLlamaModel(LlamaPreTrainedModel):
                 output_attentions=output_attentions,
                 use_cache=use_cache,
                 tp_group=tp_group,
+                prof=prof,
             )
                 
             hidden_states = layer_outputs[0]
@@ -705,6 +711,7 @@ class TPLlamaForCausalLM(LlamaPreTrainedModel):
         output_hidden_states=False,
         return_dict=True,
         tp_group=None,
+        prof=None,
     ):
         r"""
         Args:
@@ -756,6 +763,7 @@ class TPLlamaForCausalLM(LlamaPreTrainedModel):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
             tp_group=tp_group,
+            prof=prof,
         )
 
         # logits = self.lm_head(outputs.last_hidden_state)

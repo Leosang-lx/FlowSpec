@@ -131,14 +131,16 @@ class TPEaModel(nn.Module):
                 position_ids=None, 
                 past_key_values=None, 
                 output_orig=False,
+                tp_group=None,
                 prof=None,
-                tp_group=None):
+    ):
         outputs = self.tp_base_model(
             input_ids=input_ids,
             attention_mask=attention_mask,
             position_ids=position_ids,
             past_key_values=past_key_values,
             tp_group=tp_group,
+            prof=prof,
         )
         
         hidden_states = outputs[0]
@@ -267,6 +269,7 @@ class TPEaModel(nn.Module):
                     past_key_values=past_key_values,
                     position_ids=tree_position_ids,
                     tp_group=self.tp_group,
+                    prof=profiler,
                 )
                 # send to draft stage
                 # print(f'rank: {config.stage} was at barrier at idx_spec: {idx_spec}')
@@ -394,7 +397,8 @@ def tp_prefill(
         # print(f"rank: {config.stage} orig: {orig}")
         return orig, hidden_state
     else:
-        input_ids = comm.broadcast_recv(src_rank=0).to(device)
+        with prof.profile_context(f"Rank {config.stage}: broadcast_recv", device="cpu") if prof else nullcontext():
+            input_ids = comm.broadcast_recv(src_rank=0).to(device)
         # print(f'rank: {config.stage} input_ids.shape: {input_ids.shape}')
         _, hidden_state = tp_model(
             input_ids=input_ids,

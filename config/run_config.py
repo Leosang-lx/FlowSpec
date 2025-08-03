@@ -63,7 +63,7 @@ class Config:
     
     log: bool = True
     prof: bool = True
-    save_timestamps: bool = True
+    save_timestamps: bool = False
     max_new_tokens: int = 256
     
     timeout: int = 20
