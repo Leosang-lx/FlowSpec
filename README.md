@@ -2,9 +2,10 @@
 This repository is the official implementation of _FlowSpec: Continuous Pipelined Speculative Decoding for Efficient Distributed LLM Inference_
 
 ## Brief Introduction
-In this work, we propose a pipeline-parallel tree-based speculative decoding framework for distributed inference, called **Efficient**, to reduce the inference latency with sparse requests. 
+In this work, we propose a continuous pipeline-parallel tree-based speculative decoding framework for distributed inference, called **FlowSpec**, to reduce the inference latency with sparse requests. 
 Our framework incorporates a lightweight draft model for token generation and the base LLM for pipeline-parallel verification, which enables the output of multiple tokens in a single forward propagation and hence mitigates the sparse request issue. 
 
+![Workflow](figs/workflow.png)
 ## Requirements
 
 ### Basic information
@@ -95,11 +96,11 @@ bash run_jetson.sh
 
 ## Evaluation
 
-To start large scale evaluation, run `run_pipe_eval.sh` or `run_jetson_eval.sh` for 7B model for local and distributed scenarios, respectively. 
+To start large scale evaluation, run `run_pipe_eval.sh` or `scripts/run_jetson_eval.sh` for 7B model for local and distributed scenarios, respectively. Set the model configuration via config/run_config.py.
 
 Set `quant` in `run_config.py` to choose the quantization method, if needed.
 
-**7B model evaluation**
+**model evaluation**
 ``` shell
 # run
 bash run_eval.sh
@@ -107,14 +108,22 @@ bash run_eval.sh
 bash run_jetson_eval.sh
 ```
 
-**13B model evaluation (Quantization is recommended)**
+<!-- **13B model evaluation (Quantization is recommended)**
 ``` shell
 # run
 bash run_eval_13B.sh
 # or
 bash run_jetson_eval_13B.sh
-```
+``` -->
+## TP
 
+For TP evaluation, refer to the tp dir, whose constructure is similar with the main directory. The pipeline type should be "tp" before.
+``` shell
+# run
+PYTHONPATH=. bash run_tp.sh
+# eval
+PYTHONPATH=. bash run_tp_eval.sh
+```
 ## Pre-trained Models
 
 We use the draft model weights provided by [EAGLE](https://github.com/SafeAILab/EAGLE/tree/main) for evaluation.
@@ -132,7 +141,7 @@ sampling). We select 20 samples for each dataset and limit the length of the gen
 128. V and L2 are short for LLaMA2-Chat and Vicuna-v1.3, respectively. 7B and 13B denote the
 number of parameters of the respective models.
 
-| Model    | Method      | Metric       | MT-bench | HumanEval | GSM8K | Alpaca | CNN/DM | Natural Ques. | Mean  | SR↑     |
+<!-- | Model    | Method      | Metric       | MT-bench | HumanEval | GSM8K | Alpaca | CNN/DM | Natural Ques. | Mean  | SR↑     |
 |----------|-------------|--------------|---------:|----------:|------:|-------:|-------:|--------------:|------:|---------|
 | **Temperature = 0** |  |  |  |  |  |  |  |  |  |  |
 | V 13B    | Naive PP    | ξ ↑          |     1.58 |      1.56 |  1.42 |   1.25 |   1.15 |         1.03 | 1.33  | 1.00×   |
@@ -159,8 +168,9 @@ number of parameters of the respective models.
 |          | **FlowSpec**| **ξ ↑**      | **2.32** |  **2.63** |  **2.22**|**2.04**|**1.72**|**1.99**|**2.15**|**1.71×**|
 | L2 7B    | Naive PP    | ξ ↑          |     6.49 |      6.64 |  6.10 |   5.90 |   4.50 |         5.24 | 5.81  | 1.00×   |
 |          | PipeDec     | ξ ↑          |     7.30 |      7.17 |  7.36 |   7.22 |   6.13 |         6.95 | 7.02  | 1.20×   |
-|          | **FlowSpec**| **ξ ↑**      | **8.53** |  **8.90** |**8.37**|**8.01**|**6.14**|**7.31**|**7.88**|**1.36×**|
----
+|          | **FlowSpec**| **ξ ↑**      | **8.53** |  **8.90** |**8.37**|**8.01**|**6.14**|**7.31**|**7.88**|**1.36×**| -->
+![Main Result](figs/main_result.png)
+
 
 ## Acknowledgement
 The implementation of FlowSpec reuses the code from [EAGLE](https://github.com/SafeAILab/EAGLE) and refers to [OPT-Tree](https://github.com/Jikai0Wang/OPT-Tree) and [Jupiter](https://github.com/ysyisyourbrother/Jupiter).
