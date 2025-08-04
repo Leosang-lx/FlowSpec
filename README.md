@@ -105,7 +105,7 @@ Set `quant` in `run_config.py` to choose the quantization method, if needed.
 # run
 bash run_eval.sh
 # or
-bash run_jetson_eval.sh
+PYTHONPATH=. scripts/bash run_jetson_eval.sh
 ```
 
 <!-- **13B model evaluation (Quantization is recommended)**
@@ -120,9 +120,9 @@ bash run_jetson_eval_13B.sh
 For TP evaluation, refer to the tp dir, whose constructure is similar with the main directory. The pipeline type should be "tp" before.
 ``` shell
 # run
-PYTHONPATH=. bash run_tp.sh
+PYTHONPATH=. bash tp/run_tp.sh
 # eval
-PYTHONPATH=. bash run_tp_eval.sh
+PYTHONPATH=. bash tp/run_tp_eval.sh
 ```
 ## Pre-trained Models
 
