@@ -10,8 +10,8 @@ Pipeline/test.py
 Pipeline/pipeinfer/
 Pipeline/pipeinfer/pipeinfer.py
 *.txt
-!Pipeline/requirements.txt
-!Pipeline/requirements_jetson.txt
+!requirements.txt
+!requirements_jetson.txt
 Pipeline/tp
 Pipeline/run_tp.sh
 Pipeline/run_eval2.sh
