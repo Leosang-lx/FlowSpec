@@ -11,7 +11,7 @@ class Config:
     model_name: str = "llama2" 
     
     # network config
-    hardware: str = "server" # "jetson" or "server"
+    hardware: str = "jetson" # "jetson" or "server"
     if hardware == "jetson": # network config for distributed test
         set_network: bool = False
         password: str = "nvidia"
@@ -82,8 +82,11 @@ class Config:
             base_model_dir: str = f'/home/liux/big_file/pipeline_model/meta-llama/Llama-2-7b-chat-hf/new_stage_model_series_0+8+8+8+8_fp16'
             EAGLE_model_path: str = "/home/liux/big_file/yuhuili/EAGLE-llama2-chat-7B"
         else:
-            base_model_dir: str = f"/home/nvidia/LLM/pipeline_model/meta-llama/Llama-2-7b-chat-hf/new_stage_model_series_0+8+8+8+8_fp16"
-            EAGLE_model_path: str = f"/home/nvidia/big_file/yuhuili/EAGLE-llama2-chat-7B"
+            # base_model_dir: str = f"/home/nvidia/LLM/pipeline_model/meta-llama/Llama-2-7b-chat-hf/new_stage_model_series_0+8+8+8+8_fp16"
+            # EAGLE_model_path: str = f"/home/nvidia/big_file/yuhuili/EAGLE-llama2-chat-7B"
+            base_model_dir: str = f"/home/liux/big_file/pipeline_model/meta-llama/Llama-2-7b-chat-hf/new_stage_model_series_0+32_fp16"
+            EAGLE_model_path: str = "/home/liux/big_file/yuhuili/EAGLE-llama2-chat-7B"
+
     elif model_name == "llama2-13b":
         if hardware == "server":
             base_model_dir: str = '/home/liux/big_file/pipeline_model/meta-llama/Llama-2-13b-chat-hf/new_stage_model_series_0+10+10+10+10_fp16'

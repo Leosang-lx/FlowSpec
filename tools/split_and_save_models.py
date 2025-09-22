@@ -18,8 +18,10 @@ import torch.nn as nn
 
 cache_dir = '/home/liux/big_file/'
 
-base_model_name = 'meta-llama/Meta-Llama-3-8B-Instruct'
-EAGLE_model_path = 'yuhuili/EAGLE-LLaMA3-Instruct-8B'
+base_model_name = 'meta-llama/Llama-2-7b-chat-hf'
+EAGLE_model_path = 'yuhuili/EAGLE-llama2-chat-7B'
+# base_model_name = 'meta-llama/Meta-Llama-3-8B-Instruct'
+# EAGLE_model_path = 'yuhuili/EAGLE-LLaMA3-Instruct-8B'
 # base_model_path = 'lmsys/vicuna-13b-v1.3'
 # EAGLE_model_path = 'yuhuili/EAGLE-Vicuna-13B-v1.3'
 # base_model_path = 'meta-llama/Llama-2-13b-chat-hf'
