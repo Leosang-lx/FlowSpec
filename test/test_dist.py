@@ -18,9 +18,11 @@ try:
     print('success')
 except:
     print('fail')
-    pass
+    import traceback
+    traceback.print_exc()
 finally:
-    dist.destroy_process_group()
+    if dist.is_initialized():
+        dist.destroy_process_group()
 
 
 # check listening port
