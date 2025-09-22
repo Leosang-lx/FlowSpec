@@ -62,7 +62,7 @@ class CommHandler:
         )
         print(f'Rank {self.rank} initialized')
     
-    def new_group(self, subgroup_ranks:list[int]):
+    def new_group(self, subgroup_ranks):
         return dist.new_group(ranks = subgroup_ranks, backend=self.backend)
 
     def setup_queue(self):
