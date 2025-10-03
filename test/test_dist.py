@@ -6,6 +6,8 @@ os.environ['RANK'] = '0'
 os.environ['WORLD_SIZE'] = '2'
 os.environ['MASTER_ADDR'] = '172.18.36.132'
 os.environ['MASTER_PORT'] = '12345'
+os.environ['TORCH_DISTRIBUTED_DEBUG'] = 'DETAIL'
+os.environ['GLOO_LOG_LEVEL'] = 'DEBUG'
 
 rank = int(os.environ['RANK'])
 masterIP = os.environ['MASTER_ADDR']
