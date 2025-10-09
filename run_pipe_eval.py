@@ -247,19 +247,19 @@ def run_eval(args):
                                         
                                     input_ids = torch.as_tensor(input_ids).cuda()
                                 
-                                # with prof.profile_context(f"Rank {rank}: {run_config.pipeline_type} pipeline", device=f"cuda:{device}") if run_config.prof else nullcontext():
-                                start_time = time.time()
-                                outputs = run(
-                                    stage_model, 
-                                    input_ids if rank == 0 else None, 
-                                    temperature,
-                                    pipeline_type,
-                                    run_config.log if rank == 0 else False, 
-                                    prof if run_config.prof else None
-                                )
-                                torch.cuda.synchronize()
-                                end_time = time.time()
-                                wall_time = end_time - start_time
+                                with prof.profile_context(f"Rank {rank}: {pipeline_type} pipeline", device=f"cuda:{device}") if run_config.prof else nullcontext():
+                                    start_time = time.time()
+                                    outputs = run(
+                                        stage_model, 
+                                        input_ids if rank == 0 else None, 
+                                        temperature,
+                                        pipeline_type,
+                                        run_config.log if rank == 0 else False, 
+                                        prof if run_config.prof else None
+                                    )
+                                    torch.cuda.synchronize()
+                                    end_time = time.time()
+                                    wall_time = end_time - start_time
                                 
                                 if rank == 0:  # only for greedy decoding test!!!
                                     if run_config.log:
