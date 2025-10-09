@@ -8,10 +8,10 @@ import torch
 class Config:
     
     # model to use
-    model_name: str = "llama2" 
+    model_name: str = "vicuna" 
     
     # network config
-    hardware: str = "jetson" # "jetson" or "server"
+    hardware: str = "server" # "jetson" or "server"
     if hardware == "jetson": # network config for distributed test
         set_network: bool = False
         password: str = "nvidia"
@@ -20,7 +20,7 @@ class Config:
         delay_ms: float = 0.0 # not supported yet
 
     # run config
-    mode = "demo" # "eval" or "demo"
+    mode = "eval" # "eval" or "demo"
     
     if mode == "eval":  # large scale evaluation
         pipeline_types: List[str] = field(default_factory=lambda: ["naive"])
@@ -38,8 +38,8 @@ class Config:
         change_seed = False
         
         # dataset_names: List[str] = field(default_factory=lambda: ["mt_bench", "humaneval", "gsm8k", "alpaca", "sum", "qa"])
-        # dataset_names: List[str] = field(default_factory=lambda: ["mt_bench"])
-        dataset_names: List[str] = field(default_factory=lambda: ["mt_bench", "humaneval", "gsm8k", "alpaca"])
+        dataset_names: List[str] = field(default_factory=lambda: ["mt_bench"])
+        # dataset_names: List[str] = field(default_factory=lambda: ["mt_bench", "humaneval", "gsm8k", "alpaca"])
         question_paths: List[str] = field(init=False)
         question_begin: int = 30
         question_end: int = 50
@@ -82,10 +82,10 @@ class Config:
             base_model_dir: str = f'/home/liux/big_file/pipeline_model/meta-llama/Llama-2-7b-chat-hf/new_stage_model_series_0+8+8+8+8_fp16'
             EAGLE_model_path: str = "/home/liux/big_file/yuhuili/EAGLE-llama2-chat-7B"
         else:
-            # base_model_dir: str = f"/home/nvidia/LLM/pipeline_model/meta-llama/Llama-2-7b-chat-hf/new_stage_model_series_0+8+8+8+8_fp16"
-            # EAGLE_model_path: str = f"/home/nvidia/big_file/yuhuili/EAGLE-llama2-chat-7B"
-            base_model_dir: str = f"/home/liux/big_file/pipeline_model/meta-llama/Llama-2-7b-chat-hf/new_stage_model_series_0+32_fp16"
-            EAGLE_model_path: str = "/home/liux/big_file/yuhuili/EAGLE-llama2-chat-7B"
+            base_model_dir: str = f"/home/nvidia/LLM/pipeline_model/meta-llama/Llama-2-7b-chat-hf/new_stage_model_series_0+8+8+8+8_fp16"
+            EAGLE_model_path: str = f"/home/nvidia/LLM/models_hf/yuhuili/EAGLE-llama2-chat-7B"
+            # base_model_dir: str = f"/home/liux/big_file/pipeline_model/meta-llama/Llama-2-7b-chat-hf/new_stage_model_series_0+32_fp16"
+            # EAGLE_model_path: str = "/home/liux/big_file/yuhuili/EAGLE-llama2-chat-7B"
 
     elif model_name == "llama2-13b":
         if hardware == "server":

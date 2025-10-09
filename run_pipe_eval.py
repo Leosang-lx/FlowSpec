@@ -51,7 +51,7 @@ def run_eval(args):
         device_map=f"cuda:{device}",
         total_token=run_config.init_total_token,
         depth=run_config.init_depth,
-        top_k=run_config.init_topk if run_config.pipeline_type != "pipedec" else run_config.init_topk_pipedec,
+        top_k=run_config.init_topk #if run_config.pipeline_type != "pipedec" else run_config.init_topk_pipedec,
     )
     
     stage_model.eval()
@@ -247,19 +247,19 @@ def run_eval(args):
                                         
                                     input_ids = torch.as_tensor(input_ids).cuda()
                                 
-                                with prof.profile_context(f"Rank {rank}: {run_config.pipeline_type} pipeline", device=f"cuda:{device}") if run_config.prof else nullcontext():
-                                    start_time = time.time()
-                                    outputs = run(
-                                        stage_model, 
-                                        input_ids if rank == 0 else None, 
-                                        temperature,
-                                        pipeline_type,
-                                        run_config.log if rank == 0 else False, 
-                                        prof if run_config.prof else None
-                                    )
-                                    torch.cuda.synchronize()
-                                    end_time = time.time()
-                                    wall_time = end_time - start_time
+                                # with prof.profile_context(f"Rank {rank}: {run_config.pipeline_type} pipeline", device=f"cuda:{device}") if run_config.prof else nullcontext():
+                                start_time = time.time()
+                                outputs = run(
+                                    stage_model, 
+                                    input_ids if rank == 0 else None, 
+                                    temperature,
+                                    pipeline_type,
+                                    run_config.log if rank == 0 else False, 
+                                    prof if run_config.prof else None
+                                )
+                                torch.cuda.synchronize()
+                                end_time = time.time()
+                                wall_time = end_time - start_time
                                 
                                 if rank == 0:  # only for greedy decoding test!!!
                                     if run_config.log:
