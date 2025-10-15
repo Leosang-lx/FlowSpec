@@ -185,7 +185,7 @@ def run_eval(args):
     ###########################################
     #test
     ###########################################
-    record_path = f"{args.model_name}-{args.extra_name}.txt"
+    record_path = f"{run_config.model_name}-{args.extra_name}.txt"
     for temperature in run_config.temperatures:
         for pipeline_type in run_config.pipeline_types:
             for _ in range(run_config.error_repeat):
