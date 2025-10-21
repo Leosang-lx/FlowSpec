@@ -4,7 +4,11 @@ import numpy as np
 import struct
 import socket
 from subprocess import getstatusoutput
+import threading
 from queue import Queue, Empty
+import time
+import traceback
+import sys
 
 DTYPE_MAP = {
     1: torch.int8,
@@ -14,7 +18,10 @@ DTYPE_MAP = {
 }
 
 NP_DTYPE_MAP = {
-
+    1: np.int8,
+    2: np.float16,
+    3: np.int32,
+    4: np.int64,
 }
 
 MAX_DIMS = 4
@@ -53,12 +60,44 @@ def load_header(header: bytes):
     ndim, d0, d1, d2, d3, dtype_code = struct.unpack('6i', header)
     assert 0 < ndim <= MAX_DIMS, f"ndim should be in (0, {MAX_DIMS}], got {ndim}"
     tensor_shape = (d0, d1, d2, d3)[:ndim]
-    return tensor_shape, DTYPE_MAP[dtype_code]
+    return tensor_shape, NP_DTYPE_MAP[dtype_code]
+
+def serialize_tensor(tensor: torch.Tensor):
+    """
+    prepare for transmission
+    """
+    tensor = tensor.contiguous()
+
+    header = gen_header(tensor)
+
+    if tensor.device.type == 'cuda':
+        tensor_pinned = torch.empty_like(tensor, device='cpu', pin_memory=True)
+        tensor_pinned.copy_(tensor, non_blocking=True)
+        raw = tensor_pinned.numpy().tobytes()  # 隐式同步
+        # raw = tensor.cpu().numpy().tobytes()
+    else:
+        raw = tensor.numpy().tobytes()
+    
+    return header, raw
+
+def load_tensor(header: bytes, raw: bytes):
+    """
+    load from transmission
+    """
+    tensor_shape, dtype = load_header(header)
+
+    # raw = socket.recv()
+    arr = np.frombuffer(raw, dtype=dtype)
+    if tensor_shape:
+        arr = arr.reshape(tensor_shape)
+    tensor = torch.from_numpy(arr)
+    return tensor
+
 
 
 class CommZMQ:
     def __init__(self, server_ip):
-        self.context = zmq.socket()
+        self.context = zmq.Context()
         self.server_ip = server_ip
         self.serve_url = f'tcp://{server_ip}:{PORT}'
         self.is_server = self.server_ip in get_all_ips()
@@ -122,29 +161,162 @@ class CommPair(CommZMQ):
 
 
 class CommCS(CommZMQ):
-    def __init__(self, server_ip):
+    def __init__(self, server_ip, is_server=None):
         super().__init__(server_ip)
+
+        self._running = True
+
+        if is_server is not None:
+            self.is_server = is_server
+
+        self.send_queue = Queue()
+        self.poller = zmq.Poller()
 
         if self.is_server:
             self.socket = self.context.socket(zmq.ROUTER)
             self.socket.bind(self.serve_url)
-            self.identifers = {}  # {identity: timestamp}
-            self.send_queues = Queue()
-        else:
-            self.socket = self.context(zmq.DEALER)
-            self.socket.connect(self.serve_url)
-        
-    def serve(self):
-        while True:
-            identity,  = self.socket.recv_multi_part()
+            self.poller.register(self.socket, zmq.POLLIN)
+            # self.identifers = {}  # {identity: timestamp}
+            self.recv_queues = {}  # {identity: Queue}
+            self.start_threads()
 
-    def send_from_server(self, identity, tensor):
-        self.socket.send_multi_part([identity, ten], copy=False)
+        else:
+            self.socket = self.context.socket(zmq.DEALER)
+            self.socket.connect(self.serve_url)
+            self.poller.register(self.socket, zmq.POLLIN)
+            # register after initialization
+            self.identity = None
+            self.register_client()
+            self.recv_queue = Queue()
+            self.start_threads()
+        
+
+    def start_threads(self):
+        if self.is_server:
+            self.recv_thread = threading.Thread(target=self.serve_recv, daemon=True)
+            self.send_thread = threading.Thread(target=self.serve_send, daemon=True)
+        else:
+            self.recv_thread = threading.Thread(target=self.keep_recv, daemon=True)
+            self.send_thread = threading.Thread(target=self.keep_send, daemon=True)
+        self.recv_thread.start()
+        self.send_thread.start()
 
     def register_client(self):
-        pass
-    def register_server(self):
-        pass
+        try:
+            self.socket.send_multipart([b'REG', b''])
+            identity = self.socket.recv()
+            self.identity = identity
+            print(f"Client {identity} registered")
+        except:
+            print("Client registration failed")
+            traceback.print_exc()
+            sys.exit(1)
+
+    def handle_register(self, identity: bytes):
+        self.recv_queues[identity] = Queue()
+        self.socket.send_multipart([identity, identity])
+        print(f"Client {identity} registered")
+
+
+    def handle_recv_tensor(self, identity, header, content):
+        tensor = load_tensor(header, content)
+        self.recv_queues[identity].put(tensor)
+
+
+
+    def handle(self, identity, header, content):
+        timestamp = time.perf_counter()
+        if header == b'REG':
+            self.handle_register(identity)
+        else:
+            self.handle_recv_tensor(identity, header, content)
+
+        # self.identifers[identity] = timestamp
+
+    def recv_from(self, identity=None, device=None):
+        """
+        only for server
+        for client: using self.recv_tensor()
+        """
+        if self.is_server:
+            tensor = self.recv_queues[identity].get()
+        else:
+            tensor = self.recv_queue.get()
+        
+        return tensor if device is None else tensor.to(device)
+            
+        
+    def serve_recv(self):
+        """
+        server: handling received messages
+        """
+        while self._running:
+            try:
+                events = dict(self.poller.poll(timeout=1000))
+                if self.socket in events:
+                    identity, header, content = self.socket.recv_multipart()
+                    self.handle(identity, header, content)
+            except:
+                traceback.print_exc()
+            # data = self.socket.recv_multipart()
+            # identity, header, content = data
+            # # timestamp = time.perf_counter()
+            # self.handle(identity, header, content)
+
+    def keep_recv(self):
+        """
+        client: handling received tensor only
+        """
+        while self._running:
+            try:
+                events = dict(self.poller.poll(timeout=1000))
+                if self.socket in events:
+                    header, raw = self.socket.recv_multipart()
+                    self.recv_queue.put(load_tensor(header, raw))       
+            except:
+                traceback.print_exc()
+            # header, raw = self.socket.recv_multipart()
+            # self.recv_queue.put(load_tensor(header, raw))
+
+
+    def send_to(self, tensor, identity=None):
+        """
+        only for server
+        for client: using self.send_tensor()
+        """
+        self.send_queue.put(tensor if identity is None else (identity, tensor))
+
+    def serve_send(self):
+        """
+        handling send messages
+        """
+        while self._running:
+            try:
+                identity, tensor = self.send_queue.get(timeout=1)
+                header, raw = serialize_tensor(tensor)
+                self.socket.send_multipart([identity, header, raw])
+            except Empty:
+                continue
+
+    def keep_send(self):
+        while self._running:
+            try:
+                tensor = self.send_queue.get(timeout=1)
+                header, raw = serialize_tensor(tensor)
+                self.socket.send_multipart([header, raw])
+            except Empty:
+                continue
+
+    def stop(self):
+        self._running = False
+        self.send_thread.join()
+        self.recv_thread.join()
+        self.close()
+
+
+
+
+
 
 
 
