@@ -62,6 +62,8 @@ def load_header(header: bytes):
     tensor_shape = (d0, d1, d2, d3)[:ndim]
     return tensor_shape, NP_DTYPE_MAP[dtype_code]
 
+# todo: sending multiple tensors in one turn may lead to bottleneck in serializing tensors
+# maybe adding one more function to pipeline gpu2cpu and transmission
 def serialize_tensor(tensor: torch.Tensor):
     """
     prepare for transmission
@@ -178,7 +180,7 @@ class CommCS(CommZMQ):
             self.poller.register(self.socket, zmq.POLLIN)
             # self.identifers = {}  # {identity: timestamp}
             self.recv_queues = {}  # {identity: Queue}
-            self.start_threads()
+            self._start_threads()
 
         else:
             self.socket = self.context.socket(zmq.DEALER)
@@ -186,22 +188,22 @@ class CommCS(CommZMQ):
             self.poller.register(self.socket, zmq.POLLIN)
             # register after initialization
             self.identity = None
-            self.register_client()
+            self._register_client()
             self.recv_queue = Queue()
-            self.start_threads()
+            self._start_threads()
         
 
-    def start_threads(self):
+    def _start_threads(self):
         if self.is_server:
-            self.recv_thread = threading.Thread(target=self.serve_recv, daemon=True)
-            self.send_thread = threading.Thread(target=self.serve_send, daemon=True)
+            self.recv_thread = threading.Thread(target=self._serve_recv, daemon=True)
+            self.send_thread = threading.Thread(target=self._serve_send, daemon=True)
         else:
-            self.recv_thread = threading.Thread(target=self.keep_recv, daemon=True)
-            self.send_thread = threading.Thread(target=self.keep_send, daemon=True)
+            self.recv_thread = threading.Thread(target=self._keep_recv, daemon=True)
+            self.send_thread = threading.Thread(target=self._keep_send, daemon=True)
         self.recv_thread.start()
         self.send_thread.start()
 
-    def register_client(self):
+    def _register_client(self):
         try:
             self.socket.send_multipart([b'REG', b''])
             identity = self.socket.recv()
@@ -212,41 +214,26 @@ class CommCS(CommZMQ):
             traceback.print_exc()
             sys.exit(1)
 
-    def handle_register(self, identity: bytes):
+    def _handle_register(self, identity: bytes):
         self.recv_queues[identity] = Queue()
         self.socket.send_multipart([identity, identity])
         print(f"Client {identity} registered")
 
 
-    def handle_recv_tensor(self, identity, header, content):
+    def _handle_recv_tensor(self, identity, header, content):
         tensor = load_tensor(header, content)
         self.recv_queues[identity].put(tensor)
 
-
-
-    def handle(self, identity, header, content):
+    def _handle(self, identity, header, content):
         timestamp = time.perf_counter()
         if header == b'REG':
-            self.handle_register(identity)
+            self._handle_register(identity)
         else:
-            self.handle_recv_tensor(identity, header, content)
+            self._handle_recv_tensor(identity, header, content)
 
-        # self.identifers[identity] = timestamp
-
-    def recv_from(self, identity=None, device=None):
-        """
-        only for server
-        for client: using self.recv_tensor()
-        """
-        if self.is_server:
-            tensor = self.recv_queues[identity].get()
-        else:
-            tensor = self.recv_queue.get()
+        # self.identifers[identity] = timestamp     
         
-        return tensor if device is None else tensor.to(device)
-            
-        
-    def serve_recv(self):
+    def _serve_recv(self):
         """
         server: handling received messages
         """
@@ -255,7 +242,7 @@ class CommCS(CommZMQ):
                 events = dict(self.poller.poll(timeout=1000))
                 if self.socket in events:
                     identity, header, content = self.socket.recv_multipart()
-                    self.handle(identity, header, content)
+                    self._handle(identity, header, content)
             except:
                 traceback.print_exc()
             # data = self.socket.recv_multipart()
@@ -263,7 +250,7 @@ class CommCS(CommZMQ):
             # # timestamp = time.perf_counter()
             # self.handle(identity, header, content)
 
-    def keep_recv(self):
+    def _keep_recv(self):
         """
         client: handling received tensor only
         """
@@ -272,21 +259,13 @@ class CommCS(CommZMQ):
                 events = dict(self.poller.poll(timeout=1000))
                 if self.socket in events:
                     header, raw = self.socket.recv_multipart()
-                    self.recv_queue.put(load_tensor(header, raw))       
+                    self.recv_queue.put(load_tensor(header, raw))
             except:
                 traceback.print_exc()
             # header, raw = self.socket.recv_multipart()
             # self.recv_queue.put(load_tensor(header, raw))
 
-
-    def send_to(self, tensor, identity=None):
-        """
-        only for server
-        for client: using self.send_tensor()
-        """
-        self.send_queue.put(tensor if identity is None else (identity, tensor))
-
-    def serve_send(self):
+    def _serve_send(self):
         """
         handling send messages
         """
@@ -298,7 +277,7 @@ class CommCS(CommZMQ):
             except Empty:
                 continue
 
-    def keep_send(self):
+    def _keep_send(self):
         while self._running:
             try:
                 tensor = self.send_queue.get(timeout=1)
@@ -307,16 +286,26 @@ class CommCS(CommZMQ):
             except Empty:
                 continue
 
+    def send_to(self, tensor, identity=None):
+        """
+        API for sending tensor: both client and server
+        """
+        self.send_queue.put(tensor if identity is None else (identity, tensor))
+
+    def recv_from(self, identity=None, device=None):
+        """
+        API for receiving tensor: both client and server
+        """
+        if self.is_server:
+            tensor = self.recv_queues[identity].get()
+        else:
+            tensor = self.recv_queue.get()
+        
+        return tensor if device is None else tensor.to(device)
+
     def stop(self):
         self._running = False
         self.send_thread.join()
         self.recv_thread.join()
         self.close()
-
-
-
-
-
-
-
 
