@@ -1516,10 +1516,10 @@ class Model(nn.Module):
 
             # all_draft_size = scores_list.size(-1)
             # mask last_selected
-            first_k_layers = 3
-            bias = top_k + (first_k_layers - 1) * top_k**2
+            # first_k_layers = 3  ###fixme: this may cause a disconnected tree
+            # bias = top_k + (first_k_layers - 1) * top_k**2
             last_selected_mask = np.ones_like(scores_list, dtype=np.bool_)
-            last_selected_mask[bias:] = False
+            # last_selected_mask[:bias] = False
             last_selected_mask[last_top_scores_index] = False
             assert np.sum(last_selected_mask) > expand_size
             masked_scores_list = scores_list[last_selected_mask]
@@ -1527,7 +1527,7 @@ class Model(nn.Module):
             # scores_list[last_top_scores_index] = -torch.inf
             # appended_top_scores = torch.topk(scores_list, expand_size, dim=-1)
 
-            valid_indices = np.flatnonzero(last_selected_mask)
+            valid_indices = np.flatnonzero(last_selected_mask)  # selectable indices
             appended_top_scores = np.argsort(masked_scores_list)[-expand_size:]
             appended_top_scores_index = valid_indices[appended_top_scores]
             appended_top_scores_index = np.sort(appended_top_scores_index)
@@ -1567,6 +1567,36 @@ class Model(nn.Module):
             # print(f'parents_list: {parents_list}')
             draft_parents = parents_list[merged_sorted_top_indices // top_k].astype(np.int64)
 
+            # test
+            draft_parents_indices = draft_parents - 1
+            draft_parents_indices[draft_parents_indices == -1] = 0
+            
+            parents_set = set(draft_parents_indices)
+            selected_set = set(merged_sorted_top_indices)
+            try:
+                assert parents_set.issubset(selected_set)
+            except:
+                orig_parents = parents_list[merged_top_indices // top_k].astype(np.int64)
+                orig_parents = orig_parents - 1
+                
+                # orig_parents[orig_parents == -1] = 0
+                print(f'draft_parents_indices: {orig_parents}')
+                print(f'merged_top_indices: {merged_top_indices}')
+                # print(f'selected_set: {selected_set}')
+                # print(f'parents_set: {parents_set}')
+                print(f'diff: {parents_set - selected_set}')
+
+                sorted_indices_global = np.argsort(-scores_list)
+                # check_list = []
+                for sorted_index in sorted_indices_global:
+                    parent_idx = parents_list[sorted_index // top_k] - 1
+                    if sorted_index in selected_set:
+                        selected = 'Yes'
+                    else:
+                        selected = 'No'
+                    print(f'{sorted_index:3d}: parent={parent_idx:3d}, selected={selected}')
+                raise
+
             mask_index = np.searchsorted(merged_sorted_top_indices, draft_parents - 1, side='left')
             # mask_index = mask_index[torch.sort(merged_indices_origin).values]
             mask_index[draft_parents == 0] = -1
@@ -1587,6 +1617,14 @@ class Model(nn.Module):
                     print(f'{i+1}, {mask_index_list[i]}')
                     raise
 
+            # tree_mask[:last_size, :last_size] = last_tree_mask.cpu().numpy()
+            # for i in range(last_size - 1, total_tokens):
+            #     try:
+            #         np.add(tree_mask[i + 1], tree_mask[mask_index_list[i]], out=tree_mask[i + 1])
+            #     except:
+            #         print(f'{i+1}, {mask_index_list[i]}')
+            #         raise
+
             tree_position_ids = np.sum(tree_mask, axis=1) - 1
             # tree_position_ids = tree_position_ids[inv_indices]
             tree_mask = tree_mask[inv_indices]
@@ -1597,6 +1635,7 @@ class Model(nn.Module):
             try:
                 assert torch.allclose(tree_mask[0, 0, :last_size, :last_size], last_tree_mask[0, 0])
             except:
+                print(f'last_size: {last_size}; expand_size: {expand_size}')
                 print(f'tree_mask: {tree_mask[0, 0, :last_size, :last_size]}')
                 print(f'last_tree_mask: {last_tree_mask[0, 0]}')
                 diff = tree_mask[0, 0, :last_size, :last_size] - last_tree_mask[0, 0]

@@ -8,7 +8,7 @@ import torch
 class Config:
     
     # model to use
-    model_name: str = "vicuna" 
+    model_name: str = "llama2" 
     
     # network config
     hardware: str = "server" # "jetson" or "server"
@@ -23,9 +23,9 @@ class Config:
     mode = "eval" # "eval" or "demo"
     
     if mode == "eval":  # large scale evaluation
-        pipeline_types: List[str] = field(default_factory=lambda: ["naive"])
+        pipeline_types: List[str] = field(default_factory=lambda: ["continuous"])
         
-        warmup = True
+        warmup = False
         if hardware == "server":
             if '13b' not in model_name:
                 warmup_repeat = 10
@@ -41,18 +41,18 @@ class Config:
         dataset_names: List[str] = field(default_factory=lambda: ["mt_bench"])
         # dataset_names: List[str] = field(default_factory=lambda: ["mt_bench", "humaneval", "gsm8k", "alpaca"])
         question_paths: List[str] = field(init=False)
-        question_begin: int = 30
+        question_begin: int = 35
         question_end: int = 50
         
         eval_record: bool = True
         
         temperatures: List[float] = field(default_factory=lambda: [0.0])
     else:  # local test
-        pipeline_type: str = "tp"
+        pipeline_type: str = "continuous"
         
         warmup = True
-        warmup_repeat = 0
-        test_repeat = 1
+        warmup_repeat = 10
+        test_repeat = 3
         
         your_message: str = "Hello"
         # your_message: str = "Who are you?"
@@ -133,7 +133,7 @@ class Config:
         expand_depth: int =6
         expand_subseq_token: int = -1
         
-        none_expand: bool = False
+        none_expand: bool = True
         if none_expand:
             none_expand_size: int = 48
             none_expand_depth: int = 1
@@ -178,7 +178,7 @@ class Config:
             none_expand: bool = False
             if none_expand:
                 none_expand_size: int = 48
-                none_expand_depth: int = 1
+                none_expand_depth: int = 2
 
         if pipeline_type == "pipedec":
             init_total_token: int = 64 # this parameter is meaningless in pipedec

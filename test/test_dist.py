@@ -1,13 +1,18 @@
 import os
+import argparse
+
+parser = argparse.ArgumentParser()
+parser.add_argument('-r', '--rank', type=int, default=0)
+args = parser.parse_args()
 
 # os.environ['GLOO_USE_IPV6'] = '0'
 # os.environ['TP_USE_IPV6'] = '0'
-os.environ['RANK'] = '0'
+os.environ['RANK'] = str(args)
 os.environ['WORLD_SIZE'] = '2'
-os.environ['MASTER_ADDR'] = '172.18.36.132'
+os.environ['MASTER_ADDR'] = '127.0.0.1'
 os.environ['MASTER_PORT'] = '12345'
 os.environ['TORCH_DISTRIBUTED_DEBUG'] = 'DETAIL'
-os.environ['GLOO_LOG_LEVEL'] = 'DEBUG'
+# os.environ['GLOO_LOG_LEVEL'] = 'DEBUG'
 
 rank = int(os.environ['RANK'])
 masterIP = os.environ['MASTER_ADDR']
@@ -16,7 +21,7 @@ masterPort = os.environ['MASTER_PORT']
 import torch.distributed as dist
 print(f'Process {os.getpid()} initialize with rank {rank} with master {f"{masterIP}:{masterPort}"}...')
 try:
-    dist.init_process_group(init_method='env://', backend='gloo')
+    dist.init_process_group(init_method='env://', backend='nccl')
     print('success')
 except:
     print('fail')
