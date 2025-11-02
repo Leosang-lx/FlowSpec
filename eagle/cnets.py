@@ -1528,7 +1528,7 @@ class Model(nn.Module):
             # appended_top_scores = torch.topk(scores_list, expand_size, dim=-1)
 
             valid_indices = np.flatnonzero(last_selected_mask)  # selectable indices
-            appended_top_scores = np.argsort(masked_scores_list)[-expand_size:]
+            appended_top_scores = np.argsort(masked_scores_list, kind='stable')[-expand_size:]
             appended_top_scores_index = valid_indices[appended_top_scores]
             appended_top_scores_index = np.sort(appended_top_scores_index)
             # print(f'appended_top_scores_index: {appended_top_scores_index}')
@@ -1594,7 +1594,7 @@ class Model(nn.Module):
                         selected = 'Yes'
                     else:
                         selected = 'No'
-                    print(f'{sorted_index:3d}: parent={parent_idx:3d}, selected={selected}')
+                    print(f'{sorted_index:3d}: score={scores_list[sorted_index]:.20f} parent={parent_idx:3d}, selected={selected}')
                 raise
 
             mask_index = np.searchsorted(merged_sorted_top_indices, draft_parents - 1, side='left')
