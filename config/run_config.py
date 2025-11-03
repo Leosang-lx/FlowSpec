@@ -37,11 +37,11 @@ class Config:
         error_repeat = 1 # for error analysis
         change_seed = False
         
-        # dataset_names: List[str] = field(default_factory=lambda: ["mt_bench", "humaneval", "gsm8k", "alpaca", "sum", "qa"])
-        dataset_names: List[str] = field(default_factory=lambda: ["mt_bench"])
+        dataset_names: List[str] = field(default_factory=lambda: ["mt_bench", "humaneval", "gsm8k", "alpaca", "sum", "qa"])
+        # dataset_names: List[str] = field(default_factory=lambda: ["mt_bench"])
         # dataset_names: List[str] = field(default_factory=lambda: ["mt_bench", "humaneval", "gsm8k", "alpaca"])
         question_paths: List[str] = field(init=False)
-        question_begin: int = 35
+        question_begin: int = 30
         question_end: int = 50
         
         eval_record: bool = True

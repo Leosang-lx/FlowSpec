@@ -1528,9 +1528,16 @@ class Model(nn.Module):
             # appended_top_scores = torch.topk(scores_list, expand_size, dim=-1)
 
             valid_indices = np.flatnonzero(last_selected_mask)  # selectable indices
-            appended_top_scores = np.argsort(masked_scores_list, kind='stable')[-expand_size:]
-            appended_top_scores_index = valid_indices[appended_top_scores]
-            appended_top_scores_index = np.sort(appended_top_scores_index)
+            # appended_top_scores = np.argsort(masked_scores_list)[-expand_size:]
+            sort_with_indices = np.column_stack([-masked_scores_list, valid_indices])
+            appended_valid_indices = np.lexsort((sort_with_indices[:, 1], sort_with_indices[:, 0]))[:expand_size]
+            
+            appended_top_scores_index = valid_indices[appended_valid_indices]
+            # assert len(appended_top_scores_index) == expand_size
+
+            # appended_top_scores = np.argsort(-masked_scores_list)[:expand_size]
+            # appended_top_scores_index = valid_indices[appended_top_scores]
+            # appended_top_scores_index = np.sort(appended_top_scores_index)
             # print(f'appended_top_scores_index: {appended_top_scores_index}')
 
             # scores_list = scores_list.cpu().numpy()
@@ -1568,12 +1575,12 @@ class Model(nn.Module):
             draft_parents = parents_list[merged_sorted_top_indices // top_k].astype(np.int64)
 
             # test
-            draft_parents_indices = draft_parents - 1
-            draft_parents_indices[draft_parents_indices == -1] = 0
-            
-            parents_set = set(draft_parents_indices)
-            selected_set = set(merged_sorted_top_indices)
             try:
+                draft_parents_indices = draft_parents - 1
+                draft_parents_indices[draft_parents_indices == -1] = 0
+                
+                parents_set = set(draft_parents_indices)
+                selected_set = set(merged_sorted_top_indices)
                 assert parents_set.issubset(selected_set)
             except:
                 orig_parents = parents_list[merged_top_indices // top_k].astype(np.int64)
@@ -1627,14 +1634,23 @@ class Model(nn.Module):
 
             tree_position_ids = np.sum(tree_mask, axis=1) - 1
             # tree_position_ids = tree_position_ids[inv_indices]
-            tree_mask = tree_mask[inv_indices]
-            tree_mask = tree_mask[:, inv_indices]
-            tree_mask = tree_mask.astype(np.float32)[None, None]
+
+            try:
+                tree_mask = tree_mask[inv_indices]
+                tree_mask = tree_mask[:, inv_indices]
+                tree_mask = tree_mask.astype(np.float32)[None, None]
+            except:
+                print(f'inv_indices {inv_indices}')
+                print(f'tree_mask {tree_mask.shape}')
+                raise
+
 
             tree_mask = torch.from_numpy(tree_mask)
+
             try:
                 assert torch.allclose(tree_mask[0, 0, :last_size, :last_size], last_tree_mask[0, 0])
             except:
+
                 print(f'last_size: {last_size}; expand_size: {expand_size}')
                 print(f'tree_mask: {tree_mask[0, 0, :last_size, :last_size]}')
                 print(f'last_tree_mask: {last_tree_mask[0, 0]}')
