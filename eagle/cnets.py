@@ -1537,7 +1537,7 @@ class Model(nn.Module):
 
             # appended_top_scores = np.argsort(-masked_scores_list)[:expand_size]
             # appended_top_scores_index = valid_indices[appended_top_scores]
-            # appended_top_scores_index = np.sort(appended_top_scores_index)
+            # appended_top_scores_index = np.sort(appended_top_scores_index)  # not necessary
             # print(f'appended_top_scores_index: {appended_top_scores_index}')
 
             # scores_list = scores_list.cpu().numpy()
@@ -1650,7 +1650,6 @@ class Model(nn.Module):
             try:
                 assert torch.allclose(tree_mask[0, 0, :last_size, :last_size], last_tree_mask[0, 0])
             except:
-
                 print(f'last_size: {last_size}; expand_size: {expand_size}')
                 print(f'tree_mask: {tree_mask[0, 0, :last_size, :last_size]}')
                 print(f'last_tree_mask: {last_tree_mask[0, 0]}')

@@ -20,7 +20,7 @@ class Config:
         delay_ms: float = 0.0 # not supported yet
 
     # run config
-    mode = "eval" # "eval" or "demo"
+    mode = "demo" # "eval" or "demo"
     
     if mode == "eval":  # large scale evaluation
         pipeline_types: List[str] = field(default_factory=lambda: ["continuous"])
@@ -48,7 +48,7 @@ class Config:
         
         temperatures: List[float] = field(default_factory=lambda: [0.0])
     else:  # local test
-        pipeline_type: str = "continuous"
+        pipeline_type: str = "tp"
         
         warmup = True
         warmup_repeat = 10
@@ -66,7 +66,7 @@ class Config:
     save_timestamps: bool = False
     max_new_tokens: int = 256
     
-    timeout: int = 20
+    timeout: int = 30
     
     quant = False
     quant_config = BitsAndBytesConfig(  # Fastest parameters with 4-bit quantization
@@ -175,7 +175,7 @@ class Config:
             expand_depth: int =6
             expand_subseq_token: int = -1
             
-            none_expand: bool = False
+            none_expand: bool = True
             if none_expand:
                 none_expand_size: int = 48
                 none_expand_depth: int = 2

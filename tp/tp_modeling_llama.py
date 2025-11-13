@@ -506,6 +506,333 @@ class TPLlamaModel(LlamaPreTrainedModel):
             combined_attention_mask[:, :, -tree_tgt_len:, -tree_src_len:][tree_mask == 0] = combined_attention_mask.min()
 
         return combined_attention_mask
+    
+    @torch.no_grad()
+    def forward_layers(
+        self,
+        hidden_states,
+        past_key_values,
+        position_ids,
+        attention_mask,
+        output_hidden_states,
+        output_attentions,
+        use_cache,
+        tp_group=None,
+        prof=None,
+    ):
+        all_hidden_states = () if output_hidden_states else None
+        all_self_attns = () if output_attentions else None
+        next_decoder_cache = () if use_cache else None
+        
+        for idx, decoder_layer in enumerate(self.layers):
+            # print(f"rank: {self.tp_rank} start forward idx: {idx}")
+            if output_hidden_states:
+                all_hidden_states += (hidden_states,)
+                
+            past_key_value = (
+                past_key_values[idx] if past_key_values is not None else None
+            )
+
+            layer_outputs = decoder_layer(
+                hidden_states,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_value=past_key_value,
+                output_attentions=output_attentions,
+                use_cache=use_cache,
+                tp_group=tp_group,
+                prof=prof,
+            )
+
+            hidden_states = layer_outputs[0]
+
+            if use_cache:
+                next_decoder_cache += (layer_outputs[2 if output_attentions else 1],)
+
+            if output_attentions:
+                all_self_attns += (layer_outputs[1],)
+
+        hidden_states = self.norm(hidden_states)
+        
+        if output_hidden_states:
+            all_hidden_states += (hidden_states,)
+        
+        return hidden_states, next_decoder_cache, all_hidden_states, all_self_attns
+    
+    def get_ring_index(self, world_size: int, index: int, offset: int):  # ring index starts from 0
+        ring_index = index + offset
+        if ring_index < 0:
+            ring_index += world_size
+        elif ring_index >= world_size:
+            ring_index %= world_size
+        return ring_index
+    
+    @torch.no_grad()
+    def ring_reduce_scatter_comp_overlap(self, xi: torch.Tensor, decoder_layer: LlamaDecoderLayer, tp_group=None, case=0):
+        """
+        overlap the ring reduce-scatter comm operation with the **previous** matrix-vector multiplication
+        :return: split reduced results
+        """
+        rank = dist.get_rank(group=tp_group)
+        world_size = dist.get_world_size(group=tp_group)
+
+        if case == 0:
+            o_proj = decoder_layer.self_attn.o_proj
+        else:
+            down_proj = decoder_layer.mlp.down_proj
+
+        # W_in, W_out = Wi.shape
+        # the whole weight matrix is split along row dimension(dim=0) across devices
+        # assert xi.size(-1) == W_in and W_out % self.n_device == 0
+
+        # further split partial weight along column dimension(dim=1)
+        # TODO: split the weight matrix
+        W_split_size = W_out // self.n_device
+        Wi_split = Wi.split(W_split_size, dim=-1)
+
+        comm_from_index = self.get_ring_index(world_size, rank, -1)
+        from_tensor = torch.zeros(*xi.shape[:-1], W_split_size)
+        comm_to_index = self.get_ring_index(world_size, rank, 1)
+
+        for i in range(self.n_device - 1, -1, -1):  # reverse order from n-1 to 0
+
+            comp_index = self.get_ring_index(self.rank, i)  # [rank-1, rank-2, ..., rank]
+            # start receiving
+            if i != self.n_device - 1:
+                send_task = dist.isend(yi, dst=comm_to_index)
+                recv_task = dist.irecv(from_tensor, src=comm_from_index)
+            else:
+                recv_task = None
+
+            # partial computation
+            yi = torch.matmul(xi, Wi_split[comp_index])
+
+            # recv result from others
+            if recv_task:
+                # comment the send_task.wait() for distributed=True
+                # if not distributed:
+                send_task.wait(timeout=timeout_max)
+                recv_task.wait(timeout=timeout_max)
+                yi.add_(from_tensor)  # reduce
+        # if bi is not None:
+        #     yi.add_(bi)
+        return yi
+
+    @torch.no_grad()
+    def ring_all_gather_comp_overlap(self, xi: torch.Tensor, decoder_layer: LlamaDecoderLayer, tp_group=None, case=0):
+        """
+        overlap the ring all-gather comm operation with the **following** matrix-vector multiplication
+        :return: gathered results after the matrix-vector multiplication
+        """
+        rank = dist.get_rank(group=tp_group)
+        world_size = dist.get_world_size(group=tp_group)
+
+        if case == 0:  # attn
+            q_proj, k_proj, v_proj = decoder_layer.self_attn.q_proj, decoder_layer.self_attn.k_proj, decoder_layer.self_attn.v_proj
+        else:  # ffn
+            gate_proj, up_proj, act_fn = decoder_layer.mlp.gate_proj, decoder_layer.mlp.up_proj, decoder_layer.mlp.act_fn
+
+            
+        # W_in, W_out = Wi.shape
+        # assert xi.size(-1) == W_in and W_out % self.n_device == 0
+
+        comm_from_index = self.get_ring_index(rank, -1)
+        from_tensor = torch.zeros_like(xi)  # from_tensor for saving the received tensor
+        to_tensor = xi  # to_tensor for comp and comm at each turn
+        comm_to_index = self.get_ring_index(rank, 1)
+
+        split_results = [None] * self.n_device
+
+        for i in range(self.n_device - 1, -1, -1):  # reverse order from n-1 to 0
+            comp_index = self.get_ring_index(world_size, rank, i)  # shift order according to rank and i
+            if i > 0:
+                # start sending
+                send_task = dist.isend(to_tensor, dst=comm_to_index, group=tp_group)
+                recv_task = dist.irecv(from_tensor, src=comm_from_index)
+
+            # partial computation
+            if case == 0:
+                res = (q_proj(to_tensor), k_proj(to_tensor), v_proj(to_tensor))
+                res = torch.cat(res, dim=-1)
+            else:
+                res = act_fn(gate_proj(to_tensor)) * up_proj(to_tensor)
+            split_results[comp_index] = res
+            # split_results[comp_index] = to_tensor @ Wi
+
+            if i > 0:
+                send_task.wait(timeout=timeout_max)
+                recv_task.wait(timeout=timeout_max)
+                # exchange reference after send_task and recv_task are both finished
+                from_tensor, to_tensor = to_tensor, from_tensor
+            else:
+                assert None not in split_results
+                return torch.cat(split_results, dim=-2)
+
+    @torch.no_grad()
+    def mha_with_rope(
+        self,
+        q,
+        k,
+        v,
+        attention_mask,
+        position_ids,
+        past_key_value,
+        bsz,
+        q_len,
+        output_attentions=False
+    ):
+        query_states = q.view(
+            bsz, q_len, self.num_heads, self.head_dim
+        ).transpose(1, 2)
+        key_states = k.view(
+            bsz, q_len, self.num_key_value_heads, self.head_dim
+        ).transpose(1, 2)
+        value_states = v.view(
+            bsz, q_len, self.num_key_value_heads, self.head_dim
+        ).transpose(1, 2)
+
+        kv_seq_len = key_states.shape[-2]
+        if past_key_value is not None:
+            kv_seq_len += past_key_value[0].shape[-2]
+        cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
+        query_states, key_states = apply_rotary_pos_emb(
+            query_states, key_states, cos, sin, position_ids
+        )
+
+        if past_key_value is not None:
+            key_states = past_key_value[0].cat(key_states, dim=2)
+            value_states = past_key_value[1].cat(value_states, dim=2)
+        past_key_value = None
+
+        attn_weights = torch.matmul(
+            query_states, key_states.transpose(2, 3)
+        ) / math.sqrt(self.head_dim)
+
+        if attention_mask is not None:
+            if attention_mask.size() != (bsz, 1, q_len, kv_seq_len):
+                raise ValueError(
+                    f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
+                )
+            attn_weights = attn_weights + attention_mask
+
+        # upcast attention to fp32
+        attn_weights = nn.functional.softmax(
+            attn_weights, dim=-1, dtype=torch.float32
+        ).to(query_states.dtype)
+        attn_output = torch.matmul(attn_weights, value_states)
+
+        if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
+            raise ValueError(
+                f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is"
+                f" {attn_output.size()}"
+            )
+        
+        attn_output = attn_output.transpose(1, 2).contiguous()
+        attn_output = attn_output.reshape(bsz, q_len, self.hidden_size // 4)
+
+        if not output_attentions:
+            attn_weights = None
+
+        return attn_output, attn_weights, past_key_value
+        
+
+    @torch.no_grad()
+    def forward_layers_galaxy(
+        self,
+        hidden_states,
+        past_key_values,
+        position_ids,
+        attention_mask,
+        output_hidden_states,
+        output_attentions,
+        use_cache,
+        tp_group=None,
+        prof=None,
+    ):
+        all_hidden_states = () if output_hidden_states else None
+        all_self_attns = () if output_attentions else None
+        next_decoder_cache = () if use_cache else None
+
+        rank = self.get_rank()
+        world_size = self.get_world_size()
+        seq_len = hidden_states.size(-2)
+        assert seq_len % world_size == 0
+
+        seq_split_len = seq_len // world_size
+        seq_l, seq_r = (seq_split_len * rank, seq_split_len * (rank + 1))
+
+        bsz, q_len, hidden_size = hidden_states.size()
+
+        for idx, decoder_layer in enumerate(self.layers):
+            merged_qkv_proj = ...
+
+            if output_hidden_states:
+                all_hidden_states += (hidden_states,)
+
+            past_key_value = (
+                past_key_values[idx] if past_key_values is not None else None
+            )
+
+            if idx == 0:
+                residual = hidden_states[..., seq_l:seq_r, :]
+                hidden_states = decoder_layer.input_layernorm(hidden_states)
+
+                qkv_slice = F.linear(hidden_states, merged_qkv_proj)
+            else:
+                qkv_slice = self.ring_all_gather_comp_overlap(hidden_states, decoder_layer, tp_group, 0)
+
+            # get qkv
+            q, k, v = tuple(torch.split(qkv_slice, hidden_size, dim=-1))
+
+            # mha
+            attn_output, attn_weights, past_key_value = self.mha_with_rope(
+                q, k, v,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_value=past_key_value,
+                output_attentions=output_attentions,
+                use_cache=use_cache,
+            )
+
+            if use_cache:
+                next_decoder_cache += (past_key_value,)
+
+            if output_attentions:
+                all_self_attns += (attn_weights,)
+
+            # Wo projection
+            hidden_states = self.ring_reduce_scatter_comp_overlap(hidden_states, decoder_layer, tp_group, 0)
+            
+            # residual connection 1
+            hidden_states = residual + hidden_states
+
+            # residual 2
+            residual = hidden_states
+
+            # layernorm 2
+            hidden_states = decoder_layer.post_attention_layernorm(hidden_states)
+
+            # mlp1
+            hidden_states = self.ring_all_gather_comp_overlap(hidden_states, decoder_layer, tp_group, 1)
+
+            # activation： no activation, included in up_proj
+
+            # mlp2
+            if idx != len(self.layers) - 1:
+                hidden_states = self.ring_reduce_scatter_comp_overlap(hidden_states, decoder_layer, 1)
+                
+                # residual connection 2
+                hidden_states = residual + hidden_states
+            
+            else:
+                # mlp2
+                hidden_states = decoder_layer.down_proj(hidden_states)
+
+                hidden_states[..., seq_l:seq_r, :] = residual + hidden_states[..., seq_l:seq_r, :]
+                dist.reduce(hidden_states, dst=0)
+            
+        return hidden_states, next_decoder_cache, all_hidden_states, all_self_attns
+
 
     @torch.no_grad()
     def forward(
@@ -519,6 +846,7 @@ class TPLlamaModel(LlamaPreTrainedModel):
         output_attentions=False,
         output_hidden_states=False,
         return_dict=True,
+        galaxy=False,
         tp_group=None,
         prof=None,
     ):  
@@ -605,19 +933,44 @@ class TPLlamaModel(LlamaPreTrainedModel):
         #             "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`..."
         #         )
         #         use_cache = False
-                
-        all_hidden_states = () if output_hidden_states else None
-        all_self_attns = () if output_attentions else None
-        next_decoder_cache = () if use_cache else None
-        
-        for idx, decoder_layer in enumerate(self.layers):
-            # print(f"rank: {self.tp_rank} start forward idx: {idx}")
-            if output_hidden_states:
-                all_hidden_states += (hidden_states,)
-                
-            past_key_value = (
-                past_key_values[idx] if past_key_values is not None else None
+
+        if not galaxy:
+            hidden_states, next_decoder_cache, all_hidden_states, all_self_attns = self.forward_layers(
+                hidden_states,
+                past_key_values,
+                position_ids,
+                attention_mask,
+                output_hidden_states,
+                output_attentions,
+                use_cache,
+                tp_group=tp_group,
+                prof=prof,
             )
+        else:
+            hidden_states, next_decoder_cache, all_hidden_states, all_self_attns = self.forward_layers_galaxy(
+                hidden_states,
+                past_key_values,
+                position_ids,
+                attention_mask,
+                output_hidden_states,
+                output_attentions,
+                use_cache,
+                tp_group=tp_group,
+                prof=prof,
+            )
+                
+        # all_hidden_states = () if output_hidden_states else None
+        # all_self_attns = () if output_attentions else None
+        # next_decoder_cache = () if use_cache else None
+        
+        # for idx, decoder_layer in enumerate(self.layers):
+        #     # print(f"rank: {self.tp_rank} start forward idx: {idx}")
+        #     if output_hidden_states:
+        #         all_hidden_states += (hidden_states,)
+                
+        #     past_key_value = (
+        #         past_key_values[idx] if past_key_values is not None else None
+        #     )
             
             # if self.gradient_checkpointing and self.training:
 
@@ -647,29 +1000,24 @@ class TPLlamaModel(LlamaPreTrainedModel):
             #     #         print(f"stage {self.config.stage} use_cache={use_cache}")
             #     #         self.a += 1
                 
-            layer_outputs = decoder_layer(
-                hidden_states,
-                attention_mask=attention_mask,
-                position_ids=position_ids,
-                past_key_value=past_key_value,
-                output_attentions=output_attentions,
-                use_cache=use_cache,
-                tp_group=tp_group,
-                prof=prof,
-            )
+            # layer_outputs = decoder_layer(
+            #     hidden_states,
+            #     attention_mask=attention_mask,
+            #     position_ids=position_ids,
+            #     past_key_value=past_key_value,
+            #     output_attentions=output_attentions,
+            #     use_cache=use_cache,
+            #     tp_group=tp_group,
+            #     prof=prof,
+            # )
                 
-            hidden_states = layer_outputs[0]
+            # hidden_states = layer_outputs[0]
 
-            if use_cache:
-                next_decoder_cache += (layer_outputs[2 if output_attentions else 1],)
+            # if use_cache:
+            #     next_decoder_cache += (layer_outputs[2 if output_attentions else 1],)
 
-            if output_attentions:
-                all_self_attns += (layer_outputs[1],)
-        
-        hidden_states = self.norm(hidden_states)
-        
-        if output_hidden_states:
-            all_hidden_states += (hidden_states,)
+            # if output_attentions:
+            #     all_self_attns += (layer_outputs[1],)
 
         next_cache = next_decoder_cache if use_cache else None
         if not return_dict:
