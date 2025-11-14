@@ -133,6 +133,7 @@ class TPEaModel(nn.Module):
                 output_orig=False,
                 tp_group=None,
                 prof=None,
+                galaxy=False,
     ):
         outputs = self.tp_base_model(
             input_ids=input_ids,
@@ -141,6 +142,7 @@ class TPEaModel(nn.Module):
             past_key_values=past_key_values,
             tp_group=tp_group,
             prof=prof,
+            galaxy=galaxy,
         )
         
         hidden_states = outputs[0]
@@ -161,6 +163,7 @@ class TPEaModel(nn.Module):
         max_length=2048,
         log=False,
         profiler=None,
+        galaxy=False,
     ):
         if temperature > 1e-5:  # 先让全部stage都有，怕出bug
             logits_processor = prepare_logits_processor(temperature=temperature, top_p=top_p, top_k=top_k)
@@ -270,6 +273,7 @@ class TPEaModel(nn.Module):
                     position_ids=tree_position_ids,
                     tp_group=self.tp_group,
                     prof=profiler,
+                    galaxy=galaxy,
                 )
                 # send to draft stage
                 # print(f'rank: {config.stage} was at barrier at idx_spec: {idx_spec}')

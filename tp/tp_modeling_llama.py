@@ -568,7 +568,14 @@ class TPLlamaModel(LlamaPreTrainedModel):
         return ring_index
     
     @torch.no_grad()
-    def ring_reduce_scatter_comp_overlap(self, xi: torch.Tensor, decoder_layer: LlamaDecoderLayer, tp_group=None, case=0):
+    def ring_reduce_scatter_comp_overlap(
+        self,
+        xi: torch.Tensor,
+        decoder_layer: LlamaDecoderLayer,
+        tp_group=None,
+        case=0,
+        timeout_max=10,
+    ):
         """
         overlap the ring reduce-scatter comm operation with the **previous** matrix-vector multiplication
         :return: split reduced results
@@ -577,96 +584,137 @@ class TPLlamaModel(LlamaPreTrainedModel):
         world_size = dist.get_world_size(group=tp_group)
 
         if case == 0:
-            o_proj = decoder_layer.self_attn.o_proj
+            # o_proj = decoder_layer.self_attn.o_proj
+            weight = decoder_layer.self_attn.o_proj.weight
         else:
-            down_proj = decoder_layer.mlp.down_proj
+            # down_proj = decoder_layer.mlp.down_proj
+            weight = decoder_layer.mlp.down_proj.weight
 
-        # W_in, W_out = Wi.shape
+        seq_len = xi.size(-2)
+        
+        # print(f"xi shape: {xi.shape}")
+        # print(f"weight shape: {weight.shape}")
         # the whole weight matrix is split along row dimension(dim=0) across devices
         # assert xi.size(-1) == W_in and W_out % self.n_device == 0
 
-        # further split partial weight along column dimension(dim=1)
-        # TODO: split the weight matrix
-        W_split_size = W_out // self.n_device
-        Wi_split = Wi.split(W_split_size, dim=-1)
+        # split the input_matrix
+        seq_split_size = seq_len // world_size
+        xi_split = xi.split(seq_split_size, dim=-2)
+        # Wi_split = weight.split(W_split_size, dim=-2)
 
-        comm_from_index = self.get_ring_index(world_size, rank, -1)
-        from_tensor = torch.zeros(*xi.shape[:-1], W_split_size)
-        comm_to_index = self.get_ring_index(world_size, rank, 1)
+        # +1 to map to the global rank
+        comm_from_index = self.get_ring_index(world_size, rank, -1) + 1
+        from_tensor = torch.zeros(1, seq_split_size, decoder_layer.self_attn.hidden_size, dtype=xi.dtype)
+        comm_to_index = self.get_ring_index(world_size, rank, 1) + 1
+        # print(f'rank {rank}: from {comm_from_index} to {comm_to_index}')
 
-        for i in range(self.n_device - 1, -1, -1):  # reverse order from n-1 to 0
+        for i in range(world_size - 1, -1, -1):  # reverse order from n-1 to 0
 
-            comp_index = self.get_ring_index(self.rank, i)  # [rank-1, rank-2, ..., rank]
+            comp_index = self.get_ring_index(world_size, rank, i)  # [rank-1, rank-2, ..., rank]
             # start receiving
-            if i != self.n_device - 1:
-                send_task = dist.isend(yi, dst=comm_to_index)
-                recv_task = dist.irecv(from_tensor, src=comm_from_index)
+            if i != world_size - 1:
+                # try:
+                send_task = dist.isend(yi.cpu(), dst=comm_to_index, group=tp_group)
+                # except:
+                #     print(f'rank {rank} failed to send to {comm_to_index}')
+
+                recv_task = dist.irecv(from_tensor, src=comm_from_index, group=tp_group)
             else:
                 recv_task = None
 
             # partial computation
-            yi = torch.matmul(xi, Wi_split[comp_index])
+            # yi = torch.matmul(weight, xi_split[comp_index])
+            yi = F.linear(xi_split[comp_index], weight)
 
             # recv result from others
             if recv_task:
                 # comment the send_task.wait() for distributed=True
                 # if not distributed:
-                send_task.wait(timeout=timeout_max)
-                recv_task.wait(timeout=timeout_max)
-                yi.add_(from_tensor)  # reduce
+                send_task.wait()
+                # try:
+                recv_task.wait()
+                # except:
+                #     print(f'rank {rank} failed to recv from {comm_from_index}')
+                #     print(from_tensor.device, from_tensor.dtype)
+                yi.add_(from_tensor.to(yi.device))  # reduce
         # if bi is not None:
         #     yi.add_(bi)
+        # print(f'yi shape: {yi.shape}')
         return yi
 
     @torch.no_grad()
-    def ring_all_gather_comp_overlap(self, xi: torch.Tensor, decoder_layer: LlamaDecoderLayer, tp_group=None, case=0):
+    def ring_all_gather_comp_overlap(
+        self,
+        xi: torch.Tensor,
+        decoder_layer: LlamaDecoderLayer,
+        tp_group=None,
+        case=0,
+        timeout_max=10,
+    ):
         """
         overlap the ring all-gather comm operation with the **following** matrix-vector multiplication
         :return: gathered results after the matrix-vector multiplication
         """
         rank = dist.get_rank(group=tp_group)
         world_size = dist.get_world_size(group=tp_group)
+        dist.barrier(group=tp_group)
 
         if case == 0:  # attn
             q_proj, k_proj, v_proj = decoder_layer.self_attn.q_proj, decoder_layer.self_attn.k_proj, decoder_layer.self_attn.v_proj
         else:  # ffn
             gate_proj, up_proj, act_fn = decoder_layer.mlp.gate_proj, decoder_layer.mlp.up_proj, decoder_layer.mlp.act_fn
 
-            
         # W_in, W_out = Wi.shape
         # assert xi.size(-1) == W_in and W_out % self.n_device == 0
+        # print(f"xi: {xi.shape}, {xi.dtype}")
+        # print(f"weight shape: {weight.shape}")
 
-        comm_from_index = self.get_ring_index(rank, -1)
-        from_tensor = torch.zeros_like(xi)  # from_tensor for saving the received tensor
-        to_tensor = xi  # to_tensor for comp and comm at each turn
-        comm_to_index = self.get_ring_index(rank, 1)
+        comm_from_index = self.get_ring_index(world_size, rank, -1) + 1
+        from_tensor = torch.zeros(*xi.shape, dtype=xi.dtype)  # from_tensor for saving the received tensor
+        to_tensor = xi.cpu()  # to_tensor for comp and comm at each turn
+        comm_to_index = self.get_ring_index(world_size, rank, 1) + 1
+        # print(f'rank {rank+1}: from {comm_from_index} to {comm_to_index}')
 
-        split_results = [None] * self.n_device
+        split_results = [None] * world_size
 
-        for i in range(self.n_device - 1, -1, -1):  # reverse order from n-1 to 0
+        for i in range(world_size, 0, -1):  # reverse order from n to 1
             comp_index = self.get_ring_index(world_size, rank, i)  # shift order according to rank and i
-            if i > 0:
+            # print(f'rank {rank}: comp {comp_index}')
+            if i > 1:
                 # start sending
+                assert to_tensor.shape == from_tensor.shape
+                assert to_tensor.dtype == from_tensor.dtype
                 send_task = dist.isend(to_tensor, dst=comm_to_index, group=tp_group)
-                recv_task = dist.irecv(from_tensor, src=comm_from_index)
+                recv_task = dist.irecv(from_tensor, src=comm_from_index, group=tp_group)
 
             # partial computation
             if case == 0:
-                res = (q_proj(to_tensor), k_proj(to_tensor), v_proj(to_tensor))
-                res = torch.cat(res, dim=-1)
+                res = (q_proj(xi), k_proj(xi), v_proj(xi))
+                # res = torch.cat(res, dim=-1)
             else:
-                res = act_fn(gate_proj(to_tensor)) * up_proj(to_tensor)
+                res = act_fn(gate_proj(xi)) * up_proj(xi)
+            # print(res.shape)
             split_results[comp_index] = res
             # split_results[comp_index] = to_tensor @ Wi
 
-            if i > 0:
-                send_task.wait(timeout=timeout_max)
-                recv_task.wait(timeout=timeout_max)
+            if i > 1:
+                # print(f'rank {rank}: waiting')
+                send_task.wait()
+                recv_task.wait()
                 # exchange reference after send_task and recv_task are both finished
-                from_tensor, to_tensor = to_tensor, from_tensor
+                # from_tensor, to_tensor = to_tensor, from_tensor
+                xi, to_tensor = from_tensor.to(xi.device), from_tensor
+
             else:
                 assert None not in split_results
+                if case == 0:
+                    qs, ks, vs = zip(*split_results)
+                    q = torch.cat(qs, dim=-2)
+                    k = torch.cat(ks, dim=-2)
+                    v = torch.cat(vs, dim=-2)
+                    return q, k, v
                 return torch.cat(split_results, dim=-2)
+            # print(f'rank {rank}: comp {comp_index} done')
 
     @torch.no_grad()
     def mha_with_rope(
@@ -679,22 +727,24 @@ class TPLlamaModel(LlamaPreTrainedModel):
         past_key_value,
         bsz,
         q_len,
+        attn: TPLlamaAttention,
         output_attentions=False
     ):
+        num_heads, num_key_value_heads, head_dim = attn.num_heads, attn.num_key_value_heads, attn.head_dim
         query_states = q.view(
-            bsz, q_len, self.num_heads, self.head_dim
+            bsz, q_len, num_heads, head_dim
         ).transpose(1, 2)
         key_states = k.view(
-            bsz, q_len, self.num_key_value_heads, self.head_dim
+            bsz, q_len, num_key_value_heads, head_dim
         ).transpose(1, 2)
         value_states = v.view(
-            bsz, q_len, self.num_key_value_heads, self.head_dim
+            bsz, q_len, num_key_value_heads, head_dim
         ).transpose(1, 2)
 
         kv_seq_len = key_states.shape[-2]
         if past_key_value is not None:
             kv_seq_len += past_key_value[0].shape[-2]
-        cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
+        cos, sin = attn.rotary_emb(value_states, seq_len=kv_seq_len)
         query_states, key_states = apply_rotary_pos_emb(
             query_states, key_states, cos, sin, position_ids
         )
@@ -706,7 +756,7 @@ class TPLlamaModel(LlamaPreTrainedModel):
 
         attn_weights = torch.matmul(
             query_states, key_states.transpose(2, 3)
-        ) / math.sqrt(self.head_dim)
+        ) / math.sqrt(attn.head_dim)
 
         if attention_mask is not None:
             if attention_mask.size() != (bsz, 1, q_len, kv_seq_len):
@@ -721,14 +771,15 @@ class TPLlamaModel(LlamaPreTrainedModel):
         ).to(query_states.dtype)
         attn_output = torch.matmul(attn_weights, value_states)
 
-        if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
+        if attn_output.size() != (bsz, attn.num_heads, q_len, attn.head_dim):
             raise ValueError(
-                f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is"
+                f"`attn_output` should be of size {(bsz, attn.num_heads, q_len, attn.head_dim)}, but is"
                 f" {attn_output.size()}"
             )
         
+        # merge heads
         attn_output = attn_output.transpose(1, 2).contiguous()
-        attn_output = attn_output.reshape(bsz, q_len, self.hidden_size // 4)
+        attn_output = attn_output.reshape(bsz, q_len, attn.hidden_size // 4)
 
         if not output_attentions:
             attn_weights = None
@@ -753,8 +804,8 @@ class TPLlamaModel(LlamaPreTrainedModel):
         all_self_attns = () if output_attentions else None
         next_decoder_cache = () if use_cache else None
 
-        rank = self.get_rank()
-        world_size = self.get_world_size()
+        rank = dist.get_rank(group=tp_group)
+        world_size = dist.get_world_size(group=tp_group)
         seq_len = hidden_states.size(-2)
         assert seq_len % world_size == 0
 
@@ -764,7 +815,7 @@ class TPLlamaModel(LlamaPreTrainedModel):
         bsz, q_len, hidden_size = hidden_states.size()
 
         for idx, decoder_layer in enumerate(self.layers):
-            merged_qkv_proj = ...
+            q_proj, k_proj, v_proj = decoder_layer.self_attn.q_proj, decoder_layer.self_attn.k_proj, decoder_layer.self_attn.v_proj
 
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
@@ -777,22 +828,25 @@ class TPLlamaModel(LlamaPreTrainedModel):
                 residual = hidden_states[..., seq_l:seq_r, :]
                 hidden_states = decoder_layer.input_layernorm(hidden_states)
 
-                qkv_slice = F.linear(hidden_states, merged_qkv_proj)
+                q, k, v = q_proj(hidden_states), k_proj(hidden_states), v_proj(hidden_states)
             else:
-                qkv_slice = self.ring_all_gather_comp_overlap(hidden_states, decoder_layer, tp_group, 0)
-
-            # get qkv
-            q, k, v = tuple(torch.split(qkv_slice, hidden_size, dim=-1))
+                q, k, v = self.ring_all_gather_comp_overlap(hidden_states, decoder_layer, tp_group, 0)
+                # get qkv
+                # q, k, v = tuple(torch.split(qkv_slice, hidden_size, dim=-1))
 
             # mha
             attn_output, attn_weights, past_key_value = self.mha_with_rope(
                 q, k, v,
-                attention_mask=attention_mask,
-                position_ids=position_ids,
-                past_key_value=past_key_value,
+                attention_mask,
+                position_ids,
+                past_key_value,
+                bsz, q_len,
+                decoder_layer.self_attn,
                 output_attentions=output_attentions,
-                use_cache=use_cache,
+                # use_cache=use_cache,
             )
+
+            # print(f'rank{rank}, attn_output.shape: {attn_output.shape}')
 
             if use_cache:
                 next_decoder_cache += (past_key_value,)
@@ -801,7 +855,7 @@ class TPLlamaModel(LlamaPreTrainedModel):
                 all_self_attns += (attn_weights,)
 
             # Wo projection
-            hidden_states = self.ring_reduce_scatter_comp_overlap(hidden_states, decoder_layer, tp_group, 0)
+            hidden_states = self.ring_reduce_scatter_comp_overlap(attn_output, decoder_layer, tp_group, 0)
             
             # residual connection 1
             hidden_states = residual + hidden_states
@@ -819,17 +873,17 @@ class TPLlamaModel(LlamaPreTrainedModel):
 
             # mlp2
             if idx != len(self.layers) - 1:
-                hidden_states = self.ring_reduce_scatter_comp_overlap(hidden_states, decoder_layer, 1)
+                hidden_states = self.ring_reduce_scatter_comp_overlap(hidden_states, decoder_layer, tp_group, 1)
                 
                 # residual connection 2
                 hidden_states = residual + hidden_states
             
             else:
                 # mlp2
-                hidden_states = decoder_layer.down_proj(hidden_states)
+                hidden_states = decoder_layer.mlp.down_proj(hidden_states)
 
                 hidden_states[..., seq_l:seq_r, :] = residual + hidden_states[..., seq_l:seq_r, :]
-                dist.reduce(hidden_states, dst=0)
+                dist.all_reduce(hidden_states, group=tp_group)
             
         return hidden_states, next_decoder_cache, all_hidden_states, all_self_attns
 
@@ -846,9 +900,9 @@ class TPLlamaModel(LlamaPreTrainedModel):
         output_attentions=False,
         output_hidden_states=False,
         return_dict=True,
-        galaxy=False,
         tp_group=None,
         prof=None,
+        galaxy=False,
     ):  
         output_attentions = (
             output_attentions
@@ -1060,6 +1114,7 @@ class TPLlamaForCausalLM(LlamaPreTrainedModel):
         return_dict=True,
         tp_group=None,
         prof=None,
+        galaxy=False,
     ):
         r"""
         Args:
@@ -1112,6 +1167,7 @@ class TPLlamaForCausalLM(LlamaPreTrainedModel):
             return_dict=return_dict,
             tp_group=tp_group,
             prof=prof,
+            galaxy=galaxy,
         )
 
         # logits = self.lm_head(outputs.last_hidden_state)

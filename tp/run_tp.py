@@ -107,9 +107,8 @@ def main():
             dist.barrier()
             outputs = run(
                     tp_model, 
-                    input_ids if rank == 0 else None, 
-                    # run_config.log if rank == 0 else False, 
-                    None
+                    input_ids if rank == 0 else None,
+                    galaxy=run_config.use_galaxy,
                 )
 
     # [test generation]
@@ -121,7 +120,8 @@ def main():
                     tp_model, 
                     input_ids if rank == 0 else None, 
                     run_config.log if rank == 0 else False, 
-                    prof if run_config.prof else None
+                    prof if run_config.prof else None,
+                    galaxy=run_config.use_galaxy,
                 )
     
     # [print output]
@@ -161,13 +161,14 @@ def main():
         tp_model.comm.reset_traffic()
     
 
-def run(tp_model, input_ids, log=False, profiler=None):
+def run(tp_model, input_ids, log=False, profiler=None, galaxy=False):
     outputs = tp_model.tp_generate(
         input_ids=input_ids,
         temperature=run_config.temperature,
         max_new_tokens=run_config.max_new_tokens,
         log=log,
         profiler=profiler,
+        galaxy=galaxy,
     )
     if dist.get_rank() == 0:
         return outputs

@@ -49,10 +49,13 @@ class Config:
         temperatures: List[float] = field(default_factory=lambda: [0.0])
     else:  # local test
         pipeline_type: str = "tp"
+        if pipeline_type == 'tp':
+            # declare galaxy when using TP
+            use_galaxy = True
         
-        warmup = True
-        warmup_repeat = 10
-        test_repeat = 3
+        warmup = False
+        warmup_repeat = 0
+        test_repeat = 1
         
         your_message: str = "Hello"
         # your_message: str = "Who are you?"
