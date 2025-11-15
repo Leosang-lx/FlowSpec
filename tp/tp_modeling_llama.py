@@ -13,6 +13,10 @@
 # import os
 # import math
 # from tp.tp_layers import ColumnParallelLinear, RowParallelLinear
+import pickle
+def save(tensor, path):
+    with open(path, 'wb') as f:
+        pickle.dump(tensor, f)
 
 """ PyTorch LLaMA model."""
 from typing import Optional, Tuple, Union
@@ -131,6 +135,7 @@ class TPLlamaAttention(nn.Module):
             past_key_value: Optional[Tuple[torch.Tensor]] = None,
             output_attentions: bool = False,
             use_cache: bool = False,
+            # test_result: bool = False,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = hidden_states.size()
 
@@ -166,6 +171,9 @@ class TPLlamaAttention(nn.Module):
             query_states = self.q_proj(hidden_states)
             key_states = self.k_proj(hidden_states)
             value_states = self.v_proj(hidden_states)
+        
+        # if test_result:
+        #     save((query_states.cpu(), key_states.cpu(), value_states.cpu()), f'rank{dist.get_rank()}_qkv.pt')
         
         query_states = query_states.view(
             bsz, q_len, self.num_heads, self.head_dim
@@ -225,6 +233,10 @@ class TPLlamaAttention(nn.Module):
         attn_weights = nn.functional.softmax(
             attn_weights, dim=-1, dtype=torch.float32
         ).to(query_states.dtype)
+
+        # if test_result:
+        #     save(attn_weights.cpu(), f'rank{dist.get_rank()}_attn_weights.pt')
+
         attn_output = torch.matmul(attn_weights, value_states)
 
         if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
@@ -257,6 +269,10 @@ class TPLlamaAttention(nn.Module):
         if not output_attentions:
             attn_weights = None
 
+        # if test_result:
+        #     # save((query_states.cpu(), key_states.cpu(), value_states.cpu()), f'rank{dist.get_rank()}_qkv.pt')
+        #     save(attn_output.cpu(), f'rank{dist.get_rank()}_attn_output.pt')
+
         return attn_output, attn_weights, past_key_value
 
 class TPLlamaMLP(nn.Module):
@@ -287,7 +303,7 @@ class TPLlamaMLP(nn.Module):
         self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
         self.act_fn = ACT2FN[config.hidden_act]
 
-    def forward(self, x):
+    def forward(self, x, test_result=False):
         """
         Forward pass of the MLP.
 
@@ -320,6 +336,10 @@ class TPLlamaMLP(nn.Module):
             down_proj = sum(down_proj)
         else:
             down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        
+        # if test_result:
+        #     save((self.act_fn(self.gate_proj(x)) * self.up_proj(x)).cpu(), f'rank{dist.get_rank()}_up_proj.pt')
+        #     save(down_proj.cpu(), f'rank{dist.get_rank()}_down_proj.pt')
 
         return down_proj
 
@@ -378,6 +398,7 @@ class TPLlamaDecoderLayer(nn.Module):
             use_cache: Optional[bool] = False,
             tp_group: Optional[dist.ProcessGroup] = None,
             prof=None,
+            test_result=False,
     ) -> Tuple[
         torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]
     ]:
@@ -404,8 +425,12 @@ class TPLlamaDecoderLayer(nn.Module):
         """
 
         residual = hidden_states
+        # if test_result:
+        #     save(hidden_states.cpu(), f'rank{dist.get_rank()}_residual1.pt')
 
         hidden_states = self.input_layernorm(hidden_states)
+        # if test_result:
+        #     save(hidden_states.cpu(), f'rank{dist.get_rank()}_prenorm.pt')
 
         # Self Attention
         hidden_states, self_attn_weights, present_key_value = self.self_attn(
@@ -415,19 +440,27 @@ class TPLlamaDecoderLayer(nn.Module):
             past_key_value=past_key_value,
             output_attentions=output_attentions,
             use_cache=use_cache,
+            # test_result=test_result,
         )
         with prof.profile_context(f"Rank {dist.get_rank()}: all_reduce", device="cpu") if prof else nullcontext():
             dist.all_reduce(hidden_states, op=dist.ReduceOp.SUM, group=tp_group)
         hidden_states = residual + hidden_states
+        # if test_result:
+        #     save(hidden_states.cpu(), f'rank{dist.get_rank()}_after_residual1.pt')
         
 
         # Fully Connected
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
+        # if test_result:
+        #     save(hidden_states.cpu(), f'rank{dist.get_rank()}_postnorm.pt')
+        hidden_states = self.mlp(hidden_states, test_result=test_result)
         with prof.profile_context(f"Rank {dist.get_rank()}: all_reduce", device="cpu") if prof else nullcontext():
             dist.all_reduce(hidden_states, op=dist.ReduceOp.SUM, group=tp_group)
         hidden_states = residual + hidden_states
+
+        # if test_result:
+        #     save(hidden_states.cpu(), f'rank{dist.get_rank()}_after_residual2.pt')
         
         outputs = (hidden_states,)
 
@@ -519,6 +552,7 @@ class TPLlamaModel(LlamaPreTrainedModel):
         use_cache,
         tp_group=None,
         prof=None,
+        # test_result=False,
     ):
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
@@ -533,6 +567,8 @@ class TPLlamaModel(LlamaPreTrainedModel):
                 past_key_values[idx] if past_key_values is not None else None
             )
 
+            # test_result = True if idx == len(self.layers) - 1 else False
+
             layer_outputs = decoder_layer(
                 hidden_states,
                 attention_mask=attention_mask,
@@ -542,7 +578,11 @@ class TPLlamaModel(LlamaPreTrainedModel):
                 use_cache=use_cache,
                 tp_group=tp_group,
                 prof=prof,
+                # test_result=test_result,
             )
+            ### delete this after test
+            # if test_result == 1:
+            #     return
 
             hidden_states = layer_outputs[0]
 
@@ -703,7 +743,8 @@ class TPLlamaModel(LlamaPreTrainedModel):
                 recv_task.wait()
                 # exchange reference after send_task and recv_task are both finished
                 # from_tensor, to_tensor = to_tensor, from_tensor
-                xi, to_tensor = from_tensor.to(xi.device), from_tensor
+                xi = from_tensor.to(xi.device)
+                from_tensor, to_tensor = to_tensor, from_tensor
 
             else:
                 assert None not in split_results
@@ -728,7 +769,8 @@ class TPLlamaModel(LlamaPreTrainedModel):
         bsz,
         q_len,
         attn: TPLlamaAttention,
-        output_attentions=False
+        output_attentions=False,
+        # test_result=False,
     ):
         num_heads, num_key_value_heads, head_dim = attn.num_heads, attn.num_key_value_heads, attn.head_dim
         query_states = q.view(
@@ -769,6 +811,8 @@ class TPLlamaModel(LlamaPreTrainedModel):
         attn_weights = nn.functional.softmax(
             attn_weights, dim=-1, dtype=torch.float32
         ).to(query_states.dtype)
+        # if test_result:
+        #     save(attn_weights.cpu(), f'rank{dist.get_rank()}_attn_weights.pt')
         attn_output = torch.matmul(attn_weights, value_states)
 
         if attn_output.size() != (bsz, attn.num_heads, q_len, attn.head_dim):
@@ -799,6 +843,7 @@ class TPLlamaModel(LlamaPreTrainedModel):
         use_cache,
         tp_group=None,
         prof=None,
+        # test_result=False,
     ):
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
@@ -812,9 +857,11 @@ class TPLlamaModel(LlamaPreTrainedModel):
         seq_split_len = seq_len // world_size
         seq_l, seq_r = (seq_split_len * rank, seq_split_len * (rank + 1))
 
-        bsz, q_len, hidden_size = hidden_states.size()
+        bsz, q_len, _ = hidden_states.size()
 
         for idx, decoder_layer in enumerate(self.layers):
+            # test_result = True if idx == len(self.layers) - 1 else False
+
             q_proj, k_proj, v_proj = decoder_layer.self_attn.q_proj, decoder_layer.self_attn.k_proj, decoder_layer.self_attn.v_proj
 
             if output_hidden_states:
@@ -824,15 +871,23 @@ class TPLlamaModel(LlamaPreTrainedModel):
                 past_key_values[idx] if past_key_values is not None else None
             )
 
+            residual = hidden_states[..., seq_l:seq_r, :] if idx == 0 else hidden_states
+            
+            hidden_states = decoder_layer.input_layernorm(hidden_states)
+            # if test_result:
+            #     save(hidden_states.cpu(), f'rank{dist.get_rank()}_prenorm.pt')
+
             if idx == 0:
-                residual = hidden_states[..., seq_l:seq_r, :]
-                hidden_states = decoder_layer.input_layernorm(hidden_states)
+                # hidden_states = decoder_layer.input_layernorm(hidden_states)
 
                 q, k, v = q_proj(hidden_states), k_proj(hidden_states), v_proj(hidden_states)
             else:
                 q, k, v = self.ring_all_gather_comp_overlap(hidden_states, decoder_layer, tp_group, 0)
                 # get qkv
                 # q, k, v = tuple(torch.split(qkv_slice, hidden_size, dim=-1))
+            
+            # if test_result:
+            #     save((q.cpu(), k.cpu(), v.cpu()), f'rank{dist.get_rank()}_qkv.pt')
 
             # mha
             attn_output, attn_weights, past_key_value = self.mha_with_rope(
@@ -844,6 +899,7 @@ class TPLlamaModel(LlamaPreTrainedModel):
                 decoder_layer.self_attn,
                 output_attentions=output_attentions,
                 # use_cache=use_cache,
+                # test_result=test_result,
             )
 
             # print(f'rank{rank}, attn_output.shape: {attn_output.shape}')
@@ -856,34 +912,52 @@ class TPLlamaModel(LlamaPreTrainedModel):
 
             # Wo projection
             hidden_states = self.ring_reduce_scatter_comp_overlap(attn_output, decoder_layer, tp_group, 0)
+            # if test_result:
+            #     save(hidden_states.cpu(), f'rank{dist.get_rank()}_attn_output.pt')
             
             # residual connection 1
             hidden_states = residual + hidden_states
+            # if test_result:
+            #     save(hidden_states.cpu(), f'rank{dist.get_rank()}_after_residual1.pt')
 
             # residual 2
             residual = hidden_states
 
             # layernorm 2
             hidden_states = decoder_layer.post_attention_layernorm(hidden_states)
+            # if test_result:
+            #     save(hidden_states.cpu(), f'rank{dist.get_rank()}_postnorm.pt')
 
             # mlp1
             hidden_states = self.ring_all_gather_comp_overlap(hidden_states, decoder_layer, tp_group, 1)
-
+            # if test_result:
+            #     save(hidden_states.cpu(), f'rank{dist.get_rank()}_up_proj.pt')
             # activation： no activation, included in up_proj
 
             # mlp2
             if idx != len(self.layers) - 1:
                 hidden_states = self.ring_reduce_scatter_comp_overlap(hidden_states, decoder_layer, tp_group, 1)
-                
+                # if test_result:
+                #     save(hidden_states.cpu(), f'rank{dist.get_rank()}_down_proj.pt')
                 # residual connection 2
                 hidden_states = residual + hidden_states
+                # if test_result:
+                #     save(hidden_states.cpu(), f'rank{dist.get_rank()}_after_residual2.pt')
             
             else:
                 # mlp2
                 hidden_states = decoder_layer.mlp.down_proj(hidden_states)
-
+                # if test_result:
+                #     save(hidden_states.cpu(), f'rank{dist.get_rank()}_down_proj.pt')
                 hidden_states[..., seq_l:seq_r, :] = residual + hidden_states[..., seq_l:seq_r, :]
+                
                 dist.all_reduce(hidden_states, group=tp_group)
+                # if test_result:
+                #     save(hidden_states.cpu(), f'rank{dist.get_rank()}_after_residual2.pt')
+            
+            # if test_result:
+            #     return
+        hidden_states = self.norm(hidden_states)
             
         return hidden_states, next_decoder_cache, all_hidden_states, all_self_attns
 
@@ -987,7 +1061,7 @@ class TPLlamaModel(LlamaPreTrainedModel):
         #             "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`..."
         #         )
         #         use_cache = False
-
+        # assert galaxy
         if not galaxy:
             hidden_states, next_decoder_cache, all_hidden_states, all_self_attns = self.forward_layers(
                 hidden_states,

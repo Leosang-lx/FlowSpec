@@ -214,7 +214,10 @@ class TPEaModel(nn.Module):
 
         else:
             # chunked_prefill(self, stage_past_key_values=past_key_values, prof=profiler)
-            tp_prefill(self, past_key_values=past_key_values, prof=profiler)
+            tp_prefill(self, past_key_values=past_key_values, prof=profiler, galaxy=galaxy)
+
+        # if log:
+        #     print(f'rank{comm.rank}: prefill done')
         
         # print(f'rank: {config.stage} finished prefill')
         
@@ -306,8 +309,8 @@ class TPEaModel(nn.Module):
                 input_ids, hidden_state, token = outputs
                 # assert accept_length == len(input_ids[0, input_len:]) - new_token, f'accept_length: {accept_length} != len(input_ids[0, input_len:]) - new_token: {len(input_ids[0, input_len:]) - new_token}'
                 new_token += accept_length
-                # if log:
-                    # print(f'{idx_spec}th round, accept_length: {accept_length} in {turns} turns')
+                if log:
+                    print(f'{idx_spec}th round, accept_length: {accept_length}')
                     # turns_cnt += turns
 
                 if input_ids is not None and self.tokenizer is not None:
@@ -383,7 +386,8 @@ def tp_prefill(
     tp_model,
     input_ids=None,
     past_key_values=None,
-    prof=None
+    prof=None,
+    galaxy=False,
 ):
     config = tp_model.config
     device = tp_model.tp_base_model.device
@@ -408,6 +412,7 @@ def tp_prefill(
             input_ids=input_ids,
             past_key_values=past_key_values,
             tp_group=tp_model.tp_group,
+            galaxy=galaxy,
         )
         # print(f'rank: {config.stage} was at barrier')
         # print(f'hidden_state.shape: {hidden_state.shape}')
