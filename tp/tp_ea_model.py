@@ -214,7 +214,8 @@ class TPEaModel(nn.Module):
 
         else:
             # chunked_prefill(self, stage_past_key_values=past_key_values, prof=profiler)
-            tp_prefill(self, past_key_values=past_key_values, prof=profiler, galaxy=galaxy)
+            tp_prefill(self, past_key_values=past_key_values, prof=profiler, galaxy=galaxy, current_data_length=self.current_length_data)  # unsolved: seq_len cannot be equally split
+            # tp_prefill(self, past_key_values=past_key_values, prof=profiler)
 
         # if log:
         #     print(f'rank{comm.rank}: prefill done')
@@ -388,6 +389,7 @@ def tp_prefill(
     past_key_values=None,
     prof=None,
     galaxy=False,
+    current_data_length=None,
 ):
     config = tp_model.config
     device = tp_model.tp_base_model.device
@@ -407,6 +409,15 @@ def tp_prefill(
     else:
         with prof.profile_context(f"Rank {config.stage}: broadcast_recv", device="cpu") if prof else nullcontext():
             input_ids = comm.broadcast_recv(src_rank=0).to(device)
+        if galaxy:
+            rem = input_ids.size(-1) % dist.get_world_size(group=tp_model.tp_group)
+            if rem != 0:
+                pad_len = dist.get_world_size(group=tp_model.tp_group) - rem
+                input_len = input_ids.size(-1)
+                assert current_data_length is not None
+                dummy_input_ids = torch.ones(1, pad_len, dtype=input_ids.dtype, device=input_ids.device)
+                input_ids = torch.cat([input_ids, dummy_input_ids], dim=-1)
+
         # print(f'rank: {config.stage} input_ids.shape: {input_ids.shape}')
         _, hidden_state = tp_model(
             input_ids=input_ids,
@@ -414,6 +425,9 @@ def tp_prefill(
             tp_group=tp_model.tp_group,
             galaxy=galaxy,
         )
+        if galaxy and rem != 0:
+            hidden_state = hidden_state[..., :-pad_len, :]
+            current_data_length.fill_(input_len)
         # print(f'rank: {config.stage} was at barrier')
         # print(f'hidden_state.shape: {hidden_state.shape}')
         # print(f'hidden_state: {hidden_state}')

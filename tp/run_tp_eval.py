@@ -65,6 +65,7 @@ def run_eval(args):
     #warmup
     ###########################################
     q = questions[0]
+    pipeline_type = 'galaxy' if run_config.use_galaxy else 'tp'
     cnt = tqdm(range(run_config.warmup_repeat), desc="Warmup") if rank == 0 else range(run_config.warmup_repeat)
     for _ in cnt:
         torch.manual_seed(0) 
@@ -111,83 +112,83 @@ def run_eval(args):
                 tp_model, 
                 input_ids if rank == 0 else None, 
                 run_config.temperatures[0],
-                run_config.pipeline_types[0],
-                run_config.log if rank == 0 else False, 
-                None
+                False, 
+                None,
+                run_config.use_galaxy,
             )
             
-            if rank == 0:  # only for greedy decoding test!!!
-                if run_config.log:
-                    output_ids, new_tokens, idx, turns = outputs
-                else:
-                    output_ids = outputs
+            # if rank == 0:  # only for greedy decoding test!!!
+            #     if run_config.log:
+            #         output_ids, new_tokens, idx, turns = outputs
+            #     else:
+            #         output_ids = outputs
                     
-                output_ids = output_ids[0][len(input_ids[0]):]
+            #     output_ids = output_ids[0][len(input_ids[0]):]
                 
-                if "llama3" in args.model_name:
-                    stop_token_ids = [
-                        tp_model.tokenizer.eos_token_id,
-                        tp_model.tokenizer.convert_tokens_to_ids("<|eot_id|>")
-                    ]
-                    if stop_token_ids:
-                        stop_token_ids_index = [
-                            i
-                            for i, id in enumerate(output_ids)
-                            if id in stop_token_ids
-                        ]
-                        if len(stop_token_ids_index) > 0:
-                            output_ids = output_ids[: stop_token_ids_index[0]]
-                else:
-                    if conv.stop_token_ids:
-                        stop_token_ids_index = [
-                            i
-                            for i, id in enumerate(output_ids)
-                            if id in conv.stop_token_ids
-                        ]
-                        if len(stop_token_ids_index) > 0:
-                            output_ids = output_ids[: stop_token_ids_index[0]]
+            #     if "llama3" in args.model_name:
+            #         stop_token_ids = [
+            #             tp_model.tokenizer.eos_token_id,
+            #             tp_model.tokenizer.convert_tokens_to_ids("<|eot_id|>")
+            #         ]
+            #         if stop_token_ids:
+            #             stop_token_ids_index = [
+            #                 i
+            #                 for i, id in enumerate(output_ids)
+            #                 if id in stop_token_ids
+            #             ]
+            #             if len(stop_token_ids_index) > 0:
+            #                 output_ids = output_ids[: stop_token_ids_index[0]]
+            #     else:
+            #         if conv.stop_token_ids:
+            #             stop_token_ids_index = [
+            #                 i
+            #                 for i, id in enumerate(output_ids)
+            #                 if id in conv.stop_token_ids
+            #             ]
+            #             if len(stop_token_ids_index) > 0:
+            #                 output_ids = output_ids[: stop_token_ids_index[0]]
 
-                output = tp_model.tokenizer.decode(
-                    output_ids,
-                    spaces_between_special_tokens=False,
-                )
+            #     output = tp_model.tokenizer.decode(
+            #         output_ids,
+            #         spaces_between_special_tokens=False,
+            #     )
                 
-                if "llama3" in args.model_name:
-                    for special_token in tp_model.tokenizer.special_tokens_map.values():
-                        if isinstance(special_token, list):
-                            for special_tok in special_token:
-                                output = output.replace(special_tok, "")
-                        else:
-                            output = output.replace(special_token, "")
-                    output = output.strip()
+            #     if "llama3" in args.model_name:
+            #         for special_token in tp_model.tokenizer.special_tokens_map.values():
+            #             if isinstance(special_token, list):
+            #                 for special_tok in special_token:
+            #                     output = output.replace(special_tok, "")
+            #             else:
+            #                 output = output.replace(special_token, "")
+            #         output = output.strip()
                     
-                    messages.append({
-                        "role": "assistant",
-                        "content": output
-                    })
-                else:
-                    conv.stop_str = "</s>"
-                    if conv.stop_str and output.find(conv.stop_str) > 0:
-                        output = output[: output.find(conv.stop_str)]
-                    for special_token in tp_model.tokenizer.special_tokens_map.values():
-                        if isinstance(special_token, list):
-                            for special_tok in special_token:
-                                output = output.replace(special_tok, "")
-                        else:
-                            output = output.replace(special_token, "")
-                    output = output.strip()
+            #         messages.append({
+            #             "role": "assistant",
+            #             "content": output
+            #         })
+            #     else:
+            #         conv.stop_str = "</s>"
+            #         if conv.stop_str and output.find(conv.stop_str) > 0:
+            #             output = output[: output.find(conv.stop_str)]
+            #         for special_token in tp_model.tokenizer.special_tokens_map.values():
+            #             if isinstance(special_token, list):
+            #                 for special_tok in special_token:
+            #                     output = output.replace(special_tok, "")
+            #             else:
+            #                 output = output.replace(special_token, "")
+            #         output = output.strip()
 
-                    if conv.name == "xgen" and output.startswith("Assistant:"):
-                        output = output.replace("Assistant:", "", 1).strip()
+            #         if conv.name == "xgen" and output.startswith("Assistant:"):
+            #             output = output.replace("Assistant:", "", 1).strip()
                         
-                    conv.messages[-1][-1] = output
+            #         conv.messages[-1][-1] = output
         
     ###########################################
     #test
     ###########################################
     record_path = f"{args.model_name}-{args.extra_name}.txt"
     for temperature in run_config.temperatures:
-        for pipeline_type in run_config.pipeline_types:
+        # for pipeline_type in run_config.pipeline_types:
             for _ in range(run_config.error_repeat):
                 for question_path in run_config.question_paths:
                     questions = load_questions(question_path, run_config.question_begin, run_config.question_end)
@@ -247,15 +248,15 @@ def run_eval(args):
                                         
                                     input_ids = torch.as_tensor(input_ids).cuda()
                                 
-                                with prof.profile_context(f"Rank {rank}: {run_config.pipeline_type} pipeline", device=f"cuda:{device}") if run_config.prof else nullcontext():
+                                with prof.profile_context(f"Rank {rank}: {pipeline_type} pipeline", device=f"cuda:{device}") if run_config.prof else nullcontext():
                                     start_time = time.time()
                                     outputs = run(
                                         tp_model, 
                                         input_ids if rank == 0 else None, 
                                         temperature,
-                                        pipeline_type,
                                         run_config.log if rank == 0 else False, 
-                                        prof if run_config.prof else None
+                                        prof if run_config.prof else None,
+                                        galaxy=run_config.use_galaxy,
                                     )
                                     torch.cuda.synchronize()
                                     end_time = time.time()
@@ -372,13 +373,14 @@ def run_eval(args):
         tp_model.comm.reset_traffic()
     
 
-def run(tp_model, input_ids, temperature, pipeline_type, log=False, profiler=None):
+def run(tp_model, input_ids, temperature, log=False, profiler=None, galaxy=False):
     outputs = tp_model.tp_generate(
         input_ids=input_ids,
         temperature=temperature,
         max_new_tokens=run_config.max_new_tokens,
         log=log,
         profiler=profiler,
+        galaxy=galaxy,
     )
     if dist.get_rank() == 0:
         return outputs

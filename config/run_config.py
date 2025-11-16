@@ -20,15 +20,17 @@ class Config:
         delay_ms: float = 0.0 # not supported yet
 
     # run config
-    mode = "demo" # "eval" or "demo"
+    mode = "eval" # "eval" or "demo"
     
     if mode == "eval":  # large scale evaluation
         pipeline_types: List[str] = field(default_factory=lambda: ["continuous"])
+        # declare galaxy when using TP
+        use_galaxy = True
         
         warmup = False
         if hardware == "server":
             if '13b' not in model_name:
-                warmup_repeat = 10
+                warmup_repeat = 3
             else:
                 warmup_repeat = 5
         else:
@@ -46,12 +48,11 @@ class Config:
         
         eval_record: bool = True
         
-        temperatures: List[float] = field(default_factory=lambda: [0.0])
+        temperatures: List[float] = field(default_factory=lambda: [0.0, 1.0])
     else:  # local test
         pipeline_type: str = "tp"
-        if pipeline_type == 'tp':
-            # declare galaxy when using TP
-            use_galaxy = True
+        # declare galaxy when using TP
+        use_galaxy = True
         
         warmup = False
         warmup_repeat = 0
@@ -64,8 +65,8 @@ class Config:
         temperature: float = 0.0
     
     
-    log: bool = True
-    prof: bool = True
+    log: bool = False
+    prof: bool = False
     save_timestamps: bool = False
     max_new_tokens: int = 256
     

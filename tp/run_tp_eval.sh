@@ -11,7 +11,7 @@
 # kill -SIGINT "$FIRST_PID" 2>/dev/null || true
 
 torchrun --nnodes=1 --master-port=12345 --nproc_per_node=5 tp/run_tp_eval.py \
---extra_name turns_0801_llama2-7b
+--extra_name 1116-galaxy
 SECOND_PID=$!
 
 wait $SECOND_PID
