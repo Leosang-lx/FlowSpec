@@ -10,6 +10,7 @@
 #   -u $(id -u):$(id -g) \
 #   -p 12345:12345 \
 docker run -it \
+  --rm \
   --gpus all \
   -v $HOME/big_file:/model_file \
   -v $HOME/project:/project \
