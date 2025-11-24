@@ -23,44 +23,38 @@ class Config:
     mode = "eval" # "eval" or "demo"
     
     if mode == "eval":  # large scale evaluation
-        pipeline_types: List[str] = field(default_factory=lambda: ["continuous"])
+        pipeline_types: List[str] = field(default_factory=lambda: ["naive", "pipedec", "continuous"])
         # declare galaxy when using TP
-        use_galaxy = True
+        tp_types: List[str] = field(default_factory=lambda: ['tp', 'galaxy'])
         
         warmup = False
-        if hardware == "server":
-            if '13b' not in model_name:
-                warmup_repeat = 3
-            else:
-                warmup_repeat = 5
-        else:
-            warmup_repeat = 3
+        warmup_repeat = 0
         test_repeat = 1 # this refer to num of choices in the eval set
         error_repeat = 1 # for error analysis
         change_seed = False
         
-        dataset_names: List[str] = field(default_factory=lambda: ["mt_bench", "humaneval", "gsm8k", "alpaca", "sum", "qa"])
-        # dataset_names: List[str] = field(default_factory=lambda: ["mt_bench"])
+        # dataset_names: List[str] = field(default_factory=lambda: ["mt_bench", "humaneval", "gsm8k", "alpaca", "sum", "qa"])
+        dataset_names: List[str] = field(default_factory=lambda: ["mt_bench"])
         # dataset_names: List[str] = field(default_factory=lambda: ["mt_bench", "humaneval", "gsm8k", "alpaca"])
         question_paths: List[str] = field(init=False)
         question_begin: int = 30
-        question_end: int = 50
+        question_end: int = 31
         
         eval_record: bool = True
         
-        temperatures: List[float] = field(default_factory=lambda: [0.0, 1.0])
+        temperatures: List[float] = field(default_factory=lambda: [0.0])
     else:  # local test
-        pipeline_type: str = "tp"
+        pipeline_type: str = "continuous"
         # declare galaxy when using TP
-        use_galaxy = True
+        tp_type: str = "galaxy"
         
         warmup = False
         warmup_repeat = 0
         test_repeat = 1
         
-        your_message: str = "Hello"
+        # your_message: str = "Hello"
         # your_message: str = "Who are you?"
-        # your_message: str = "What are some easy and healthy recipes for a quick dinner?"
+        your_message: str = "What are some easy and healthy recipes for a quick dinner?"
         
         temperature: float = 0.0
     
@@ -137,7 +131,7 @@ class Config:
         expand_depth: int =6
         expand_subseq_token: int = -1
         
-        none_expand: bool = True
+        none_expand: bool = False
         if none_expand:
             none_expand_size: int = 48
             none_expand_depth: int = 1

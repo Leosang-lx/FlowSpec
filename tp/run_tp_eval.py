@@ -41,7 +41,8 @@ def run_eval(args):
     print(f'Load model from {run_config.base_model_dir}...')
     print(f'Load EAGLE model from {run_config.EAGLE_model_path}...')
     tp_model = TPEaModel.from_pretrained(
-        tp_base_model_path=f"/home/liux/big_file/tp_model/meta-llama/Llama-2-7b-chat-hf/new_stage_model_series_tp_fp16/stage_model_{rank}",
+        # tp_base_model_path=f"/home/liux/big_file/tp_model/meta-llama/Llama-2-7b-chat-hf/new_stage_model_series_tp_fp16/stage_model_{rank}",
+        tp_base_model_path=f"/home/liux/big_file/tp_model/lmsys/vicuna-7b-v1.3/new_stage_model_series_tp_fp16/stage_model_{rank}",
         ea_model_path=run_config.EAGLE_model_path if rank == 0 else None,
         torch_dtype=torch.float16,
         low_cpu_mem_usage=True,
@@ -65,7 +66,7 @@ def run_eval(args):
     #warmup
     ###########################################
     q = questions[0]
-    pipeline_type = 'galaxy' if run_config.use_galaxy else 'tp'
+    # pipeline_type = 'galaxy' if run_config.use_galaxy else 'tp'
     cnt = tqdm(range(run_config.warmup_repeat), desc="Warmup") if rank == 0 else range(run_config.warmup_repeat)
     for _ in cnt:
         torch.manual_seed(0) 
@@ -114,7 +115,7 @@ def run_eval(args):
                 run_config.temperatures[0],
                 False, 
                 None,
-                run_config.use_galaxy,
+                # run_config.use_galaxy,
             )
             
             # if rank == 0:  # only for greedy decoding test!!!
@@ -188,7 +189,8 @@ def run_eval(args):
     ###########################################
     record_path = f"{args.model_name}-{args.extra_name}.txt"
     for temperature in run_config.temperatures:
-        # for pipeline_type in run_config.pipeline_types:
+        for tp_type in run_config.tp_types:
+            use_galaxy = tp_type == 'galaxy'
             for _ in range(run_config.error_repeat):
                 for question_path in run_config.question_paths:
                     questions = load_questions(question_path, run_config.question_begin, run_config.question_end)
@@ -248,7 +250,7 @@ def run_eval(args):
                                         
                                     input_ids = torch.as_tensor(input_ids).cuda()
                                 
-                                with prof.profile_context(f"Rank {rank}: {pipeline_type} pipeline", device=f"cuda:{device}") if run_config.prof else nullcontext():
+                                with prof.profile_context(f"Rank {rank}: {tp_type} pipeline", device=f"cuda:{device}") if run_config.prof else nullcontext():
                                     start_time = time.time()
                                     outputs = run(
                                         tp_model, 
@@ -256,7 +258,7 @@ def run_eval(args):
                                         temperature,
                                         run_config.log if rank == 0 else False, 
                                         prof if run_config.prof else None,
-                                        galaxy=run_config.use_galaxy,
+                                        galaxy=use_galaxy,
                                     )
                                     torch.cuda.synchronize()
                                     end_time = time.time()
@@ -343,7 +345,7 @@ def run_eval(args):
                     if rank == 0:
                         throughput = sum(new_tokens_list) / sum(wall_time_list)
                         avg_latency = sum(wall_time_list) / len(wall_time_list)
-                        print(f'temperature: {temperature}, pipeline_type: {pipeline_type}, question_path: {question_path}, question_begin: {run_config.question_begin}, question_end: {run_config.question_end}')
+                        print(f'temperature: {temperature}, pipeline_type: {tp_type}, question_path: {question_path}, question_begin: {run_config.question_begin}, question_end: {run_config.question_end}')
                         print(f'throughput: {throughput}, avg_latency: {avg_latency}')
                         if run_config.log:
                             total_rounds = sum(idx_list)
@@ -352,7 +354,7 @@ def run_eval(args):
                             print(f'turns: {sum(turns_list)}, new_tokens: {sum(new_tokens_list)}, avg_accept_length: {sum(new_tokens_list)/sum(turns_list)}')
                         if run_config.eval_record:
                             with open(record_path, 'a') as f:
-                                f.write(f'temperature: {temperature}, pipeline_type: {pipeline_type}, question_path: {question_path}, question_begin: {run_config.question_begin}, question_end: {run_config.question_end}\n')
+                                f.write(f'temperature: {temperature}, pipeline_type: {tp_type}, question_path: {question_path}, question_begin: {run_config.question_begin}, question_end: {run_config.question_end}\n')
                                 f.write(f'new_tokens_list: {new_tokens_list}\n')
                                 f.write(f'wall_time_list: {wall_time_list}\n')
                                 f.write(f'throughput: {throughput}\n')

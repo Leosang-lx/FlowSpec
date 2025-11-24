@@ -55,6 +55,8 @@ def run_eval(args):
     )
     
     stage_model.eval()
+    stage_model.stage_base_model.config.max_position_embeddings = 2560
+    print(f'Rank {rank}: max_position_embeddings={stage_model.stage_base_model.config.max_position_embeddings}')
 
     # assert run_config.pipeline_type in ["naive", "pruned", "continuous", "pipedec"]
     # assert run_config.mode in ["eval", "demo"]

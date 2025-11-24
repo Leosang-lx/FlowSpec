@@ -37,7 +37,8 @@ def main():
     
     # with prof.profile_context(f"Rank {rank}: loading stage model", device=f"cuda:{device}"):
     tp_model = TPEaModel.from_pretrained(
-        tp_base_model_path= f"/home/liux/big_file/tp_model/meta-llama/Llama-2-7b-chat-hf/new_stage_model_series_tp_fp16/stage_model_{rank}",
+        # tp_base_model_path= f"/home/liux/big_file/tp_model/meta-llama/Llama-2-7b-chat-hf/new_stage_model_series_tp_fp16/stage_model_{rank}",
+        tp_base_model_path=f"/home/liux/big_file/tp_model/lmsys/vicuna-7b-v1.3/new_stage_model_series_tp_fp16/stage_model_{rank}",
         ea_model_path=run_config.EAGLE_model_path if rank == 0 else None,
         torch_dtype=torch.float16,
         low_cpu_mem_usage=True,
@@ -100,6 +101,7 @@ def main():
         
         input_ids = torch.as_tensor(input_ids).cuda()
 
+    use_galaxy = run_config.tp_type == "galaxy"
     # [warm-up]
     if run_config.warmup:
         cnt = tqdm(range(run_config.warmup_repeat), desc="Warmup") if rank == 0 else range(run_config.warmup_repeat)
@@ -108,7 +110,7 @@ def main():
             outputs = run(
                     tp_model, 
                     input_ids if rank == 0 else None,
-                    galaxy=run_config.use_galaxy,
+                    # galaxy=run_config.use_galaxy,
                 )
 
     # [test generation]
@@ -121,7 +123,7 @@ def main():
                     input_ids if rank == 0 else None, 
                     run_config.log if rank == 0 else False, 
                     prof if run_config.prof else None,
-                    galaxy=run_config.use_galaxy,
+                    galaxy=use_galaxy,
                 )
     
     # [print output]

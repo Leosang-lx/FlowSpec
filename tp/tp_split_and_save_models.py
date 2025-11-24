@@ -24,8 +24,10 @@ cache_dir = '/home/liux/big_file/'
 # EAGLE_model_path = 'yuhuili/EAGLE-Vicuna-13B-v1.3'
 # base_model_path = 'meta-llama/Llama-2-13b-chat-hf'
 # EAGLE_model_path = 'yuhuili/EAGLE-llama2-chat-13B'
-base_model_name = 'meta-llama/Llama-2-7b-chat-hf'
-EAGLE_model_path = 'yuhuili/EAGLE-llama2-chat-7B'
+# base_model_name = 'meta-llama/Llama-2-7b-chat-hf'
+# EAGLE_model_path = 'yuhuili/EAGLE-llama2-chat-7B'
+base_model_name = 'lmsys/vicuna-7b-v1.3'
+EAGLE_model_path = 'yuhuili/EAGLE-Vicuna-7B-v1.3'
 
 base_model_path = cache_dir + base_model_name
 EAGLE_model_path = cache_dir + EAGLE_model_path
