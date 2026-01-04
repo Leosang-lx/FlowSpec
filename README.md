@@ -105,7 +105,7 @@ Set `quant` in `run_config.py` to choose the quantization method, if needed.
 # run
 bash run_eval.sh
 # or
-PYTHONPATH=. scripts/bash run_jetson_eval.sh
+PYTHONPATH=. eval/bash run_jetson_eval.sh
 ```
 
 <!-- **13B model evaluation (Quantization is recommended)**
