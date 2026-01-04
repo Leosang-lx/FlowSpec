@@ -8,7 +8,7 @@ import torch
 class Config:
     
     # model to use
-    model_name: str = "llama2" 
+    model_name: str = "vicuna" 
     
     # network config
     hardware: str = "server" # "jetson" or "server"
@@ -33,12 +33,12 @@ class Config:
         error_repeat = 1 # for error analysis
         change_seed = False
         
-        # dataset_names: List[str] = field(default_factory=lambda: ["mt_bench", "humaneval", "gsm8k", "alpaca", "sum", "qa"])
-        dataset_names: List[str] = field(default_factory=lambda: ["mt_bench"])
+        dataset_names: List[str] = field(default_factory=lambda: ["mt_bench", "humaneval", "gsm8k", "alpaca", "sum", "qa"])
+        # dataset_names: List[str] = field(default_factory=lambda: ["mt_bench"])
         # dataset_names: List[str] = field(default_factory=lambda: ["mt_bench", "humaneval", "gsm8k", "alpaca"])
         question_paths: List[str] = field(init=False)
         question_begin: int = 30
-        question_end: int = 31
+        question_end: int = 50
         
         eval_record: bool = True
         
@@ -59,7 +59,7 @@ class Config:
         temperature: float = 0.0
     
     
-    log: bool = False
+    log: bool = True
     prof: bool = False
     save_timestamps: bool = False
     max_new_tokens: int = 256

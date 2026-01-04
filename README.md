@@ -5,7 +5,7 @@ This repository is the official implementation of _FlowSpec: Continuous Pipeline
 In this work, we propose a continuous pipeline-parallel tree-based speculative decoding framework for distributed inference, called **FlowSpec**, to reduce the inference latency with sparse requests. 
 Our framework incorporates a lightweight draft model for token generation and the base LLM for pipeline-parallel verification, which enables the output of multiple tokens in a single forward propagation and hence mitigates the sparse request issue. 
 
-![Workflow](figs/workflow.png)
+![Workflow](figs/system_overview.png)
 ## Requirements
 
 ### Basic information
@@ -141,40 +141,11 @@ sampling). We select 20 samples for each dataset and limit the length of the gen
 128. V and L2 are short for LLaMA2-Chat and Vicuna-v1.3, respectively. 7B and 13B denote the
 number of parameters of the respective models.
 
-<!-- | Model    | Method      | Metric       | MT-bench | HumanEval | GSM8K | Alpaca | CNN/DM | Natural Ques. | Mean  | SR↑     |
-|----------|-------------|--------------|---------:|----------:|------:|-------:|-------:|--------------:|------:|---------|
-| **Temperature = 0** |  |  |  |  |  |  |  |  |  |  |
-| V 13B    | Naive PP    | ξ ↑          |     1.58 |      1.56 |  1.42 |   1.25 |   1.15 |         1.03 | 1.33  | 1.00×   |
-|          | PipeDec     | ξ ↑          |     1.68 |      1.70 |  1.67 |   1.62 |   1.45 |         1.51 | 1.60  | 1.45×   |
-|          | **FlowSpec**| **ξ ↑**      | **2.55** |  **2.54** |**2.35**|**2.05**|**1.82**|     **1.74** |**2.18**|**1.64×**|
-| V 7B     | Naive PP    | ξ ↑          |     7.69 |      7.60 |  6.83 |   6.27 |   4.81 |         5.04 | 6.37  | 1.00×   |
-|          | PipeDec     | ξ ↑          |     7.61 |      7.58 |  7.49 |   7.27 |   6.19 |         6.81 | 7.16  | 1.12×   |
-|          | **FlowSpec**| **ξ ↑**      | **9.88** |  **9.47** |**8.91**|**8.28**|**6.43**|**7.17**     |**8.40**|**1.32×**|
-| L2 13B   | Naive PP    | ξ ↑          |     1.45 |      1.58 |  1.37 |   1.25 |   1.12 |         1.13 | 1.31  | 1.00×   |
-|          | PipeDec     | ξ ↑          |     1.64 |      1.69 |  1.63 |   1.60 |   1.47 |         1.55 | 1.59  | 1.21×   |
-|          | **FlowSpec**| **ξ ↑**      | **2.36** |  **2.52** |**2.26**|**2.10**|**1.82**|**1.92**     |**2.16**|**1.65×**|
-| L2 7B    | Naive PP    | ξ ↑          |     6.86 |      7.29 |  6.23 |   6.19 |   4.77 |         5.29 | 6.10  | 1.00×   |
-|          | PipeDec     | ξ ↑          |     7.33 |      7.49 |  7.25 |   7.19 |   6.17 |         6.78 | 7.03  | 1.15×   |
-|          | **FlowSpec**| **ξ ↑**      | **9.02** | **9.51** |**8.50**|**8.49**|**6.41**|**7.46**     |**8.23**|**1.35×**|
-| **Temperature = 1** |  |  |  |  |  |  |  |  |  |  |
-| V 13B    | Naive PP    | ξ ↑          |     1.31 |      1.41 |  1.17 |   1.06 |   1.01 |         0.97 | 1.16  | 1.00×   |
-|          | PipeDec     | ξ ↑          |     1.64 |      1.64 |  1.59 |   1.55 |   1.41 |         1.49 | 1.55  | 1.34×   |
-|          | **FlowSpec**| **ξ ↑**      | **2.24** |  **2.36** |**2.10**|**1.85**|**1.66**|**1.57**     |**1.96**|**1.70×**|
-| V 7B     | Naive PP    | ξ ↑          |     6.34 |      6.31 |  5.71 |   5.19 |   4.47 |         4.38 | 5.40  | 1.00×   |
-|          | PipeDec     | ξ ↑          |     7.31 |      7.38 |  7.12 |   6.87 |   5.94 |      **6.56**| 6.86  | 1.27×   |
-|          | **FlowSpec**| **ξ ↑**      | **8.26** |  **8.71** |**7.88**|**7.37**|**5.96**|        6.32 | **7.42**|**1.37×**|
-| L2 13B   | Naive PP    | ξ ↑          |     1.35 |      1.52 |  1.30 |   1.20 |   1.07 |         1.15 | 1.26  | 1.00×   |
-|          | PipeDec     | ξ ↑          |     1.65 |      1.70 |  1.63 |   1.59 |   1.47 |         1.58 | 1.60  | 1.26×   |
-|          | **FlowSpec**| **ξ ↑**      | **2.32** |  **2.63** |  **2.22**|**2.04**|**1.72**|**1.99**|**2.15**|**1.71×**|
-| L2 7B    | Naive PP    | ξ ↑          |     6.49 |      6.64 |  6.10 |   5.90 |   4.50 |         5.24 | 5.81  | 1.00×   |
-|          | PipeDec     | ξ ↑          |     7.30 |      7.17 |  7.36 |   7.22 |   6.13 |         6.95 | 7.02  | 1.20×   |
-|          | **FlowSpec**| **ξ ↑**      | **8.53** |  **8.90** |**8.37**|**8.01**|**6.14**|**7.31**|**7.88**|**1.36×**| -->
-![Main Result](figs/main_result.png)
-
+![Main Result](figs/main_results.png)
 
 ## Acknowledgement
 The implementation of FlowSpec reuses the code from [EAGLE](https://github.com/SafeAILab/EAGLE) and refers to [OPT-Tree](https://github.com/Jikai0Wang/OPT-Tree) and [Jupiter](https://github.com/ysyisyourbrother/Jupiter).
 
-## Contributing
-coming soon...
+<!-- ## Contributing
+coming soon... -->
 

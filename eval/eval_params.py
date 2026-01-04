@@ -191,10 +191,11 @@ def run_eval(args):
     ###########################################
     record_path = f"{run_config.model_name}-{args.extra_name}.txt"
     for temperature in run_config.temperatures:
-        pipeline_type = 'continuous'
+        pipeline_type = 'naive'
 
         if not hasattr(run_config, 'test_depths'):
-            test_depths = product(list(range(3, 9)), repeat=2)
+            # test_depths = product(list(range(3, 9)), repeat=2)
+            test_depths = [(5, 5)]
         else:
             test_depths = run_config.test_depths
         
