@@ -37,11 +37,11 @@ def run_eval(args):
     print(f'rank={rank}, world_size={world_size}, device={device}')
     
     # with prof.profile_context(f"Rank {rank}: loading stage model", device=f"cuda:{device}"):
-    print(f'Load model from {run_config.base_model_dir}...')
-    print(f'Load EAGLE model from {run_config.EAGLE_model_path}...')
+    print(f'Load model from {args.base_model_dir}...')
+    print(f'Load EAGLE model from {args.EAGLE_model_path}...')
     stage_model = StageEaModel.from_pretrained(
-        stage_base_model_path=run_config.base_model_dir + f"/stage_model_{rank}",
-        ea_model_path=run_config.EAGLE_model_path if rank == 0 else None,
+        stage_base_model_path=args.base_model_dir + f"/stage_model_{rank}",
+        ea_model_path=args.EAGLE_model_path if rank == 0 else None,
         torch_dtype=torch.float16,
         low_cpu_mem_usage=True,
         # max_memory={"cpu": "1GB"},
