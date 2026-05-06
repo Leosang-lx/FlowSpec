@@ -460,6 +460,10 @@ class StageEaModel(nn.Module):
         kv_cache=(past_key_values, past_key_values_data, current_length_data) if not self.is_draft_stage else None
 
         # outer loop
+        if self.is_draft_stage:
+            decode_start = torch.cuda.Event(enable_timing=True)
+            decode_end = torch.cuda.Event(enable_timing=True)
+            decode_start.record()
         for idx_spec in range(max_length):
             if config.is_draft_stage:
                 outputs = pipeline_forward(
@@ -513,11 +517,14 @@ class StageEaModel(nn.Module):
                 if should_stop.item():
                     break
         if self.is_draft_stage:
+            decode_end.record()
+            torch.cuda.synchronize()
+            decode_time = decode_start.elapsed_time(decode_end) / 1000.0  # convert ms to seconds
             if not log:
-                return input_ids
+                return input_ids, decode_time
             else:
                 # print(f'skip_count: {skip_count}')
-                return input_ids, new_token, idx_spec, turns_cnt
+                return input_ids, new_token, idx_spec, turns_cnt, decode_time
             
     def _serial_pipeline(
         self,

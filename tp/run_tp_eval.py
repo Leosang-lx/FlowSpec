@@ -16,7 +16,6 @@ from profiler.profiler import prof, is_strictly_ascending, save_as
 from contextlib import nullcontext
 from config.run_config import config as run_config
 warnings.filterwarnings("ignore", category=UserWarning, message="TypedStorage is deprecated.*")
-import time
 import random
 import numpy as np
 
@@ -197,7 +196,7 @@ def run_eval(args):
                 
                     cnt = tqdm(range(len(questions)), desc=question_path) if rank == 0 else range(len(questions))
                     new_tokens_list = []
-                    wall_time_list = []
+                    decode_time_list = []
                     idx_list = []
                     turns_list = []
                     
@@ -251,24 +250,20 @@ def run_eval(args):
                                     input_ids = torch.as_tensor(input_ids).cuda()
                                 
                                 with prof.profile_context(f"Rank {rank}: {tp_type} pipeline", device=f"cuda:{device}") if run_config.prof else nullcontext():
-                                    start_time = time.time()
                                     outputs = run(
-                                        tp_model, 
-                                        input_ids if rank == 0 else None, 
+                                        tp_model,
+                                        input_ids if rank == 0 else None,
                                         temperature,
-                                        run_config.log if rank == 0 else False, 
+                                        run_config.log if rank == 0 else False,
                                         prof if run_config.prof else None,
                                         galaxy=use_galaxy,
                                     )
-                                    torch.cuda.synchronize()
-                                    end_time = time.time()
-                                    wall_time = end_time - start_time
-                                
+
                                 if rank == 0:  # only for greedy decoding test!!!
                                     if run_config.log:
-                                        output_ids, new_tokens, idx, turns = outputs
+                                        output_ids, new_tokens, idx, turns, decode_time = outputs
                                     else:
-                                        output_ids = outputs
+                                        output_ids, decode_time = outputs
                                     
                                     output_ids = output_ids[0][len(input_ids[0]):]
                                     if "llama3" in args.model_name:
@@ -332,7 +327,7 @@ def run_eval(args):
                                 
                                 if rank == 0:
                                     new_tokens_list.append(output_ids.shape[0])
-                                    wall_time_list.append(wall_time)
+                                    decode_time_list.append(decode_time)
                                     if run_config.log:
                                         idx_list.append(idx)
                                         turns_list.append(turns)
@@ -343,25 +338,25 @@ def run_eval(args):
                         prof.print_all_events()
                     
                     if rank == 0:
-                        throughput = sum(new_tokens_list) / sum(wall_time_list)
-                        avg_latency = sum(wall_time_list) / len(wall_time_list)
+                        throughput = sum(new_tokens_list) / sum(decode_time_list)
+                        avg_latency = sum(decode_time_list) / len(decode_time_list)
                         print(f'temperature: {temperature}, pipeline_type: {tp_type}, question_path: {question_path}, question_begin: {run_config.question_begin}, question_end: {run_config.question_end}')
                         print(f'throughput: {throughput}, avg_latency: {avg_latency}')
                         if run_config.log:
                             total_rounds = sum(idx_list)
-                            total_turns = sum(turns_list)
+                            # total_turns = sum(turns_list)
                             print(f'rounds: {sum(idx_list)}, new_tokens: {sum(new_tokens_list)}, avg_accept_length: {sum(new_tokens_list)/sum(idx_list)}')
-                            print(f'turns: {sum(turns_list)}, new_tokens: {sum(new_tokens_list)}, avg_accept_length: {sum(new_tokens_list)/sum(turns_list)}')
+                            # print(f'turns: {sum(turns_list)}, new_tokens: {sum(new_tokens_list)}, avg_accept_length: {sum(new_tokens_list)/sum(turns_list)}')
                         if run_config.eval_record:
                             with open(record_path, 'a') as f:
                                 f.write(f'temperature: {temperature}, pipeline_type: {tp_type}, question_path: {question_path}, question_begin: {run_config.question_begin}, question_end: {run_config.question_end}\n')
                                 f.write(f'new_tokens_list: {new_tokens_list}\n')
-                                f.write(f'wall_time_list: {wall_time_list}\n')
+                                f.write(f'decode_time_list: {decode_time_list}\n')
                                 f.write(f'throughput: {throughput}\n')
                                 f.write(f'avg_latency: {avg_latency}\n')
                                 if run_config.log:
                                     f.write(f'avg_accept_length: {sum(new_tokens_list)/sum(idx_list)}\n')
-                                    f.write(f'turns: {sum(turns_list)}, new_tokens: {sum(new_tokens_list)}, avg_accept_length: {sum(new_tokens_list)/sum(turns_list)}\n')
+                                    # f.write(f'turns: {sum(turns_list)}, new_tokens: {sum(new_tokens_list)}, avg_accept_length: {sum(new_tokens_list)/sum(turns_list)}\n')
                                 f.write(f'---------------------------------------------------------------------------------------------------------\n')
                     dist.barrier()
                     

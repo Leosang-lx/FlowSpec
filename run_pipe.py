@@ -123,9 +123,9 @@ def main():
     # [print output]
     if rank == 0:  # only for greedy decoding test!!!
         if run_config.log:
-            output_ids, new_tokens, idx, turns = outputs
+            output_ids, new_tokens, idx, turns, _ = outputs
         else:
-            output_ids = outputs
+            output_ids, _ = outputs
         output = stage_model.tokenizer.decode(output_ids[0])
         print('\n=========OUTPUT=========')
         print(output)

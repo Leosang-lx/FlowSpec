@@ -228,6 +228,10 @@ class TPEaModel(nn.Module):
         # no kv_cache for the draft stage
         kv_cache=(past_key_values, past_key_values_data, current_length_data) if not self.is_draft_stage else None
 
+        if self.is_draft_stage:
+            decode_start = torch.cuda.Event(enable_timing=True)
+            decode_end = torch.cuda.Event(enable_timing=True)
+            decode_start.record()
         for idx_spec in range(max_length):
             # if config.stage == 0:
             #     print(f'rank: {config.stage} start idx_spec: {idx_spec}')
@@ -330,11 +334,14 @@ class TPEaModel(nn.Module):
                 if should_stop.item():
                     break
         if self.is_draft_stage:
+            decode_end.record()
+            torch.cuda.synchronize()
+            decode_time = decode_start.elapsed_time(decode_end) / 1000.0  # convert ms to seconds
             if not log:
-                return input_ids
+                return input_ids, decode_time
             else:
                 # print(f'skip_count: {skip_count}')
-                return input_ids, new_token, idx_spec, turns_cnt
+                return input_ids, new_token, idx_spec, turns_cnt, decode_time
 
 @torch.no_grad()
 def update_tp_inference_inputs(
