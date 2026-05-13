@@ -110,7 +110,7 @@ class StageEaModel(nn.Module):
         
         # [UPDATE NEW]: load draft model first to avoid OOM
         # [MODIFIED] load draft model when config.has_draft_model==True
-        if model_config.has_draft_model:   
+        if model_config.has_draft_model:
             assert ea_model_path is not None
             config_path = os.path.join(ea_model_path, 'config.json')
             if not os.path.exists(config_path):
@@ -393,6 +393,8 @@ class StageEaModel(nn.Module):
             pipeline_forward = self._continuous_pipeline
         elif pipeline_type == "pipedec":
             pipeline_forward = self._run_pipedec
+        elif pipeline_type == "ar":
+            pipeline_forward = self._ar_pipeline
         else:
             raise ValueError(f"Invalid pipeline type: {pipeline_type}")
 
@@ -443,10 +445,14 @@ class StageEaModel(nn.Module):
             # orig, hidden_state = chunked_prefill(self, input_ids=input_ids, prof=profiler)
             orig, hidden_state = pipeline_prefill(self, input_ids=input_ids, prof=profiler)
             
-            new_token = 0
             token = gen_token(logits=orig[:, -1], logits_processor=logits_processor)
-            global skip_count 
-            skip_count = 0
+            if pipeline_type == "ar":
+                input_ids = torch.cat([input_ids, token.to(input_ids.device)], dim=1)
+                new_token = 1
+            else:
+                new_token = 0
+                global skip_count
+                skip_count = 0
 
         else:
             # chunked_prefill(self, stage_past_key_values=past_key_values, prof=profiler)
@@ -466,17 +472,22 @@ class StageEaModel(nn.Module):
             decode_start.record()
         for idx_spec in range(max_length):
             if config.is_draft_stage:
-                outputs = pipeline_forward(
-                    logits_processor=logits_processor,
-                    input_ids=input_ids,
-                    token=token,
-                    hidden_state=hidden_state,
-                    new_token=new_token,
-                    max_new_tokens=max_new_tokens,
-                    max_length=max_length,
-                    log=log,
-                    prof=profiler
-                )
+                if pipeline_type == "ar":
+                    token = pipeline_forward(logits_processor=logits_processor, token=token)
+                    input_ids = torch.cat([input_ids, token.to(input_ids.device)], dim=1)
+                    new_token += 1
+                else:
+                    outputs = pipeline_forward(
+                        logits_processor=logits_processor,
+                        input_ids=input_ids,
+                        token=token,
+                        hidden_state=hidden_state,
+                        new_token=new_token,
+                        max_new_tokens=max_new_tokens,
+                        max_length=max_length,
+                        log=log,
+                        prof=profiler
+                    )
             elif config.is_first_stage:
                 outputs = pipeline_forward(
                     kv_cache=kv_cache,
@@ -492,26 +503,44 @@ class StageEaModel(nn.Module):
                 outputs = pipeline_forward(kv_cache, logits_processor, prof=profiler)
 
             if self.is_draft_stage:
-                input_ids, hidden_state, token, accept_length, turns = outputs
-                # assert accept_length == len(input_ids[0, input_len:]) - new_token, f'accept_length: {accept_length} != len(input_ids[0, input_len:]) - new_token: {len(input_ids[0, input_len:]) - new_token}'
-                new_token += accept_length
-                if log:
-                    # print(f'{idx_spec}th round, accept_length: {accept_length} in {turns} turns')
-                    turns_cnt += turns
-
-                if input_ids is not None and self.tokenizer is not None:
-                    if is_llama3 and stop_token_id in input_ids[0, input_len:].tolist():
+                if pipeline_type == "ar":
+                    if log:
+                        turns_cnt += 4
+                    if is_llama3 and stop_token_id == token.item():
                         should_stop = torch.tensor(1, dtype=torch.int32, device=self.stage_base_model.device)
-                    elif self.tokenizer.eos_token_id in input_ids[0, input_len:].tolist():
+                    elif self.tokenizer.eos_token_id == token.item():
                         should_stop = torch.tensor(1, dtype=torch.int32, device=self.stage_base_model.device)
                     elif new_token > max_new_tokens:
                         should_stop = torch.tensor(1, dtype=torch.int32, device=self.stage_base_model.device)
                     elif input_ids.shape[1] > max_length:
                         should_stop = torch.tensor(1, dtype=torch.int32, device=self.stage_base_model.device)
-                    
+                    else:
+                        should_stop = torch.tensor(0, dtype=torch.int32, device=self.stage_base_model.device)
                     broadcast(should_stop, src=0)
                     if should_stop.item() == 1:
                         break
+
+                else:
+                    input_ids, hidden_state, token, accept_length, turns = outputs
+                    # assert accept_length == len(input_ids[0, input_len:]) - new_token, f'accept_length: {accept_length} != len(input_ids[0, input_len:]) - new_token: {len(input_ids[0, input_len:]) - new_token}'
+                    new_token += accept_length
+                    if log:
+                        # print(f'{idx_spec}th round, accept_length: {accept_length} in {turns} turns')
+                        turns_cnt += turns
+
+                    if input_ids is not None and self.tokenizer is not None:
+                        if is_llama3 and stop_token_id in input_ids[0, input_len:].tolist():
+                            should_stop = torch.tensor(1, dtype=torch.int32, device=self.stage_base_model.device)
+                        elif self.tokenizer.eos_token_id in input_ids[0, input_len:].tolist():
+                            should_stop = torch.tensor(1, dtype=torch.int32, device=self.stage_base_model.device)
+                        elif new_token > max_new_tokens:
+                            should_stop = torch.tensor(1, dtype=torch.int32, device=self.stage_base_model.device)
+                        elif input_ids.shape[1] > max_length:
+                            should_stop = torch.tensor(1, dtype=torch.int32, device=self.stage_base_model.device)
+
+                        broadcast(should_stop, src=0)
+                        if should_stop.item() == 1:
+                            break
             else:
                 should_stop = broadcast(src=0, data_type=torch.int32, shape_length=0)
                 if should_stop.item():
@@ -526,6 +555,47 @@ class StageEaModel(nn.Module):
                 # print(f'skip_count: {skip_count}')
                 return input_ids, new_token, idx_spec, turns_cnt, decode_time
             
+    def _ar_pipeline(
+        self,
+        kv_cache=None,
+        logits_processor=None,
+        token=None,
+        prof=None,
+        **kwargs
+    ):
+        """Autoregressive single-token pipeline.
+
+        Stage 0: sends token to Stage 1, receives hidden_state from Stage 4,
+                 computes lm_head on Stage 0 and returns the next token.
+        Stages 1-4: receive, forward, send hidden_state along the ring.
+        """
+        config = self.config
+        device = self.stage_base_model.device
+        comm = self.comm
+
+        if self.is_draft_stage:
+            comm.sendto(token.long().cpu(), config.next_rank)
+            hidden_state = comm.recvfrom(config.last_rank, device=device)
+            logits = self.stage_base_model.lm_head(hidden_state)
+            next_token = gen_token(logits=logits[:, -1, :], logits_processor=logits_processor)
+            return next_token
+
+        past_key_values, past_key_values_data, current_length_data = kv_cache
+
+        if self.is_first_stage:
+            recv_token = comm.recvfrom(config.last_rank, device=device)
+            _, hidden_state = self(
+                input_ids=recv_token,
+                past_key_values=past_key_values,
+            )
+        else:
+            hidden_state = comm.recvfrom(config.last_rank, device=device)
+            _, hidden_state = self(
+                inputs_embeds=hidden_state,
+                past_key_values=past_key_values,
+            )
+        comm.sendto(hidden_state.cpu(), config.next_rank)
+
     def _serial_pipeline(
         self,
         kv_cache=None,
