@@ -443,7 +443,7 @@ class StageEaModel(nn.Module):
             input_ids = input_ids.clone()
             input_len = input_ids.shape[1]
             # orig, hidden_state = chunked_prefill(self, input_ids=input_ids, prof=profiler)
-            orig, hidden_state = pipeline_prefill(self, input_ids=input_ids, prof=profiler)
+            orig, hidden_state = pipeline_prefill(self, input_ids=input_ids, prof=None)
             
             token = gen_token(logits=orig[:, -1], logits_processor=logits_processor)
             if pipeline_type == "ar":
@@ -456,7 +456,7 @@ class StageEaModel(nn.Module):
 
         else:
             # chunked_prefill(self, stage_past_key_values=past_key_values, prof=profiler)
-            pipeline_prefill(self, stage_past_key_values=past_key_values, prof=profiler)
+            pipeline_prefill(self, stage_past_key_values=past_key_values, prof=None)
         # dist.barrier()
         should_stop = torch.tensor(0, dtype=torch.int32)
 
@@ -574,26 +574,30 @@ class StageEaModel(nn.Module):
         comm = self.comm
 
         if self.is_draft_stage:
-            comm.sendto(token.long().cpu(), config.next_rank)
-            hidden_state = comm.recvfrom(config.last_rank, device=device)
-            logits = self.stage_base_model.lm_head(hidden_state)
-            next_token = gen_token(logits=logits[:, -1, :], logits_processor=logits_processor)
+            with prof.time_context(f"Stage {config.stage}: ar pipeline forward", cpu=True) if prof is not None else nullcontext():
+                comm.sendto(token.long().cpu(), config.next_rank)
+                hidden_state = comm.recvfrom(config.last_rank, device=device)
+            with prof.time_context(f"Stage {config.stage}: lm_head", cpu=False) if prof is not None else nullcontext():
+                logits = self.stage_base_model.lm_head(hidden_state)
+                next_token = gen_token(logits=logits[:, -1, :], logits_processor=logits_processor)
             return next_token
 
         past_key_values, past_key_values_data, current_length_data = kv_cache
 
         if self.is_first_stage:
             recv_token = comm.recvfrom(config.last_rank, device=device)
-            _, hidden_state = self(
-                input_ids=recv_token,
-                past_key_values=past_key_values,
-            )
+            with prof.time_context(f"Stage {config.stage}: ar forward", cpu=False) if prof is not None else nullcontext():
+                _, hidden_state = self(
+                    input_ids=recv_token,
+                    past_key_values=past_key_values,
+                )
         else:
             hidden_state = comm.recvfrom(config.last_rank, device=device)
-            _, hidden_state = self(
-                inputs_embeds=hidden_state,
-                past_key_values=past_key_values,
-            )
+            with prof.time_context(f"Stage {config.stage}: ar forward", cpu=False) if prof is not None else nullcontext():
+                _, hidden_state = self(
+                    inputs_embeds=hidden_state,
+                    past_key_values=past_key_values,
+                )
         comm.sendto(hidden_state.cpu(), config.next_rank)
 
     def _serial_pipeline(
